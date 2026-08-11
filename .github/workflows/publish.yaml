@@ -12,7 +12,7 @@ jobs:
       REPO_NAME: ${{ github.repository }}
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           submodules: recursive
 
@@ -23,7 +23,7 @@ jobs:
           "tag=$tag" | Out-File -Append -FilePath $Env:GITHUB_ENV
 
       - name: Set up .NET
-        uses: actions/setup-dotnet@v1
+        uses: actions/setup-dotnet@v5
         with:
           dotnet-version: 10.0.x
       - name: Set up Rust
@@ -39,25 +39,82 @@ jobs:
 
       - name: Build Plugin
         run: dotnet build --no-restore -c Release Gatherbuddy/Gatherbuddy.csproj -p:AssemblyVersion=${{ env.tag }} -p:FileVersion=${{ env.tag }} -p:PackageVersion=${{ env.tag }} -p:InformationalVersion=${{ env.tag }} --output .\build
-      - name: Build raphael-cli from raphael-rs
+      - name: Run Donatello Vulcan acceptance harness
+        run: dotnet run --project GatherBuddy.Vulcan.Tests/GatherBuddy.Vulcan.Tests.csproj -c Release
+      - name: Test pinned Donatello workspace
+        run: cargo test --locked --workspace --manifest-path donatello/Cargo.toml
+      - name: Build pinned Donatello native solver and Raphael CLI
         run: |
-          git clone https://github.com/KonaeAkira/raphael-rs.git raphael-rs-temp
-          cd raphael-rs-temp
-          cargo build --release --package raphael-cli
+          cd donatello
+          cargo build --locked --release --package raphael-cli --package donatello-ffi
           if ($LASTEXITCODE -ne 0) {
             Write-Host "Error: Failed to build raphael-cli"
             exit 1
           }
           Copy-Item -Path ".\target\release\raphael-cli.exe" -Destination "..\build\raphael-cli.exe" -Force
+          Copy-Item -Path ".\target\release\donatello_ffi.dll" -Destination "..\build\donatello_ffi.dll" -Force
           cd ..
-          Remove-Item -Recurse -Force raphael-rs-temp
-          Write-Host "Successfully built and copied raphael-cli.exe"
+          Write-Host "Successfully built and copied pinned Raphael CLI and Donatello FFI"
 
       - name: Zip Plugin
-        run: Compress-Archive -Path .\build\* -DestinationPath .\build\GatherbuddyReborn.zip
+        run: Compress-Archive -Path .\build\* -DestinationPath .\build\GatherBuddyAscended.zip
 
       - name: Publish Plugin
         uses: softprops/action-gh-release@v3
         with:
-          files: ./build/GatherbuddyReborn.zip
+          files: ./build/GatherBuddyAscended.zip
           token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload plugin for GitHub Pages
+        uses: actions/upload-artifact@v4
+        with:
+          name: pages-plugin
+          path: ./build/GatherBuddyAscended.zip
+          if-no-files-found: error
+
+  DeployPages:
+    needs: Build
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v6
+
+      - name: Download plugin
+        uses: actions/download-artifact@v4
+        with:
+          name: pages-plugin
+          path: _site
+
+      - name: Build Dalamud repository feed
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          mkdir -p _site
+          download_url="https://slobodaapl.github.io/GatherBuddyAscended/GatherBuddyAscended.zip"
+          jq \
+            --arg version "$RELEASE_TAG" \
+            --arg download "$download_url" \
+            '. + {
+              AssemblyVersion: $version,
+              TestingAssemblyVersion: $version,
+              DownloadLinkInstall: $download,
+              DownloadLinkUpdate: $download,
+              DownloadLinkTesting: $download
+            } | [.]' \
+            manifest.json > _site/pluginmaster.json
+
+      - name: Upload GitHub Pages artifact
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: _site
+
+      - name: Deploy GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

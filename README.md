@@ -1,51 +1,93 @@
-# [![](https://raw.githubusercontent.com/FFXIV-CombatReborn/RebornAssets/main/IconAssets/GBR_Icon.png)](https://github.com/FFXIV-CombatReborn/GatherBuddyReborn)
+<p align="center">
+  <a href="https://github.com/slobodaapl/GatherBuddyAscended">
+    <img src="images/gba.png" alt="GatherBuddy Ascended">
+  </a>
+</p>
 
-**GatherBuddyReborn**
+# GatherBuddy Ascended
 
-![Github Latest Releases](https://img.shields.io/github/downloads/FFXIV-CombatReborn/GatherBuddyReborn/latest/total.svg?style=for-the-badge)
-![Github All Releases](https://img.shields.io/github/downloads/FFXIV-CombatReborn/GatherBuddyReborn/total.svg?style=for-the-badge)
-![Github License](https://img.shields.io/github/license/FFXIV-CombatReborn/GatherBuddyReborn.svg?label=License&style=for-the-badge)
-[![](https://dcbadge.limes.pink/api/server/p54TZMPnC9)](https://discord.gg/p54TZMPnC9)
+[![Latest release](https://img.shields.io/github/v/release/slobodaapl/GatherBuddyAscended?style=for-the-badge)](https://github.com/slobodaapl/GatherBuddyAscended/releases/latest)
+![GitHub downloads](https://img.shields.io/github/downloads/slobodaapl/GatherBuddyAscended/total?style=for-the-badge)
+[![License](https://img.shields.io/github/license/slobodaapl/GatherBuddyAscended?style=for-the-badge)](LICENSE)
 
-GatherBuddyReborn is a community-made fork of the original GatherBuddy plugin for Final Fantasy XIV. This tool is designed to enhance your gameplay experience by assisting with all things gathering, now with automated routes via vnavmesh.
+GatherBuddy Ascended is a Dalamud plugin for Final Fantasy XIV gathering and crafting automation.
+It continues from [GatherBuddy Reborn](https://github.com/FFXIV-CombatReborn/GatherBuddyReborn),
+preserves its established gathering workflows, and provides a home for deeper crafting integration,
+quality-of-life work, and future features beyond the Reborn baseline.
 
-## Features
+## Current features
 
-- **AutoGather**: Automated pathing for gathering up to 10 full stacks (999 each) of a resource.
-- **Resource Queueing**: Create a list of resources you want and GBR will gather up to 10 stacks of each!
-- **Full BTN/MIN Automation**: GBR can find any BTN/MIN item in the world and gather it for you fully automatically, no user input required beyond initial setup
+### Gathering
 
-**NOTE**: vnavmesh plugin is *required* for full automation. Please see the links section of this README for more information on vnavmesh.
-  
+- Automated BTN/MIN gathering and navigation.
+- Resource lists and queued gathering goals.
+- Timed-node, weather, fishing, and spearfishing tools.
+- Vendor, marketboard, retainer, and material-source support used by crafting workflows.
+
+[vnavmesh](https://github.com/awgil/ffxiv_navmesh) is required for automated navigation.
+
+### Crafting
+
+- Crafting lists, material planning, consumable handling, repairs, and queue execution.
+- **Donatello** is the default crafting solver. Standard Solver, Raphael, Progress Only, and user
+  macros remain available.
+- Donatello combines Raphael's global optimization with live-state replanning. It reacts to expert
+  craft conditions, current CP/durability/progress/quality, active effects, combos, and specialist
+  charges, then optimizes the complete remaining craft.
+
+### Donatello benchmark
+
+We replayed Raphael plans, injected every supported observed condition at every action boundary,
+and asked Donatello to optimize the same remaining craft.
+
+| Corpus | Scenarios | Better plans | Equivalent plans | Worse plans | Solver failures |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Quick | 270 | 97 | 161 | 12 | 0 |
+| Full action set | 189 | 55 | 133 | 1 | 0 |
+
+Every selected Donatello plan completed its craft. Worse plans are discarded and replaced by standard solve any time they're detected, as such it's safe and cannot fail. The benchmark is reproducible from the bundled
+[`donatello-bench`](donatello/donatello-bench) crate.
+
+## Direction
+
+GatherBuddy Ascended continues beyond GatherBuddy Reborn with Donatello and ongoing quality-of-life improvements.
+
 ## Installing
-- Enter `/xlsettings` in the chat window and go to the Experimental tab in the opening window.
-- **Skip below the DevPlugins section to the Custom Plugin Repositories section.**
-- Copy and paste the repo.json link into the first free text input field.
+
+Add this URL under `/xlsettings` → **Experimental** → **Custom Plugin Repositories**:
+
+```text
+https://slobodaapl.github.io/GatherBuddyAscended/pluginmaster.json
 ```
-https://raw.githubusercontent.com/FFXIV-CombatReborn/CombatRebornRepo/main/pluginmaster.json
+
+GatherBuddy Ascended will then appear in the Dalamud Plugin Installer. Install and configure
+[vnavmesh](https://github.com/awgil/ffxiv_navmesh) for automated navigation.
+
+## Building
+
+Clone recursively so all pinned dependencies, including Donatello, are present:
+
+```text
+git clone --recurse-submodules git@github.com:slobodaapl/GatherBuddyAscended.git
 ```
-- Click on the + button and make sure the checkmark beside the new field is set afterwards.
-- **Click on the Save-icon in the bottom right.**
 
-Following these steps, you should be able to see all contained plugins in the Available Plugins tab in the Dalamud Plugin Installer.
-No Plugins will be installed, you have just made them available. You can now select which of these plugins you actually want to install.
+Release CI builds the .NET plugin plus the pinned `donatello_ffi.dll` and compatibility
+`raphael-cli.exe`, then packages them together as `GatherBuddyAscended.zip`.
 
-## Want to contribute?
+## Contributing
 
-- Create a fork
-- Make your changes
-- Test the changes
-- Create a PR and point it to main
+1. Fork the repository and clone it recursively.
+2. Keep changes scoped and preserve unrelated behavior.
+3. Build and test affected .NET and Rust components.
+4. Open a pull request against `main` with behavior, evidence, and known limitations described.
 
-## Links
+## Attribution and acknowledgements
 
-[vnavmesh](https://github.com/awgil/ffxiv_navmesh) Required for automated navigation
+GatherBuddy Ascended builds on substantial prior work. Attribution does not imply endorsement:
 
-## Attribution and Acknowledgements
-
-GatherBuddyReborn and its various functions relies heavily on the original foundations of various individuals whom without their prior works GatherBuddyReborn would not be the utility it is today and in the future. These attributions are NOT implied as endorsements of GatherBuddyReborn. In alphabetical order:
-
-    - All of the contributors to Dalamud and FFXIVLauncher
-    - [Artisan](https://github.com/PunishXIV/Artisan): Taurenkey, pksage, Limiana, et al.
-    - [GatherBuddy](https://github.com/Ottermandias/GatherBuddy): Ottermandias, et al.
-    - [vnavmesh](https://github.com/awgil/ffxiv_navmesh): awgil, xanderscore, et al.
+- Contributors to Dalamud and FFXIVLauncher.
+- [Artisan](https://github.com/PunishXIV/Artisan): Taurenkey, pksage, Limiana, and contributors.
+- [GatherBuddy](https://github.com/Ottermandias/GatherBuddy): Ottermandias and contributors.
+- [GatherBuddy Reborn](https://github.com/FFXIV-CombatReborn/GatherBuddyReborn): the Combat Reborn team and contributors.
+- [Raphael XIV](https://github.com/KonaeAkira/raphael-rs): KonaeAkira and contributors; foundation of the pinned Donatello solver fork.
+- [vnavmesh](https://github.com/awgil/ffxiv_navmesh): awgil, xanderscore, and contributors.

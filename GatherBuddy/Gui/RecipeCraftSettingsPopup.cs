@@ -645,6 +645,11 @@ public class RecipeCraftSettingsPopup
                 _editingSettings.SelectedMacroId = null;
                 _editingSettings.SolverOverride = SolverOverrideMode.RaphaelSolver;
             }
+            if (ImGui.Selectable("Donatello", _editingSettings.SolverOverride == SolverOverrideMode.DonatelloSolver))
+            {
+                _editingSettings.SelectedMacroId = null;
+                _editingSettings.SolverOverride = SolverOverrideMode.DonatelloSolver;
+            }
             if (ImGui.Selectable("Progress Only", _editingSettings.SolverOverride == SolverOverrideMode.ProgressOnlySolver))
             {
                 _editingSettings.SelectedMacroId = null;
@@ -684,6 +689,7 @@ public class RecipeCraftSettingsPopup
         {
             SolverOverrideMode.StandardSolver     => "Standard Solver",
             SolverOverrideMode.RaphaelSolver      => "Raphael Solver",
+            SolverOverrideMode.DonatelloSolver    => "Donatello",
             SolverOverrideMode.ProgressOnlySolver => "Progress Only",
             _ when !string.IsNullOrEmpty(macroId) => allMacros.FirstOrDefault(m => m.Id == macroId)?.Name ?? "(Macro Not Found)",
             _                                     => "Default (Use Solver)",

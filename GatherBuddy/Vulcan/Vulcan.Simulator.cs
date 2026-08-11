@@ -84,7 +84,7 @@ public static class Simulator
                 next.Durability = Math.Min(craft.CraftDurability, next.Durability + repair);
             }
 
-            next.Condition = action is VulcanSkill.FinalAppraisal or VulcanSkill.HeartAndSoul ? step.Condition : GetNextCondition(craft, step, nextStateRoll);
+            next.Condition = SkipUpdates(action) ? step.Condition : GetNextCondition(craft, step, nextStateRoll);
 
             return (success ? ExecuteResult.Succeeded : ExecuteResult.Failed, next);
         }
@@ -137,7 +137,7 @@ public static class Simulator
             _ => true
         } && craft.StatLevel >= MinLevel(action) && step.RemainingCP >= GetCPCost(step, action);
 
-        public static bool SkipUpdates(VulcanSkill action) => action is VulcanSkill.CarefulObservation or VulcanSkill.FinalAppraisal or VulcanSkill.HeartAndSoul or VulcanSkill.MaterialMiracle;
+        public static bool SkipUpdates(VulcanSkill action) => action is VulcanSkill.CarefulObservation or VulcanSkill.FinalAppraisal or VulcanSkill.HeartAndSoul or VulcanSkill.MaterialMiracle or VulcanSkill.QuickInnovation;
         public static bool ConsumeHeartAndSoul(VulcanSkill action) => action is VulcanSkill.IntensiveSynthesis or VulcanSkill.PreciseTouch or VulcanSkill.TricksOfTrade;
 
         public static int MinLevel(VulcanSkill action) => action switch
@@ -369,7 +369,7 @@ public static class Simulator
                 Condition.Malleable => ConditionFlags.Malleable,
                 Condition.Primed => ConditionFlags.Primed,
                 Condition.GoodOmen => ConditionFlags.GoodOmen,
-                Condition.Unknown => throw new NotImplementedException(),
+                _ => throw new NotImplementedException($"Unsupported crafting condition {condition}"),
             };
         }
     }

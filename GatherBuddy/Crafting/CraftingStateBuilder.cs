@@ -368,6 +368,6 @@ public static GameStateBuilder.PlayerStats GetCurrentPlayerStats()
 
     public static StepState BuildInitialStepState(CraftState craft)
     {
-        return GameStateBuilder.BuildInitialStepState(craft, startingQuality: 0);
+        return GameStateBuilder.BuildInitialStepState(craft, craft.InitialQuality);
     }
 }

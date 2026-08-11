@@ -10,12 +10,14 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v6
         with:
-          submodules: true
+          submodules: recursive
 
       - name: Set up .NET
         uses: actions/setup-dotnet@v5
         with:
           dotnet-version: '10.0.x'
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
 
       - name: Download Dalamud Latest
         run: |
@@ -27,16 +29,19 @@ jobs:
 
       - name: Build Plugin
         run: dotnet build --no-restore -c Release Gatherbuddy/Gatherbuddy.csproj --output .\build
-      - name: Build raphael-cli from raphael-rs
+      - name: Run Donatello Vulcan acceptance harness
+        run: dotnet run --project GatherBuddy.Vulcan.Tests/GatherBuddy.Vulcan.Tests.csproj -c Release
+      - name: Test pinned Donatello workspace
+        run: cargo test --locked --workspace --manifest-path donatello/Cargo.toml
+      - name: Build pinned Donatello native solver and Raphael CLI
         run: |
-          git clone https://github.com/KonaeAkira/raphael-rs.git raphael-rs-temp
-          cd raphael-rs-temp
-          cargo build --release --package raphael-cli
+          cd donatello
+          cargo build --locked --release --package raphael-cli --package donatello-ffi
           if ($LASTEXITCODE -ne 0) {
             Write-Host "Error: Failed to build raphael-cli"
             exit 1
           }
           Copy-Item -Path ".\target\release\raphael-cli.exe" -Destination "..\build\raphael-cli.exe" -Force
+          Copy-Item -Path ".\target\release\donatello_ffi.dll" -Destination "..\build\donatello_ffi.dll" -Force
           cd ..
-          Remove-Item -Recurse -Force raphael-rs-temp
-          Write-Host "Successfully built and copied raphael-cli.exe"
+          Write-Host "Successfully built and copied pinned Raphael CLI and Donatello FFI"

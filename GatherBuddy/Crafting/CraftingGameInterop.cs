@@ -61,6 +61,7 @@ public static class CraftingGameInterop
     private static uint? _currentRecipeId = null;
     private static Vulcan.CraftState? _vulcanCraftState = null;
     private static Vulcan.StepState? _vulcanStepState = null;
+    private static bool _vulcanPredictionPendingObservation;
     private static CraftingActionExecutor? _actionExecutor = null;
     private static CraftingQualityPolicy? _currentQualityPolicy = null;
     private static Dictionary<uint, int>? _currentIngredientPreferences = null;
@@ -106,6 +107,9 @@ public static class CraftingGameInterop
                 CraftingProcessor.RegisterSolver(new Vulcan.StandardSolverDefinition());
                 GatherBuddy.Log.Debug($"[CraftingGameInterop] Registered StandardSolver");
                 break;
+            case VulcanSolverMode.Donatello:
+                CraftingProcessor.RegisterSolver(new Vulcan.DonatelloSolverDefinition(GatherBuddy.RaphaelSolveCoordinator));
+                break;
         }
     }
 
@@ -128,6 +132,9 @@ public static class CraftingGameInterop
             case VulcanSolverMode.StandardSolver:
                 CraftingProcessor.RegisterSolver(new Vulcan.StandardSolverDefinition());
                 GatherBuddy.Log.Debug($"[CraftingGameInterop] Reloaded: Registered StandardSolver");
+                break;
+            case VulcanSolverMode.Donatello:
+                CraftingProcessor.RegisterSolver(new Vulcan.DonatelloSolverDefinition(GatherBuddy.RaphaelSolveCoordinator));
                 break;
         }
     }
@@ -153,6 +160,9 @@ public static class CraftingGameInterop
                 CraftingProcessor.RegisterSolver(new Vulcan.StandardSolverDefinition());
                 GatherBuddy.Log.Debug($"[CraftingGameInterop] Registered StandardSolver");
                 break;
+            case VulcanSolverMode.Donatello:
+                CraftingProcessor.RegisterSolver(new Vulcan.DonatelloSolverDefinition(GatherBuddy.RaphaelSolveCoordinator));
+                break;
         }
     }
 
@@ -163,6 +173,7 @@ public static class CraftingGameInterop
         _currentState = CraftState.IdleNormal;
         _vulcanCraftState = null;
         _vulcanStepState = null;
+        _vulcanPredictionPendingObservation = false;
         _currentQualityPolicy = null;
         _currentSelectedMacroId = null;
         _lastPreparationFailure = null;
@@ -967,6 +978,7 @@ public static class CraftingGameInterop
             if (result == Vulcan.Simulator.ExecuteResult.Succeeded || result == Vulcan.Simulator.ExecuteResult.Failed)
             {
                 _vulcanStepState = nextStep;
+                _vulcanPredictionPendingObservation = true;
             }
         }
         catch (Exception ex)
@@ -1312,7 +1324,8 @@ public static class CraftingGameInterop
             var liveRaphaelRequest = RaphaelSolveRequest.FromCraftState(_vulcanCraftState, GatherBuddy.Config.RaphaelSolverConfig.RaphaelAllowSpecialistActions);
             GatherBuddy.Log.Debug($@"[Crafting] Live Raphael request at craft start: {liveRaphaelRequest.GetKey()}");
         }
-        _vulcanStepState = CraftingStateBuilder.BuildInitialStepState(_vulcanCraftState);
+        _vulcanStepState = CraftingStateBuilder.BuildInitialStepState(_vulcanCraftState!);
+        _vulcanPredictionPendingObservation = false;
         if (_vulcanCraftState != null && _vulcanStepState != null)
         {
             CraftingProcessor.OnCraftStarted(_vulcanCraftState, _vulcanStepState, _currentRecipeId.Value, false);
@@ -1341,10 +1354,20 @@ public static class CraftingGameInterop
                 return CraftState.InProgress;
 
             _nextActionAllowedAt = DateTime.MinValue;
-            var cachedRecommendation = CraftingProcessor.NextRecommendation;
-            if (cachedRecommendation.Action != VulcanSkill.None && _vulcanCraftState != null && _vulcanStepState != null)
-                ExecuteSolverRecommendation(_vulcanCraftState, _vulcanStepState, cachedRecommendation);
-            return CraftState.InProgress;
+            var delayedActual = _vulcanCraftState != null && _vulcanStepState != null
+                ? SynthesisReader.ReadCurrentStepState(_vulcanCraftState, _vulcanStepState)
+                : null;
+            if (delayedActual == null
+                || _vulcanStepState == null
+                || StepStateReconciler.ObservableEquivalent(_vulcanStepState, delayedActual))
+            {
+                var cachedRecommendation = CraftingProcessor.NextRecommendation;
+                if (cachedRecommendation.Action != VulcanSkill.None && _vulcanCraftState != null && _vulcanStepState != null)
+                    ExecuteSolverRecommendation(_vulcanCraftState, _vulcanStepState, cachedRecommendation);
+                return CraftState.InProgress;
+            }
+
+            GatherBuddy.Log.Debug("[Crafting] Live state changed during execution delay; discarding stale recommendation");
         }
 
         if (_vulcanCraftState != null && _vulcanStepState != null)
@@ -1364,8 +1387,19 @@ public static class CraftingGameInterop
                     return CraftState.WaitFinish;
                 }
                 
-                actualState.PrevComboAction = _vulcanStepState.PrevComboAction;
-                actualState.PrevActionFailed = _vulcanStepState.PrevActionFailed;
+                if (_vulcanPredictionPendingObservation)
+                {
+                    _vulcanPredictionPendingObservation = false;
+                }
+                else if (!StepStateReconciler.TryReconcileExternalAction(
+                             _vulcanCraftState,
+                             _vulcanStepState,
+                             actualState,
+                             out actualState))
+                {
+                    GatherBuddy.Log.Error("[Crafting] Could not infer external crafting action; pausing solver to avoid using a fabricated live state");
+                    return CraftState.InProgress;
+                }
                 _vulcanStepState = actualState;
             }
             else
@@ -1453,6 +1487,7 @@ public static class CraftingGameInterop
         _currentRecipeId = null;
         _vulcanCraftState = null;
         _vulcanStepState = null;
+        _vulcanPredictionPendingObservation = false;
         
         GatherBuddy.Log.Debug($"[Crafting] Craft finished. Preparing={Dalamud.Conditions[ConditionFlag.PreparingToCraft]}, Crafting={Dalamud.Conditions[ConditionFlag.Crafting]}");
         

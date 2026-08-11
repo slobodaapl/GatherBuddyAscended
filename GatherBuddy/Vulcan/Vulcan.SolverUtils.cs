@@ -12,10 +12,10 @@ public static class SolverUtils
 
     public static CraftStatus Status(CraftState craft, StepState step)
     {
-        if (step.Durability <= 0)
-            return CraftStatus.Failed;
         if (step.Progress >= craft.CraftProgress)
             return CraftStatus.Complete;
+        if (step.Durability <= 0)
+            return CraftStatus.Failed;
         return CraftStatus.InProgress;
     }
 

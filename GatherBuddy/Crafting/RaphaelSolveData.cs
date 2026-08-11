@@ -66,6 +66,7 @@ public enum VulcanSolverMode
     PureRaphael,     // Static Raphael rotations only
     StandardSolver,  // Dynamic standard solver
     ProgressOnly,    // Progress-only solver (no quality actions)
+    Donatello,       // Adaptive globally optimizing solver
 }
 
 public class RaphaelSolveCoordinatorConfig
@@ -77,5 +78,5 @@ public class RaphaelSolveCoordinatorConfig
     public bool RaphaelAllowSpecialistActions { get; set; } = false;
     public bool AutoClearSolutionCache { get; set; } = true;
     public int SolutionCacheMaxAgeDays { get; set; } = 30;
-    public VulcanSolverMode SolverMode { get; set; } = VulcanSolverMode.PureRaphael;
+    public VulcanSolverMode SolverMode { get; set; } = VulcanSolverMode.Donatello;
 }

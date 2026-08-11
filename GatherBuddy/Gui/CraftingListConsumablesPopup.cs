@@ -173,6 +173,11 @@ public class CraftingListConsumablesPopup
             selectedMacroId = null;
             solverOverride = SolverOverrideMode.RaphaelSolver;
         }
+        if (ImGui.Selectable("Donatello", solverOverride == SolverOverrideMode.DonatelloSolver))
+        {
+            selectedMacroId = null;
+            solverOverride = SolverOverrideMode.DonatelloSolver;
+        }
         if (ImGui.Selectable("Progress Only", solverOverride == SolverOverrideMode.ProgressOnlySolver))
         {
             selectedMacroId = null;
@@ -212,6 +217,7 @@ public class CraftingListConsumablesPopup
         {
             SolverOverrideMode.StandardSolver     => "Standard Solver",
             SolverOverrideMode.RaphaelSolver      => "Raphael Solver",
+            SolverOverrideMode.DonatelloSolver    => "Donatello",
             SolverOverrideMode.ProgressOnlySolver => "Progress Only",
             _ when !string.IsNullOrEmpty(macroId) => allMacros.FirstOrDefault(m => m.Id == macroId)?.Name ?? "(Macro Not Found)",
             _                                     => "Default (Use Solver)",

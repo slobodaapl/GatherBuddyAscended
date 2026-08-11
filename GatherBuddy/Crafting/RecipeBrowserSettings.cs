@@ -17,6 +17,7 @@ public enum SolverOverrideMode
     StandardSolver,
     RaphaelSolver,
     ProgressOnlySolver,
+    DonatelloSolver,
 }
 
 public class RecipeCraftSettings

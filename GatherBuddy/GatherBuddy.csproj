@@ -7,7 +7,7 @@
     <AssemblyName>GatherBuddyReborn</AssemblyName>
     <Version>7.5.0.0</Version>
     <Company>SoftOtter</Company>
-    <Product>GatherBuddy</Product>
+    <Product>GatherBuddy Ascended</Product>
     <Copyright>Copyright © 2026</Copyright>
     <Deterministic>true</Deterministic>
     <OutputType>Library</OutputType>
@@ -20,13 +20,16 @@
     <CopyLocalLockfileAssemblies>true</CopyLocalLockfileAssemblies>
     <Configurations>Debug;Release</Configurations>
     <Platforms>x64</Platforms>
-    <Name>GatherBuddy Reborn</Name>
+    <Name>GatherBuddy Ascended</Name>
     <Author>The Combat Reborn Team</Author>
     <Description>Adds commands to simplify gathering by finding nodes and fish and their locations via item name and a UI to keep track of special uptime and weather conditions. Also automatically gathers items based on these conditions using lists that you specify. Automated gathering requires vnavmesh.</Description>
     <Punchline>Simplify Gathering and Fishing to the extreme.</Punchline>
 	</PropertyGroup>
 
   <ItemGroup>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleToAttribute">
+      <_Parameter1>GatherBuddy.Vulcan.Tests</_Parameter1>
+    </AssemblyAttribute>
     <Compile Remove="AutoGather\GatheringTracker.cs" />
     <Compile Remove="Plugin\AutoGather.cs" />
   </ItemGroup>

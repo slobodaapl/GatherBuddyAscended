@@ -70,11 +70,13 @@ public static unsafe class SynthesisReader
             Durability = GetDurability(synthWindow),
             RemainingCP = (int)(Dalamud.Objects.LocalPlayer?.CurrentCp ?? 0),
             Condition = GetCondition(synthWindow),
-            TrainedPerfectionAvailable = previousStep?.TrainedPerfectionAvailable ?? true,
+            TrainedPerfectionAvailable = previousStep?.TrainedPerfectionAvailable
+                ?? craft.StatLevel >= Simulator.MinLevel(VulcanSkill.TrainedPerfection),
             HeartAndSoulAvailable = previousStep?.HeartAndSoulAvailable ?? craft.Specialist,
-            QuickInnoAvailable = previousStep?.QuickInnoAvailable ?? false,
+            QuickInnoAvailable = previousStep?.QuickInnoAvailable ?? craft.Specialist,
             MaterialMiracleCharges = previousStep?.MaterialMiracleCharges ?? (craft.MissionHasMaterialMiracle ? 1u : 0u),
-            CarefulObservationLeft = previousStep?.CarefulObservationLeft ?? (craft.Specialist ? 2 : 0),
+            CarefulObservationLeft = previousStep?.CarefulObservationLeft ?? (craft.Specialist ? 3 : 0),
+            QuickInnoLeft = previousStep?.QuickInnoLeft ?? (craft.Specialist ? 1 : 0),
             PrevComboAction = previousStep?.PrevComboAction ?? VulcanSkill.None,
             PrevActionFailed = previousStep?.PrevActionFailed ?? false
         };

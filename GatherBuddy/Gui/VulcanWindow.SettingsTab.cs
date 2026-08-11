@@ -42,7 +42,7 @@ public partial class VulcanWindow
             var raphaelConfig = GatherBuddy.Config.RaphaelSolverConfig;
 
             var currentMode = raphaelConfig.SolverMode;
-            var modeNames = new[] { "Pure Raphael", "Standard Solver", "Progress Only" };
+            var modeNames = new[] { "Pure Raphael", "Standard Solver", "Progress Only", "Donatello" };
             var safeModeIndex = Math.Clamp((int)currentMode, 0, modeNames.Length - 1);
             ImGui.SetNextItemWidth(VulcanUiScaling.Scaled(150f));
             if (ImGui.BeginCombo("Solver Mode###SolverMode", modeNames[safeModeIndex]))
@@ -74,7 +74,19 @@ public partial class VulcanWindow
                     ImGui.TextUnformatted("Reacts to conditions, more flexible");
                     ImGui.EndTooltip();
                 }
-
+                if (ImGui.Selectable("Donatello", currentMode == VulcanSolverMode.Donatello))
+                {
+                    raphaelConfig.SolverMode = VulcanSolverMode.Donatello;
+                    GatherBuddy.Config.Save();
+                    CraftingGameInterop.ReloadSolvers();
+                }
+                if (ImGui.IsItemHovered())
+                {
+                    ImGui.BeginTooltip();
+                    ImGui.TextUnformatted("Donatello: Raphael optimization with live-state replanning");
+                    ImGui.TextUnformatted("Adopts only independently proven strict improvements");
+                    ImGui.EndTooltip();
+                }
                 if (ImGui.Selectable("Progress Only", currentMode == VulcanSolverMode.ProgressOnly))
                 {
                     raphaelConfig.SolverMode = VulcanSolverMode.ProgressOnly;

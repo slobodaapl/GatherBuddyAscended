@@ -55,6 +55,7 @@ public static class CraftingContextResolver
             SolverOverrideMode.StandardSolver => VulcanSolverMode.StandardSolver,
             SolverOverrideMode.RaphaelSolver => VulcanSolverMode.PureRaphael,
             SolverOverrideMode.ProgressOnlySolver => VulcanSolverMode.ProgressOnly,
+            SolverOverrideMode.DonatelloSolver => VulcanSolverMode.Donatello,
             _ => GatherBuddy.Config.RaphaelSolverConfig.SolverMode,
         };
         var selectedMacroId = forceProgressOnlyUnlockCraft ? null : item.CraftSettings?.SelectedMacroId;
@@ -74,7 +75,7 @@ public static class CraftingContextResolver
 
     public static bool UsesRaphaelSolver(CraftingExecutionContext executionContext)
         => !executionContext.UseQuickSynthesis
-            && executionContext.EffectiveSolverMode == VulcanSolverMode.PureRaphael
+            && executionContext.EffectiveSolverMode is VulcanSolverMode.PureRaphael or VulcanSolverMode.Donatello
             && !UsesSelectedMacro(executionContext);
 
     public static bool TryResolveListExecutionContext(
