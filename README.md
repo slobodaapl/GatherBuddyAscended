@@ -40,13 +40,19 @@ quality-of-life work, and future features beyond the Reborn baseline.
 We replayed Raphael plans, injected every supported observed condition at every action boundary,
 and asked Donatello to optimize the same remaining craft.
 
+![Donatello effectiveness grows with recipe level](images/donatello-effectiveness.png)
+
+Across every tested level bracket, Donatello had a non-zero chance of finding a better continuation.
+Its measured effectiveness rises with recipe difficulty (linear fit $`R^2 = 0.86`$), so the benefit is
+expected to grow as the game adds higher-level recipes. At level 100, Donatello found a strictly
+better solution in approximately 55% of simulated replan opportunities.
+
 | Corpus | Scenarios | Better plans | Equivalent plans | Worse plans | Solver failures |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | Quick | 270 | 97 | 161 | 12 | 0 |
 | Full action set | 189 | 55 | 133 | 1 | 0 |
 
-Every selected Donatello plan completed its craft. Worse plans are discarded and replaced by standard solve any time they're detected, as such it's safe and cannot fail. The benchmark is reproducible from the bundled
-[`donatello-bench`](donatello/donatello-bench) crate.
+Every selected Donatello plan completed its craft. Worse plans are discarded and replaced by standard solve any time they're detected, as such it's safe and cannot fail. The benchmark is reproducible from the [`donatello-bench`](donatello/donatello-bench) crate.
 
 ## Direction
 
