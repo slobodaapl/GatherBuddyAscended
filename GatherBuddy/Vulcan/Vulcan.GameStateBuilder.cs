@@ -4,7 +4,7 @@ namespace GatherBuddy.Vulcan;
 
 public static class GameStateBuilder
 {
-    public record PlayerStats(int Craftsmanship, int Control, int CP, int Level, bool Manipulation, bool Specialist, bool SplendorCosmic);
+    public record PlayerStats(int Craftsmanship, int Control, int CP, int Level, bool Manipulation, bool Specialist, bool SplendorCosmic, int CrafterDelineations = 0);
 
     public record RecipeInfo(uint RecipeId, int Level, int Difficulty, int QualityMax, int Durability, int ProgressDivider, int ProgressModifier, int QualityDivider, int QualityModifier, bool CanHQ, bool IsExpert, bool IsCollectible, int QualityMin1, int QualityMin2, int QualityMin3, ConditionFlags ConditionFlags, bool HasMaterialMiracle);
 
@@ -18,6 +18,7 @@ public static class GameStateBuilder
             StatLevel = playerStats.Level,
             UnlockedManipulation = playerStats.Manipulation,
             Specialist = playerStats.Specialist,
+            CrafterDelineations = playerStats.Specialist ? playerStats.CrafterDelineations : 0,
             SplendorCosmic = playerStats.SplendorCosmic,
 
             ItemId = recipe.RecipeId,
@@ -74,6 +75,7 @@ public static class GameStateBuilder
             MuscleMemoryLeft = 0,
             FinalAppraisalLeft = 0,
             CarefulObservationLeft = craft.Specialist ? 3 : 0,
+            CrafterDelineationsLeft = craft.Specialist ? craft.CrafterDelineations : 0,
             ExpedienceLeft = 0,
             QuickInnoLeft = craft.Specialist ? 1 : 0,
 

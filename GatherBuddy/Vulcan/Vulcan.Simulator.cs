@@ -52,6 +52,8 @@ public static class Simulator
             next.MuscleMemoryLeft = action == VulcanSkill.MuscleMemory ? GetNewBuffDuration(step, 5) : GetOldBuffDuration(step.MuscleMemoryLeft, action, next.Progress != step.Progress);
             next.FinalAppraisalLeft = action == VulcanSkill.FinalAppraisal ? GetNewBuffDuration(step, 5) : GetOldBuffDuration(step.FinalAppraisalLeft, action, next.Progress >= craft.CraftProgress);
             next.CarefulObservationLeft = step.CarefulObservationLeft - (action == VulcanSkill.CarefulObservation ? 1 : 0);
+            next.CrafterDelineationsLeft = step.CrafterDelineationsLeft
+                - (action is VulcanSkill.CarefulObservation or VulcanSkill.HeartAndSoul or VulcanSkill.QuickInnovation ? 1 : 0);
             next.HeartAndSoulActive = action == VulcanSkill.HeartAndSoul || step.HeartAndSoulActive && (step.Condition is Condition.Good or Condition.Excellent || !ConsumeHeartAndSoul(action));
             next.HeartAndSoulAvailable = step.HeartAndSoulAvailable && action != VulcanSkill.HeartAndSoul;
             next.QuickInnoLeft = step.QuickInnoLeft - (action == VulcanSkill.QuickInnovation ? 1 : 0);
@@ -128,11 +130,11 @@ public static class Simulator
             VulcanSkill.ByregotsBlessing => step.IQStacks > 0,
             VulcanSkill.TrainedEye => !craft.CraftExpert && craft.StatLevel >= craft.CraftLevel + 10 && step.Index == 1,
             VulcanSkill.Manipulation => craft.UnlockedManipulation,
-            VulcanSkill.CarefulObservation => step.CarefulObservationLeft > 0,
-            VulcanSkill.HeartAndSoul => step.HeartAndSoulAvailable,
+            VulcanSkill.CarefulObservation => step.CarefulObservationLeft > 0 && step.CrafterDelineationsLeft > 0,
+            VulcanSkill.HeartAndSoul => step.HeartAndSoulAvailable && step.CrafterDelineationsLeft > 0,
             VulcanSkill.TrainedPerfection => step.TrainedPerfectionAvailable,
             VulcanSkill.DaringTouch => step.ExpedienceLeft > 0,
-            VulcanSkill.QuickInnovation => step.QuickInnoLeft > 0 && step.InnovationLeft == 0,
+            VulcanSkill.QuickInnovation => step.QuickInnoLeft > 0 && step.InnovationLeft == 0 && step.CrafterDelineationsLeft > 0,
             VulcanSkill.MaterialMiracle => step.MaterialMiracleCharges > 0 && !step.MaterialMiracleActive,
             _ => true
         } && craft.StatLevel >= MinLevel(action) && step.RemainingCP >= GetCPCost(step, action);

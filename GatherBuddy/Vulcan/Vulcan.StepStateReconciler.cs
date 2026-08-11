@@ -68,6 +68,7 @@ internal static class StepStateReconciler
 
     private static bool PersistentEquivalent(StepState left, StepState right)
         => left.CarefulObservationLeft == right.CarefulObservationLeft
+            && left.CrafterDelineationsLeft == right.CrafterDelineationsLeft
             && left.HeartAndSoulAvailable == right.HeartAndSoulAvailable
             && left.PrevActionFailed == right.PrevActionFailed
             && left.QuickInnoLeft == right.QuickInnoLeft

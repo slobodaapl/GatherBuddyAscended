@@ -69,6 +69,8 @@ public sealed class DonatelloSolver : Solver
     private IntPtr _pendingInterrupt;
     private DateTime _pendingStartedAt;
     private bool _interruptRequested;
+    private bool _progressFallback;
+    private readonly ProgressOnlySolver _progressOnlySolver = new();
 
     public DonatelloSolver(CachedRaphaelSolution initialSolution, CraftState craft)
     {
@@ -79,6 +81,9 @@ public sealed class DonatelloSolver : Solver
 
     public override Recommendation Solve(CraftState craft, StepState step)
     {
+        if (_progressFallback)
+            return _progressOnlySolver.Solve(craft, step) with { Comment = "Donatello completion fallback" };
+
         if (_pendingSolve != null)
         {
             if (!_pendingSolve.IsCompleted)
@@ -111,9 +116,16 @@ public sealed class DonatelloSolver : Solver
         if (_actionIndex >= _plan.Count)
             return new(VulcanSkill.None, "Donatello plan complete");
 
-        var action = _plan[_actionIndex++];
+        var action = _plan[_actionIndex];
         var (result, expected) = Simulator.Execute(_craft, step, action, 0, 1);
-        _expectedState = result == Simulator.ExecuteResult.CantUse ? null : expected;
+        if (result == Simulator.ExecuteResult.CantUse)
+        {
+            _progressFallback = true;
+            GatherBuddy.Log.Error($"[Donatello] Refused unusable planned action {action}; switching to completion fallback");
+            return _progressOnlySolver.Solve(craft, step) with { Comment = "Donatello completion fallback" };
+        }
+        _actionIndex++;
+        _expectedState = expected;
         return new(action, $"Donatello step {_actionIndex}/{_plan.Count}");
     }
 
@@ -154,16 +166,27 @@ public sealed class DonatelloSolver : Solver
                 _plan = candidate;
                 GatherBuddy.Log.Debug($"[Donatello] Adopted strict improvement: quality={candidateScore.Quality}, steps={candidateScore.Steps}");
             }
-            else
+            else if (incumbentScore.Completes)
             {
                 _plan = incumbent;
                 GatherBuddy.Log.Debug("[Donatello] Retained incumbent; candidate did not prove a strict improvement");
             }
+            else
+            {
+                ActivateCompletionFallback("neither native candidate nor incumbent completes from the live state");
+            }
         }
         catch (Exception ex)
         {
-            _plan = incumbent;
-            GatherBuddy.Log.Warning($"[Donatello] Replan failed; retaining incumbent: {ex.Message}");
+            if (DonatelloPlanEvaluator.Evaluate(_craft, root, incumbent).Completes)
+            {
+                _plan = incumbent;
+                GatherBuddy.Log.Warning($"[Donatello] Replan failed; retaining validated incumbent: {ex.Message}");
+            }
+            else
+            {
+                ActivateCompletionFallback($"native replan failed and incumbent does not complete: {ex.Message}");
+            }
         }
         _actionIndex = 0;
         _expectedState = null;
@@ -172,6 +195,13 @@ public sealed class DonatelloSolver : Solver
         _pendingIncumbent = null;
         _pendingInterrupt = IntPtr.Zero;
         _interruptRequested = false;
+    }
+
+    private void ActivateCompletionFallback(string reason)
+    {
+        _plan = [];
+        _progressFallback = true;
+        GatherBuddy.Log.Error($"[Donatello] {reason}; switching to completion fallback");
     }
 
     private static bool CanRepresentLiveRoot(StepState step, out string reason)
@@ -206,6 +236,7 @@ public sealed class DonatelloSolver : Solver
             && expected.MuscleMemoryLeft == actual.MuscleMemoryLeft
             && expected.FinalAppraisalLeft == actual.FinalAppraisalLeft
             && expected.CarefulObservationLeft == actual.CarefulObservationLeft
+            && expected.CrafterDelineationsLeft == actual.CrafterDelineationsLeft
             && expected.HeartAndSoulActive == actual.HeartAndSoulActive
             && expected.HeartAndSoulAvailable == actual.HeartAndSoulAvailable
             && expected.ExpedienceLeft == actual.ExpedienceLeft
@@ -224,7 +255,7 @@ public sealed class DonatelloSolver : Solver
         => $"{step.Index}/{step.Progress}/{step.Quality}/{step.Durability}/{step.RemainingCP}/{(int)step.Condition}/"
             + $"{step.IQStacks}/{step.WasteNotLeft}/{step.ManipulationLeft}/{step.GreatStridesLeft}/"
             + $"{step.InnovationLeft}/{step.VenerationLeft}/{step.MuscleMemoryLeft}/{step.FinalAppraisalLeft}/"
-            + $"{step.CarefulObservationLeft}/{(int)step.PrevComboAction}/{step.HeartAndSoulActive}/"
+            + $"{step.CarefulObservationLeft}/{step.CrafterDelineationsLeft}/{(int)step.PrevComboAction}/{step.HeartAndSoulActive}/"
             + $"{step.HeartAndSoulAvailable}/{step.ExpedienceLeft}/{step.QuickInnoLeft}/"
             + $"{step.QuickInnoAvailable}/{step.TrainedPerfectionActive}/{step.TrainedPerfectionAvailable}/"
             + $"{step.MaterialMiracleCharges}/{step.MaterialMiracleActive}";

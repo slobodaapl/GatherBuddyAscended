@@ -1,5 +1,6 @@
 using GatherBuddy.Vulcan;
 using GatherBuddy.Crafting;
+using System.Text.Json;
 
 var assertions = 0;
 
@@ -34,6 +35,7 @@ static StepState Root(Condition condition = Condition.Normal) => new()
     RemainingCP = 500,
     Condition = condition,
     HeartAndSoulAvailable = true,
+    CrafterDelineationsLeft = 2,
     TrainedPerfectionAvailable = true,
 };
 
@@ -57,11 +59,28 @@ Require(standardRecommendation.Action != VulcanSkill.None
 
 var specialistCraft = Craft();
 specialistCraft.Specialist = true;
+specialistCraft.CrafterDelineations = 1;
 var specialistRoot = GameStateBuilder.BuildInitialStepState(specialistCraft);
 Require(specialistRoot.CarefulObservationLeft == 3,
     "specialists must begin with all three Careful Observation uses");
 Require(specialistRoot.QuickInnoLeft == 1 && specialistRoot.QuickInnoAvailable,
     "specialists must begin with one available Quick Innovation use");
+Require(specialistRoot.CrafterDelineationsLeft == 1,
+    "the live Crafter's Delineation inventory must initialize the shared specialist-action pool");
+
+var oneDelineation = Root() with { QuickInnoLeft = 1, QuickInnoAvailable = true, CrafterDelineationsLeft = 1 };
+var afterQuickInnovation = Simulator.Execute(
+    craft, oneDelineation, VulcanSkill.QuickInnovation, 0, 1).Item2;
+Require(afterQuickInnovation.CrafterDelineationsLeft == 0
+        && !Simulator.CanUseAction(craft, afterQuickInnovation, VulcanSkill.HeartAndSoul),
+    "Quick Innovation must consume the same delineation pool used by Heart and Soul");
+
+using var requestJson = JsonDocument.Parse(DonatelloNative.SerializeRequest(
+    specialistCraft, specialistRoot, allowSpecialistActions: true, backloadProgress: false));
+Require(requestJson.RootElement.GetProperty("abiVersion").GetUInt32() == 2
+        && !requestJson.RootElement.TryGetProperty("AbiVersion", out _)
+        && requestJson.RootElement.GetProperty("root").GetProperty("crafterDelineations").GetInt32() == 1,
+    "Donatello requests must use ABI v2 camelCase fields and include the remaining delineation count");
 var qualityRoot = GameStateBuilder.BuildInitialStepState(Craft() with { InitialQuality = 321 }, 321);
 Require(qualityRoot.Quality == 321, "initial HQ-material quality must survive root construction");
 

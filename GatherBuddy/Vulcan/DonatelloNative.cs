@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Text.Json;
 using Newtonsoft.Json;
 
 namespace GatherBuddy.Vulcan;
@@ -9,7 +10,11 @@ namespace GatherBuddy.Vulcan;
 internal static class DonatelloNative
 {
     private const string LibraryName = "donatello_ffi.dll";
-    private const uint AbiVersion = 1;
+    private const uint AbiVersion = 2;
+    private static readonly JsonSerializerOptions RequestSerializerOptions = new()
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+    };
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
     private static extern uint donatello_abi_version();
@@ -62,46 +67,11 @@ internal static class DonatelloNative
         if (donatello_abi_version() != AbiVersion)
             throw new InvalidOperationException("Unsupported Donatello native ABI version");
 
-        var request = new
-        {
-            AbiVersion,
-            MaxCp = craft.StatCP,
-            MaxDurability = craft.CraftDurability,
-            MaxProgress = craft.CraftProgress,
-            MaxQuality = craft.CraftQualityMax,
-            BaseProgress = Simulator.BaseProgress(craft),
-            BaseQuality = Simulator.BaseQuality(craft),
-            JobLevel = craft.StatLevel,
-            Manipulation = craft.UnlockedManipulation,
-            Specialist = craft.Specialist
-                && GatherBuddy.Config.RaphaelSolverConfig.RaphaelAllowSpecialistActions,
-            BackloadProgress = GatherBuddy.Config.RaphaelSolverConfig.RaphaelBackloadProgress,
-            Root = new
-            {
-                Cp = root.RemainingCP,
-                root.Durability,
-                root.Progress,
-                root.Quality,
-                InnerQuiet = root.IQStacks,
-                WasteNot = root.WasteNotLeft,
-                root.ManipulationLeft,
-                root.InnovationLeft,
-                root.VenerationLeft,
-                root.GreatStridesLeft,
-                root.MuscleMemoryLeft,
-                FinalAppraisal = root.FinalAppraisalLeft,
-                CarefulObservationCharges = root.CarefulObservationLeft,
-                Combo = Combo(root),
-                root.HeartAndSoulActive,
-                root.HeartAndSoulAvailable,
-                QuickInnovationAvailable = root.QuickInnoLeft > 0,
-                root.TrainedPerfectionActive,
-                root.TrainedPerfectionAvailable,
-                Expedience = root.ExpedienceLeft > 0,
-                Condition = (int)root.Condition,
-            },
-        };
-        var bytes = Encoding.UTF8.GetBytes(JsonConvert.SerializeObject(request));
+        var bytes = Encoding.UTF8.GetBytes(SerializeRequest(
+            craft,
+            root,
+            GatherBuddy.Config.RaphaelSolverConfig.RaphaelAllowSpecialistActions,
+            GatherBuddy.Config.RaphaelSolverConfig.RaphaelBackloadProgress));
         IntPtr nativeResponse;
         fixed (byte* data = bytes)
             nativeResponse = interrupt == IntPtr.Zero
@@ -123,6 +93,54 @@ internal static class DonatelloNative
         {
             donatello_string_free(nativeResponse);
         }
+    }
+
+    internal static string SerializeRequest(
+        CraftState craft,
+        StepState root,
+        bool allowSpecialistActions,
+        bool backloadProgress)
+    {
+        var request = new
+        {
+            AbiVersion,
+            MaxCp = craft.StatCP,
+            MaxDurability = craft.CraftDurability,
+            MaxProgress = craft.CraftProgress,
+            MaxQuality = craft.CraftQualityMax,
+            BaseProgress = Simulator.BaseProgress(craft),
+            BaseQuality = Simulator.BaseQuality(craft),
+            JobLevel = craft.StatLevel,
+            Manipulation = craft.UnlockedManipulation,
+            Specialist = craft.Specialist && allowSpecialistActions,
+            BackloadProgress = backloadProgress,
+            Root = new
+            {
+                Cp = root.RemainingCP,
+                root.Durability,
+                root.Progress,
+                root.Quality,
+                InnerQuiet = root.IQStacks,
+                WasteNot = root.WasteNotLeft,
+                root.ManipulationLeft,
+                root.InnovationLeft,
+                root.VenerationLeft,
+                root.GreatStridesLeft,
+                root.MuscleMemoryLeft,
+                FinalAppraisal = root.FinalAppraisalLeft,
+                CarefulObservationCharges = root.CarefulObservationLeft,
+                Combo = Combo(root),
+                root.HeartAndSoulActive,
+                root.HeartAndSoulAvailable,
+                QuickInnovationAvailable = root.QuickInnoAvailable,
+                root.TrainedPerfectionActive,
+                root.TrainedPerfectionAvailable,
+                Expedience = root.ExpedienceLeft > 0,
+                Condition = (int)root.Condition,
+                CrafterDelineations = root.CrafterDelineationsLeft,
+            },
+        };
+        return System.Text.Json.JsonSerializer.Serialize(request, RequestSerializerOptions);
     }
 
     private static int Combo(StepState root) => root.PrevComboAction switch

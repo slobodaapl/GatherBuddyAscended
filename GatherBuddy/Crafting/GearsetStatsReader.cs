@@ -134,11 +134,12 @@ public static unsafe class GearsetStatsReader
                 Craftsmanship: craftsmanship,
                 Control: control,
                 CP: cp,
-                Level: 100,
-                Manipulation: manipulation,
-                Specialist: isSpecialist,
-                SplendorCosmic: false
-            );
+            Level: 100,
+            Manipulation: manipulation,
+            Specialist: isSpecialist,
+            SplendorCosmic: false,
+            CrafterDelineations: CraftingSpecialistResources.GetCrafterDelineationCount()
+        );
         }
         catch (Exception ex)
         {

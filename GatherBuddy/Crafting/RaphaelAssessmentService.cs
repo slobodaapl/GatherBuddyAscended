@@ -229,11 +229,23 @@ public static class RaphaelAssessmentService
             : assessment with
             {
                 SolverName = solverName,
-                Summary = assessment.Outcome == RaphaelAssessmentOutcome.FailedQualityRequirement
-                    ? $"Donatello can guarantee at least {assessment.QualityPercent:F0}% quality, with a good chance to reach more."
-                    : assessment.Summary.Replace("Raphael", solverName, StringComparison.Ordinal),
+                Summary = BuildDonatelloSummary(assessment),
                 Details = assessment.Details.Replace("Raphael", solverName, StringComparison.Ordinal),
             };
+
+    private static string BuildDonatelloSummary(RaphaelAssessment assessment)
+        => assessment.Outcome switch
+        {
+            RaphaelAssessmentOutcome.FullQuality => "Validated — Donatello guarantees full quality and completion.",
+            RaphaelAssessmentOutcome.CollectibleTier3 => "Validated — Donatello guarantees collectible tier 3, with a good chance to reach more quality.",
+            RaphaelAssessmentOutcome.CollectibleTier2 => "Validated — Donatello guarantees collectible tier 2, with a good chance to reach a higher tier.",
+            RaphaelAssessmentOutcome.CollectibleTier1 => "Validated — Donatello guarantees collectible tier 1, with a good chance to reach a higher tier.",
+            RaphaelAssessmentOutcome.MinimumQualityMet => "Validated — Donatello guarantees the required quality, with a good chance to reach more.",
+            RaphaelAssessmentOutcome.NoQualityRequired => "Validated — Donatello guarantees completion.",
+            RaphaelAssessmentOutcome.PartialQuality => $"Validated — Donatello guarantees at least {Calculations.GetHQChance(assessment.QualityPercent)}% HQ chance, with a good chance to reach more.",
+            RaphaelAssessmentOutcome.FailedQualityRequirement => $"Donatello can guarantee at least {assessment.QualityPercent:F0}% quality, with a good chance to reach more.",
+            _ => assessment.Summary.Replace("Raphael", "Donatello", StringComparison.Ordinal),
+        };
 
     private static HashSet<uint> CollectDependentPrecraftRecipeIds(uint recipeId, CraftingListDefinition list)
     {
@@ -507,7 +519,8 @@ public static class RaphaelAssessmentService
             request.Level,
             request.Manipulation,
             request.Specialist,
-            false);
+            false,
+            request.CrafterDelineations);
 
         craft = GameStateBuilder.BuildCraftState(CraftingStateBuilder.BuildRecipeInfo(recipe), stats);
         craft.InitialQuality = request.InitialQuality;

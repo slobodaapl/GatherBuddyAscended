@@ -11,6 +11,7 @@ public record class CraftState
         public int StatLevel;
         public bool UnlockedManipulation;
         public bool Specialist;
+        public int CrafterDelineations;
         public bool SplendorCosmic;
 
         // recipe stats
@@ -64,6 +65,7 @@ public record class CraftState
         public int MuscleMemoryLeft;
         public int FinalAppraisalLeft;
         public int CarefulObservationLeft;
+        public int CrafterDelineationsLeft;
         public bool HeartAndSoulActive;
         public bool HeartAndSoulAvailable;
         public bool PrevActionFailed;
@@ -96,7 +98,7 @@ public record class CraftState
                 sb.Append($", MuMe={MuscleMemoryLeft}");
             if (FinalAppraisalLeft > 0)
                 sb.Append($", FA={FinalAppraisalLeft}");
-            sb.Append($", CO={CarefulObservationLeft}, HS={(HeartAndSoulActive ? "active" : HeartAndSoulAvailable ? "avail" : "none")}");
+            sb.Append($", CO={CarefulObservationLeft}, Delineations={CrafterDelineationsLeft}, HS={(HeartAndSoulActive ? "active" : HeartAndSoulAvailable ? "avail" : "none")}");
             sb.Append($", QuickInno:{QuickInnoAvailable}/{QuickInnoLeft}/{InnovationLeft}");
             sb.Append($", MaterialMiracleActive:{MaterialMiracleActive} / {MaterialMiracleCharges}");
             return sb.ToString();

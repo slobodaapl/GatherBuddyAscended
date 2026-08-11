@@ -76,6 +76,7 @@ public static unsafe class SynthesisReader
             QuickInnoAvailable = previousStep?.QuickInnoAvailable ?? craft.Specialist,
             MaterialMiracleCharges = previousStep?.MaterialMiracleCharges ?? (craft.MissionHasMaterialMiracle ? 1u : 0u),
             CarefulObservationLeft = previousStep?.CarefulObservationLeft ?? (craft.Specialist ? 3 : 0),
+            CrafterDelineationsLeft = previousStep?.CrafterDelineationsLeft ?? craft.CrafterDelineations,
             QuickInnoLeft = previousStep?.QuickInnoLeft ?? (craft.Specialist ? 1 : 0),
             PrevComboAction = previousStep?.PrevComboAction ?? VulcanSkill.None,
             PrevActionFailed = previousStep?.PrevActionFailed ?? false

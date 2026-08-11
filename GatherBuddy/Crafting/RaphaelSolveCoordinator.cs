@@ -230,7 +230,8 @@ public class RaphaelSolveCoordinator
                 CP: stats.CP,
                 Manipulation: stats.Manipulation,
                 Specialist: stats.Specialist,
-                InitialQuality: CalculateInitialQuality(item, recipe)
+                InitialQuality: CalculateInitialQuality(item, recipe),
+                CrafterDelineations: stats.Specialist ? stats.CrafterDelineations : 0
             );
 
             var key = request.GetKey();
@@ -276,7 +277,8 @@ public class RaphaelSolveCoordinator
                 CP: stats.CP,
                 Manipulation: stats.Manipulation,
                 Specialist: stats.Specialist,
-                InitialQuality: initialQuality
+                InitialQuality: initialQuality,
+                CrafterDelineations: stats.Specialist ? CraftingSpecialistResources.GetCrafterDelineationCount() : 0
             );
 
             var key = request.GetKey();
@@ -540,7 +542,8 @@ public class RaphaelSolveCoordinator
                 CP: playerCP,
                 Manipulation: manipulationUnlocked,
                 Specialist: isSpecialist,
-                InitialQuality: CalculateInitialQuality(item, recipe.Value)
+                InitialQuality: CalculateInitialQuality(item, recipe.Value),
+                CrafterDelineations: isSpecialist ? CraftingSpecialistResources.GetCrafterDelineationCount() : 0
             );
 
             var key = request.GetKey();
@@ -777,8 +780,11 @@ public class RaphaelSolveCoordinator
         if (_config.RaphaelBackloadProgress)
             args.Append("--backload-progress ");
 
-        if (_config.RaphaelAllowSpecialistActions && request.Specialist)
+        if (_config.RaphaelAllowSpecialistActions && request.Specialist && request.CrafterDelineations > 0)
+        {
             args.Append("--heart-and-soul --quick-innovation ");
+            args.Append($"--crafter-delineations {request.CrafterDelineations} ");
+        }
 
         args.Append("--output-variables action_ids");
 

@@ -52,7 +52,8 @@ public static GameStateBuilder.PlayerStats GetCurrentPlayerStats()
                 Level: level,
                 Manipulation: GetManipulationUnlocked(jobId),
                 Specialist: GetIsSpecialist(jobId),
-                SplendorCosmic: GetSplendorCosmic()
+                SplendorCosmic: GetSplendorCosmic(),
+                CrafterDelineations: CraftingSpecialistResources.GetCrafterDelineationCount()
             );
 
             return stats;
