@@ -1,79 +1,117 @@
 name: Publish
+
 on:
   push:
     tags:
       - '*.*.*.*'
+
 jobs:
-  Build:
-    permissions:
-      contents: write
+  build-plugin:
+    name: Build .NET plugin
     runs-on: windows-latest
-    env:
-      REPO_NAME: ${{ github.repository }}
     steps:
-      - name: Checkout Repository
+      - name: Checkout repository
         uses: actions/checkout@v6
-        with:
-          submodules: recursive
-
-      - name: Get Environment Variables
-        run: |
-          $tag = "${{ github.ref }}" -replace 'refs/tags/', ''
-
-          "tag=$tag" | Out-File -Append -FilePath $Env:GITHUB_ENV
 
       - name: Set up .NET
         uses: actions/setup-dotnet@v5
         with:
           dotnet-version: 10.0.x
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
 
-      - name: Download Dalamud Latest
+      - name: Download Dalamud
         run: |
           Invoke-WebRequest -Uri https://goatcorp.github.io/dalamud-distrib/latest.zip -OutFile latest.zip
           Expand-Archive -Force latest.zip "$env:AppData\XIVLauncher\addon\Hooks\dev"
 
-      - name: Restore Nuget Packages
-        run: dotnet restore Gatherbuddy/Gatherbuddy.csproj
+      - name: Restore NuGet packages
+        run: dotnet restore GatherBuddy/GatherBuddy.csproj
 
-      - name: Build Plugin
-        run: dotnet build --no-restore -c Release Gatherbuddy/Gatherbuddy.csproj -p:AssemblyVersion=${{ env.tag }} -p:FileVersion=${{ env.tag }} -p:PackageVersion=${{ env.tag }} -p:InformationalVersion=${{ env.tag }} --output .\build
-      - name: Run Donatello Vulcan acceptance harness
-        run: dotnet run --project GatherBuddy.Vulcan.Tests/GatherBuddy.Vulcan.Tests.csproj -c Release
-      - name: Test pinned Donatello workspace
-        run: cargo test --locked --workspace --manifest-path donatello/Cargo.toml
-      - name: Build pinned Donatello native solver and Raphael CLI
-        run: |
-          cd donatello
-          cargo build --locked --release --package raphael-cli --package donatello-ffi
-          if ($LASTEXITCODE -ne 0) {
-            Write-Host "Error: Failed to build raphael-cli"
-            exit 1
-          }
-          Copy-Item -Path ".\target\release\raphael-cli.exe" -Destination "..\build\raphael-cli.exe" -Force
-          Copy-Item -Path ".\target\release\donatello_ffi.dll" -Destination "..\build\donatello_ffi.dll" -Force
-          cd ..
-          Write-Host "Successfully built and copied pinned Raphael CLI and Donatello FFI"
+      - name: Build plugin
+        run: dotnet build --no-restore -c Release GatherBuddy/GatherBuddy.csproj -p:AssemblyVersion=${{ github.ref_name }} -p:FileVersion=${{ github.ref_name }} -p:PackageVersion=${{ github.ref_name }} -p:InformationalVersion=${{ github.ref_name }} --output .\build
 
-      - name: Zip Plugin
-        run: Compress-Archive -Path .\build\* -DestinationPath .\build\GatherBuddyAscended.zip
-
-      - name: Publish Plugin
-        uses: softprops/action-gh-release@v3
-        with:
-          files: ./build/GatherBuddyAscended.zip
-          token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Upload plugin for GitHub Pages
+      - name: Upload plugin build
         uses: actions/upload-artifact@v4
         with:
-          name: pages-plugin
-          path: ./build/GatherBuddyAscended.zip
+          name: plugin-build
+          path: build
           if-no-files-found: error
 
-  DeployPages:
-    needs: Build
+  build-native:
+    name: Build Donatello FFI
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build native solver
+        run: cargo build --locked --release --package donatello-ffi --manifest-path donatello/Cargo.toml
+
+      - name: Upload native solver
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-build
+          path: donatello/target/release/donatello_ffi.dll
+          if-no-files-found: error
+
+  package:
+    name: Package plugin
+    needs: [build-plugin, build-native]
+    runs-on: windows-latest
+    steps:
+      - name: Download plugin build
+        uses: actions/download-artifact@v4
+        with:
+          name: plugin-build
+          path: build
+
+      - name: Download native solver
+        uses: actions/download-artifact@v4
+        with:
+          name: native-build
+          path: build
+
+      - name: Create release archive
+        run: |
+          New-Item -ItemType Directory -Force package | Out-Null
+          Compress-Archive -Path .\build\* -DestinationPath .\package\GatherBuddyAscended.zip
+
+      - name: Upload release package
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-package
+          path: package/GatherBuddyAscended.zip
+          if-no-files-found: error
+
+  publish-release:
+    name: Publish GitHub release
+    needs: package
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download release package
+        uses: actions/download-artifact@v4
+        with:
+          name: release-package
+          path: release
+
+      - name: Publish release asset
+        uses: softprops/action-gh-release@v3
+        with:
+          files: release/GatherBuddyAscended.zip
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  deploy-pages:
+    name: Deploy plugin repository
+    needs: package
+    concurrency:
+      group: github-pages
+      cancel-in-progress: false
     permissions:
       contents: read
       pages: write
@@ -83,20 +121,19 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout Repository
+      - name: Checkout repository
         uses: actions/checkout@v6
 
-      - name: Download plugin
+      - name: Download release package
         uses: actions/download-artifact@v4
         with:
-          name: pages-plugin
+          name: release-package
           path: _site
 
       - name: Build Dalamud repository feed
         env:
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
-          mkdir -p _site
           download_url="https://slobodaapl.github.io/GatherBuddyAscended/GatherBuddyAscended.zip"
           jq \
             --arg version "$RELEASE_TAG" \

@@ -63,15 +63,25 @@ internal static class DonatelloNative
         CraftState craft,
         StepState root,
         IntPtr interrupt = default)
+        => Solve(
+            craft,
+            root,
+            GatherBuddy.Config.RaphaelSolverConfig.RaphaelAllowSpecialistActions,
+            GatherBuddy.Config.RaphaelSolverConfig.RaphaelBackloadProgress,
+            interrupt);
+
+    internal static unsafe IReadOnlyList<VulcanSkill> Solve(
+        CraftState craft,
+        StepState root,
+        bool allowSpecialistActions,
+        bool backloadProgress,
+        IntPtr interrupt = default)
     {
         if (donatello_abi_version() != AbiVersion)
             throw new InvalidOperationException("Unsupported Donatello native ABI version");
 
         var bytes = Encoding.UTF8.GetBytes(SerializeRequest(
-            craft,
-            root,
-            GatherBuddy.Config.RaphaelSolverConfig.RaphaelAllowSpecialistActions,
-            GatherBuddy.Config.RaphaelSolverConfig.RaphaelBackloadProgress));
+            craft, root, allowSpecialistActions, backloadProgress));
         IntPtr nativeResponse;
         fixed (byte* data = bytes)
             nativeResponse = interrupt == IntPtr.Zero

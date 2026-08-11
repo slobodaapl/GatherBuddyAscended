@@ -71,8 +71,8 @@ Clone recursively so all pinned dependencies, including Donatello, are present:
 git clone --recurse-submodules git@github.com:slobodaapl/GatherBuddyAscended.git
 ```
 
-Release CI builds the .NET plugin plus the pinned `donatello_ffi.dll` and compatibility
-`raphael-cli.exe`, then packages them together as `GatherBuddyAscended.zip`.
+Release CI builds the .NET plugin plus the pinned native `donatello_ffi.dll`, then packages
+them as `GatherBuddyAscended.zip`.
 
 ## Contributing
 

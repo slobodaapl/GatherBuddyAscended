@@ -1,10 +1,8 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.IO;
 using System.Linq;
-using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using GatherBuddy.Plugin;
@@ -43,51 +41,6 @@ public class RaphaelSolveCoordinator
     {
         _config = config ?? new RaphaelSolveCoordinatorConfig();
         Load();
-    }
-
-    private static async Task DrainProcessOutputAsync(Task<string>? outputTask, Task<string>? errorTask)
-    {
-        if (outputTask != null)
-        {
-            try
-            {
-                await outputTask.ConfigureAwait(false);
-            }
-            catch
-            {
-            }
-        }
-
-        if (errorTask != null)
-        {
-            try
-            {
-                await errorTask.ConfigureAwait(false);
-            }
-            catch
-            {
-            }
-        }
-    }
-
-    private static void TryKillRaphaelProcess(Process? process, uint recipeId, string reason)
-    {
-        if (process == null)
-            return;
-
-        try
-        {
-            if (process.HasExited)
-                return;
-
-            GatherBuddy.Log.Debug($"[RaphaelSolveCoordinator] Killing Raphael process for recipe {recipeId} due to {reason}");
-            process.Kill();
-            process.WaitForExit(2000);
-        }
-        catch (Exception ex)
-        {
-            GatherBuddy.Log.Debug($"[RaphaelSolveCoordinator] Failed to kill Raphael process for recipe {recipeId}: {ex.Message}");
-        }
     }
 
     public void Save()
@@ -609,12 +562,13 @@ public class RaphaelSolveCoordinator
         var cts = new CancellationTokenSource();
         cts.CancelAfter(TimeSpan.FromMinutes(_config.RaphaelTimeoutMinutes));
 
-        Interlocked.Increment(ref _activeSolveCount);
+        var startSignal = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var task = Task.Run(async () =>
         {
+            await startSignal.Task.ConfigureAwait(false);
             try
             {
-                await ExecuteRaphaelSolve(request, cts.Token);
+                ExecuteRaphaelSolve(request, cts.Token);
             }
             finally
             {
@@ -622,114 +576,69 @@ public class RaphaelSolveCoordinator
                 _inProgressTasks.TryRemove(key, out _);
                 ProcessPendingQueue();
             }
-        }, cts.Token);
+        });
 
         var solveTask = new SolveTask(cts, task);
         if (_inProgressTasks.TryAdd(key, solveTask))
         {
+            Interlocked.Increment(ref _activeSolveCount);
+            startSignal.SetResult();
             GatherBuddy.Log.Information($"[RaphaelSolveCoordinator] Spawned Raphael solve for recipe {request.RecipeId} (key: {key})");
+        }
+        else
+        {
+            cts.Dispose();
+            startSignal.SetCanceled();
         }
     }
 
-    private async Task ExecuteRaphaelSolve(RaphaelSolveRequest request, CancellationToken ct)
+    private void ExecuteRaphaelSolve(RaphaelSolveRequest request, CancellationToken ct)
     {
         var key = request.GetKey();
         var cacheEntry = new CachedRaphaelSolution(key, request);
-        Process? process = null;
-        Task<string>? outputTask = null;
-        Task<string>? errorTask = null;
+        var interrupt = IntPtr.Zero;
         GatherBuddy.Log.Information($"[RaphaelSolveCoordinator] Executing Raphael solve for recipe {request.RecipeId} (key: {key})");
 
         try
         {
-            var raphaelPath = GetRaphaelCliPath();
-            GatherBuddy.Log.Debug($"[RaphaelSolveCoordinator] Raphael executable path: {raphaelPath}");
-            
-            if (string.IsNullOrEmpty(raphaelPath))
-            {
-                cacheEntry.IsFailed = true;
-                cacheEntry.FailureReason = "raphael-cli.exe path is empty";
-                _cachedSolutions[key] = cacheEntry;
-                GatherBuddy.Log.Error("[RaphaelSolveCoordinator] FAIL: raphael-cli.exe path could not be resolved - plugin directory is unavailable");
-                return;
-            }
-            
-            if (!File.Exists(raphaelPath))
-            {
-                cacheEntry.IsFailed = true;
-                cacheEntry.FailureReason = $"raphael-cli.exe not found at {raphaelPath}";
-                _cachedSolutions[key] = cacheEntry;
-                GatherBuddy.Log.Error($"[RaphaelSolveCoordinator] FAIL: raphael-cli.exe not found at {raphaelPath}. Ensure the plugin was downloaded/updated with the latest version.");
-                return;
-            }
+            var recipe = RecipeManager.GetRecipe(request.RecipeId)
+                ?? throw new InvalidOperationException($"Recipe {request.RecipeId} could not be resolved");
+            RaphaelAssessmentService.TryBuildCraftState(request, recipe, out var craft);
+            var root = GameStateBuilder.BuildInitialStepState(craft, request.InitialQuality);
+            interrupt = DonatelloNative.CreateInterrupt();
+            using var cancellation = ct.Register(() => DonatelloNative.Interrupt(interrupt));
+            var actionIds = DonatelloNative.Solve(
+                    craft,
+                    root,
+                    _config.RaphaelAllowSpecialistActions,
+                    _config.RaphaelBackloadProgress,
+                    interrupt)
+                .Select(action => (uint)action)
+                .ToList();
+            ct.ThrowIfCancellationRequested();
 
-            var args = BuildRaphaelArguments(request);
-            GatherBuddy.Log.Debug($"[RaphaelSolveCoordinator] Raphael arguments: {args}");
-            
-            process = new Process
-            {
-                StartInfo = new ProcessStartInfo
-                {
-                    FileName = raphaelPath,
-                    Arguments = args,
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true,
-                    UseShellExecute = false,
-                    CreateNoWindow = true
-                }
-            };
-
-            GatherBuddy.Log.Information($"[RaphaelSolveCoordinator] Spawning Raphael process for recipe {request.RecipeId}");
-
-            GatherBuddy.Log.Debug($"[RaphaelSolveCoordinator] Starting Raphael process...");
-            process.Start();
-            outputTask = process.StandardOutput.ReadToEndAsync();
-            errorTask = process.StandardError.ReadToEndAsync();
-            await process.WaitForExitAsync(ct).ConfigureAwait(false);
-            var output = await outputTask.ConfigureAwait(false);
-            var error = await errorTask.ConfigureAwait(false);
-            GatherBuddy.Log.Debug($"[RaphaelSolveCoordinator] Raphael process output received ({output.Length} bytes stdout, {error.Length} bytes stderr)");
-            GatherBuddy.Log.Debug($"[RaphaelSolveCoordinator] Raphael process exited with code {process.ExitCode}");
-
-            if (process.ExitCode != 0)
-            {
-                cacheEntry.IsFailed = true;
-                cacheEntry.FailureReason = FormatFailureReason(process.ExitCode, error);
-                _cachedSolutions[key] = cacheEntry;
-                GatherBuddy.Log.Error($"[RaphaelSolveCoordinator] FAIL: Raphael exited with code {process.ExitCode} for recipe {request.RecipeId}");
-                GatherBuddy.Log.Error($"[RaphaelSolveCoordinator] FAIL: Raphael stderr: {error}");
-                return;
-            }
-
-            GatherBuddy.Log.Debug($"[RaphaelSolveCoordinator] Parsing Raphael output for recipe {request.RecipeId}...");
-            var actionIds = ParseRaphaelOutput(output);
-            GatherBuddy.Log.Debug($"[RaphaelSolveCoordinator] Parsed {actionIds.Count} action IDs");
-            
             if (actionIds.Count == 0)
             {
                 cacheEntry.IsFailed = true;
                 cacheEntry.FailureReason = "No actions generated";
                 _cachedSolutions[key] = cacheEntry;
                 GatherBuddy.Log.Error($"[RaphaelSolveCoordinator] FAIL: Raphael generated empty solution for recipe {request.RecipeId}");
-                GatherBuddy.Log.Debug($"[RaphaelSolveCoordinator] Raphael stdout was: {output}");
                 return;
             }
 
-        cacheEntry.ActionIds = actionIds;
+            cacheEntry.ActionIds = actionIds;
             _cachedSolutions[key] = cacheEntry;
             GatherBuddy.Log.Information($"[RaphaelSolveCoordinator] SUCCESS: Raphael solved recipe {request.RecipeId} with {actionIds.Count} actions");
             Save();
         }
-        catch (OperationCanceledException) when (_inProgressTasks.TryGetValue(key, out var solveTask) && solveTask.UserCancelled)
+        catch (Exception) when (ct.IsCancellationRequested
+            && _inProgressTasks.TryGetValue(key, out var solveTask)
+            && solveTask.UserCancelled)
         {
-            TryKillRaphaelProcess(process, request.RecipeId, "user cancellation");
-            await DrainProcessOutputAsync(outputTask, errorTask).ConfigureAwait(false);
             GatherBuddy.Log.Information($"[RaphaelSolveCoordinator] Cancelled Raphael solve for recipe {request.RecipeId}");
         }
-        catch (OperationCanceledException)
+        catch (Exception) when (ct.IsCancellationRequested)
         {
-            TryKillRaphaelProcess(process, request.RecipeId, "timeout");
-            await DrainProcessOutputAsync(outputTask, errorTask).ConfigureAwait(false);
             cacheEntry.IsFailed = true;
             cacheEntry.FailureReason = "Solve timeout";
             _cachedSolutions[key] = cacheEntry;
@@ -738,98 +647,29 @@ public class RaphaelSolveCoordinator
         catch (Exception ex)
         {
             cacheEntry.IsFailed = true;
-            cacheEntry.FailureReason = ex.Message;
+            cacheEntry.FailureReason = FormatFailureReason(ex.Message);
             _cachedSolutions[key] = cacheEntry;
             GatherBuddy.Log.Error($"[RaphaelSolveCoordinator] FAIL: Raphael solve exception for recipe {request.RecipeId}: {ex.Message}");
             GatherBuddy.Log.Error($"[RaphaelSolveCoordinator] FAIL: Exception details: {ex}");
         }
         finally
         {
-            process?.Dispose();
+            DonatelloNative.FreeInterrupt(interrupt);
         }
     }
 
-    internal static string FormatFailureReason(int exitCode, string? standardError)
+    internal static string FormatFailureReason(string? nativeError)
     {
-        if (!string.IsNullOrWhiteSpace(standardError)
-         && (standardError.Contains("NO_SOLUTION", StringComparison.OrdinalIgnoreCase)
-          || standardError.Contains("NoSolution", StringComparison.OrdinalIgnoreCase)))
+        if (!string.IsNullOrWhiteSpace(nativeError)
+         && nativeError.Contains("NoSolution", StringComparison.OrdinalIgnoreCase))
         {
             return "No valid solution found for the current crafter. Check the selected job, level, gear, and available actions.";
         }
 
-        return $"Raphael solver exited unexpectedly (code {exitCode}). See the plugin log for diagnostic details.";
+        return "Raphael solver failed unexpectedly. See the plugin log for diagnostic details.";
     }
 
     internal static bool IsNoSolutionFailureReason(string? failureReason)
         => failureReason?.StartsWith("No valid solution found", StringComparison.Ordinal) == true;
 
-    private string BuildRaphaelArguments(RaphaelSolveRequest request)
-    {
-        var args = new StringBuilder();
-        args.Append($"solve --recipe-id {request.RecipeId} ");
-        args.Append($"--level {request.Level} ");
-        args.Append($"--stats {request.Craftsmanship} {request.Control} {request.CP} ");
-
-        if (request.Manipulation)
-            args.Append("--manipulation ");
-
-        if (request.InitialQuality > 0)
-            args.Append($"--initial {request.InitialQuality} ");
-
-        if (_config.RaphaelBackloadProgress)
-            args.Append("--backload-progress ");
-
-        if (_config.RaphaelAllowSpecialistActions && request.Specialist && request.CrafterDelineations > 0)
-        {
-            args.Append("--heart-and-soul --quick-innovation ");
-            args.Append($"--crafter-delineations {request.CrafterDelineations} ");
-        }
-
-        args.Append("--output-variables action_ids");
-
-        return args.ToString();
-    }
-
-    private List<uint> ParseRaphaelOutput(string output)
-    {
-        var actionIds = new List<uint>();
-
-        if (string.IsNullOrWhiteSpace(output))
-            return actionIds;
-
-        try
-        {
-            var cleaned = output.Replace("[", "").Replace("]", "").Replace("\"", "").Trim();
-            var parts = cleaned.Split(new[] { ',' }, System.StringSplitOptions.RemoveEmptyEntries);
-
-            foreach (var part in parts)
-            {
-                if (uint.TryParse(part.Trim(), out var actionId))
-                    actionIds.Add(actionId);
-            }
-        }
-        catch (Exception ex)
-        {
-            GatherBuddy.Log.Error($"[RaphaelSolveCoordinator] Failed to parse Raphael output: {ex.Message}");
-        }
-
-        return actionIds;
-    }
-
-    private string GetRaphaelCliPath()
-    {
-        try
-        {
-            var pluginDir = Path.GetDirectoryName(Dalamud.PluginInterface?.AssemblyLocation?.FullName ?? "");
-            if (string.IsNullOrEmpty(pluginDir))
-                return string.Empty;
-
-            return Path.Combine(pluginDir, "raphael-cli.exe");
-        }
-        catch
-        {
-            return string.Empty;
-        }
-    }
 }

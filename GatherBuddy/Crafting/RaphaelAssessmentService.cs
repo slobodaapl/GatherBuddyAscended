@@ -510,7 +510,7 @@ public static class RaphaelAssessmentService
         return true;
     }
 
-    private static bool TryBuildCraftState(RaphaelSolveRequest request, Recipe recipe, out CraftState craft)
+    internal static bool TryBuildCraftState(RaphaelSolveRequest request, Recipe recipe, out CraftState craft)
     {
         var stats = new GameStateBuilder.PlayerStats(
             request.Craftsmanship,
