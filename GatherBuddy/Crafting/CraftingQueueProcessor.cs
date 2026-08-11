@@ -12,7 +12,7 @@ using Lumina.Excel.Sheets;
 
 namespace GatherBuddy.Crafting;
 
-public class CraftingQueueProcessor
+public class CraftingQueueProcessor : IDisposable
 {
     private static readonly List<CraftingListItem> EmptyQueue = [];
     private static readonly Dictionary<uint, int> EmptyCounts = [];
@@ -52,6 +52,7 @@ public class CraftingQueueProcessor
     private bool _lastCraftWasQuickSynth = false;
     private Dictionary<string, RaphaelSolveRequest> _enqueuedRaphaelRequests = new();
     private uint _jobSwitchRequestedFor = 0u;
+    private DateTime _jobSwitchRequestedAt = DateTime.MinValue;
     private Dictionary<uint, int> _missingIngredientFailures = new();
     private string _pauseReason = string.Empty;
 
@@ -84,6 +85,17 @@ public class CraftingQueueProcessor
     {
         CraftingGameInterop.CraftFinished += OnCraftFinished;
         CraftingGameInterop.QuickSynthProgress += OnQuickSynthProgress;
+        CraftingGameInterop.AutomationFaulted += OnAutomationFaulted;
+    }
+
+    private void OnAutomationFaulted(string reason)
+        => Pause(reason);
+
+    public void Dispose()
+    {
+        CraftingGameInterop.CraftFinished -= OnCraftFinished;
+        CraftingGameInterop.QuickSynthProgress -= OnQuickSynthProgress;
+        CraftingGameInterop.AutomationFaulted -= OnAutomationFaulted;
     }
 
     public void StartQueue(CraftingExecutionPlan executionPlan, CraftingListConsumableSettings? listConsumables = null, RaphaelSolveCoordinator? raphaelCoordinator = null)
@@ -96,6 +108,7 @@ public class CraftingQueueProcessor
         _consumableDelayUntil = DateTime.MinValue;
         _enqueuedRaphaelRequests.Clear();
         _jobSwitchRequestedFor = 0u;
+        _jobSwitchRequestedAt = DateTime.MinValue;
         _missingIngredientFailures.Clear();
         _pauseReason = string.Empty;
         _retainerRestock = executionPlan.RetainerRestock;
@@ -320,16 +333,22 @@ public class CraftingQueueProcessor
                     return CraftingTasks.TaskResult.Done;
                 });
                 _jobSwitchRequestedFor = requiredJob;
+                _jobSwitchRequestedAt = DateTime.UtcNow;
             }
             else if (_tasks.Count == 0 && _jobSwitchRequestedFor == requiredJob)
             {
-                GatherBuddy.Log.Debug("[CraftingQueueProcessor] Job switch task completed but job unchanged, resetting for retry");
-                _jobSwitchRequestedFor = 0u;
+                if (DateTime.UtcNow - _jobSwitchRequestedAt >= TimeSpan.FromSeconds(2))
+                {
+                    GatherBuddy.Log.Debug("[CraftingQueueProcessor] Job switch not acknowledged after 2 seconds, resetting for retry");
+                    _jobSwitchRequestedFor = 0u;
+                    _jobSwitchRequestedAt = DateTime.MinValue;
+                }
             }
         }
         else
         {
             _jobSwitchRequestedFor = 0u;
+            _jobSwitchRequestedAt = DateTime.MinValue;
             TransitionToRaphaelOrCraft();
         }
     }
@@ -1521,6 +1540,7 @@ public class CraftingQueueProcessor
         _missingIngredientFailures.Clear();
         _enqueuedRaphaelRequests.Clear();
         _jobSwitchRequestedFor = 0u;
+        _jobSwitchRequestedAt = DateTime.MinValue;
         _retainerRestock = false;
         _retainerExecutor = null;
         _retainerBellNavigator?.Stop();

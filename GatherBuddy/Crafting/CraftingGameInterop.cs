@@ -75,6 +75,7 @@ public static class CraftingGameInterop
     private static DateTime _taskManagerIdleSince = DateTime.MinValue;
     private static DateTime _nextActionAllowedAt = DateTime.MinValue;
     private static CraftPreparationFailure? _lastPreparationFailure = null;
+    private static bool _automationFaultReported;
 
 
     public static Vulcan.UserMacroLibrary UserMacroLibrary => _userMacroLibrary ??= new();
@@ -83,6 +84,7 @@ public static class CraftingGameInterop
     public static event Action<Recipe?, bool>? CraftFinished;
     public static event Action<Recipe?>? CraftAdvanced;
     public static event Action<int, int>? QuickSynthProgress;
+    public static event Action<string>? AutomationFaulted;
 
     public static CraftState CurrentState => _currentState;
     public static Recipe? CurrentRecipe => _currentRecipe;
@@ -177,6 +179,7 @@ public static class CraftingGameInterop
         _currentQualityPolicy = null;
         _currentSelectedMacroId = null;
         _lastPreparationFailure = null;
+        _automationFaultReported = false;
         CraftingProcessor.Dispose();
     }
 
@@ -1303,9 +1306,6 @@ public static class CraftingGameInterop
         if (recipe == null)
             return CraftState.InvalidState;
 
-        _currentRecipe = recipe;
-        CraftStarted?.Invoke(recipe, _currentRecipeId.Value);
-
         var actualRecipe = recipe.Value;
         GatherBuddy.Log.Debug($"[Crafting] Building craft state for recipe {_currentRecipeId}");
         _vulcanCraftState = CraftingStateBuilder.BuildCraftState(actualRecipe);
@@ -1324,8 +1324,16 @@ public static class CraftingGameInterop
             var liveRaphaelRequest = RaphaelSolveRequest.FromCraftState(_vulcanCraftState, GatherBuddy.Config.RaphaelSolverConfig.RaphaelAllowSpecialistActions);
             GatherBuddy.Log.Debug($@"[Crafting] Live Raphael request at craft start: {liveRaphaelRequest.GetKey()}");
         }
-        _vulcanStepState = CraftingStateBuilder.BuildInitialStepState(_vulcanCraftState!);
+        var modeledInitialStep = CraftingStateBuilder.BuildInitialStepState(_vulcanCraftState!);
+        var observedInitialStep = SynthesisReader.ReadCurrentStepState(_vulcanCraftState!, modeledInitialStep);
+        if (observedInitialStep == null)
+            return CraftState.WaitStart;
+
+        _currentRecipe = recipe;
+        CraftStarted?.Invoke(recipe, _currentRecipeId.Value);
+        _vulcanStepState = observedInitialStep;
         _vulcanPredictionPendingObservation = false;
+        _automationFaultReported = false;
         if (_vulcanCraftState != null && _vulcanStepState != null)
         {
             CraftingProcessor.OnCraftStarted(_vulcanCraftState, _vulcanStepState, _currentRecipeId.Value, false);
@@ -1397,7 +1405,13 @@ public static class CraftingGameInterop
                              actualState,
                              out actualState))
                 {
-                    GatherBuddy.Log.Error("[Crafting] Could not infer external crafting action; pausing solver to avoid using a fabricated live state");
+                    if (!_automationFaultReported)
+                    {
+                        const string reason = "Could not reconcile the live crafting state; automation stopped before issuing an unsafe action";
+                        _automationFaultReported = true;
+                        GatherBuddy.Log.Error($"[Crafting] {reason}");
+                        AutomationFaulted?.Invoke(reason);
+                    }
                     return CraftState.InProgress;
                 }
                 _vulcanStepState = actualState;
@@ -1488,6 +1502,7 @@ public static class CraftingGameInterop
         _vulcanCraftState = null;
         _vulcanStepState = null;
         _vulcanPredictionPendingObservation = false;
+        _automationFaultReported = false;
         
         GatherBuddy.Log.Debug($"[Crafting] Craft finished. Preparing={Dalamud.Conditions[ConditionFlag.PreparingToCraft]}, Crafting={Dalamud.Conditions[ConditionFlag.Crafting]}");
         

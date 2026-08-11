@@ -164,6 +164,7 @@ public static class CraftingGatherBridge
                 GatherBuddy.Log.Information("[CraftingGatherBridge] All completion tasks done, cleaning up");
                 RestoreDisabledGatherLists();
                 GatherBuddy.CraftingStatusWindow?.SetQueueProcessor(null);
+                _queueProcessor.Dispose();
                 _queueProcessor = null;
                 _activeExecutionPlan = null;
                 _isQueueMode = false;
@@ -213,6 +214,7 @@ public static class CraftingGatherBridge
         _activeExecutionPlan = executionPlan;
         ResetCollectablesInterruptionState();
         _lastCollectablesHardFailLog = DateTime.MinValue;
+        _queueProcessor?.Dispose();
         _queueProcessor = new CraftingQueueProcessor();
         _queueProcessor.QueueCompleted += OnQueueCompleted;
         _waitingForGatherComplete = true;
@@ -413,6 +415,7 @@ public static class CraftingGatherBridge
         
         GatherBuddy.Log.Information("[CraftingGatherBridge] Starting repair system test");
         _isQueueMode = true;
+        _queueProcessor?.Dispose();
         _queueProcessor = new CraftingQueueProcessor();
         _queueProcessor.TestRepair();
         
@@ -721,6 +724,7 @@ public static class CraftingGatherBridge
             GatherBuddy.AutoGather.Enabled = false;
             DeleteTemporaryGatherList();
             _queueProcessor.Reset();
+            _queueProcessor.Dispose();
             _queueProcessor = null;
             _activeExecutionPlan = null;
             _isQueueMode = false;

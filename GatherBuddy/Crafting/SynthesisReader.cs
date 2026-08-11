@@ -59,7 +59,7 @@ public static unsafe class SynthesisReader
     public static StepState? ReadCurrentStepState(CraftState craft, StepState? previousStep = null)
     {
         var synthWindow = GetSynthesisAddon();
-        if (synthWindow == null)
+        if (synthWindow == null || !synthWindow->IsVisible || synthWindow->AtkValuesCount < 16)
             return null;
         
         var step = new StepState
