@@ -691,7 +691,7 @@ public class RaphaelSolveCoordinator
             if (process.ExitCode != 0)
             {
                 cacheEntry.IsFailed = true;
-                cacheEntry.FailureReason = $"Exit code {process.ExitCode}: {error}";
+                cacheEntry.FailureReason = FormatFailureReason(process.ExitCode, error);
                 _cachedSolutions[key] = cacheEntry;
                 GatherBuddy.Log.Error($"[RaphaelSolveCoordinator] FAIL: Raphael exited with code {process.ExitCode} for recipe {request.RecipeId}");
                 GatherBuddy.Log.Error($"[RaphaelSolveCoordinator] FAIL: Raphael stderr: {error}");
@@ -745,6 +745,21 @@ public class RaphaelSolveCoordinator
             process?.Dispose();
         }
     }
+
+    internal static string FormatFailureReason(int exitCode, string? standardError)
+    {
+        if (!string.IsNullOrWhiteSpace(standardError)
+         && (standardError.Contains("NO_SOLUTION", StringComparison.OrdinalIgnoreCase)
+          || standardError.Contains("NoSolution", StringComparison.OrdinalIgnoreCase)))
+        {
+            return "No valid solution found for the current crafter. Check the selected job, level, gear, and available actions.";
+        }
+
+        return $"Raphael solver exited unexpectedly (code {exitCode}). See the plugin log for diagnostic details.";
+    }
+
+    internal static bool IsNoSolutionFailureReason(string? failureReason)
+        => failureReason?.StartsWith("No valid solution found", StringComparison.Ordinal) == true;
 
     private string BuildRaphaelArguments(RaphaelSolveRequest request)
     {

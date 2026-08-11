@@ -43,7 +43,8 @@ public sealed record RaphaelAssessment(
     int Quality = 0,
     int MaxQuality = 0,
     int QualityTarget = 0,
-    int StepCount = 0)
+    int StepCount = 0,
+    string SolverName = "Raphael")
 {
     public float ProgressPercent => RequiredProgress <= 0 ? 0f : Progress * 100f / RequiredProgress;
     public float QualityPercent => MaxQuality <= 0 ? 0f : Quality * 100f / MaxQuality;
@@ -207,15 +208,32 @@ public static class RaphaelAssessmentService
         CraftingExecutionContext executionContext,
         out RaphaelAssessment assessment)
     {
+        var solverName = executionContext.EffectiveSolverMode == VulcanSolverMode.Donatello
+            ? "Donatello"
+            : "Raphael";
         if (!TryBuildSimulationContext(recipe, executionContext, out var context))
         {
-            assessment = CreateUnavailableAssessment(recipe.RowId, null, "No current or gearset stats available for this recipe.");
+            assessment = ApplySolverIdentity(
+                CreateUnavailableAssessment(recipe.RowId, null, "No current or gearset stats available for this recipe."),
+                solverName);
             return false;
         }
 
-        assessment = Assess(context.RaphaelRequest, context.SimulationState);
+        assessment = ApplySolverIdentity(Assess(context.RaphaelRequest, context.SimulationState), solverName);
         return true;
     }
+
+    private static RaphaelAssessment ApplySolverIdentity(RaphaelAssessment assessment, string solverName)
+        => solverName == "Raphael"
+            ? assessment
+            : assessment with
+            {
+                SolverName = solverName,
+                Summary = assessment.Outcome == RaphaelAssessmentOutcome.FailedQualityRequirement
+                    ? $"Donatello can guarantee at least {assessment.QualityPercent:F0}% quality, with a good chance to reach more."
+                    : assessment.Summary.Replace("Raphael", solverName, StringComparison.Ordinal),
+                Details = assessment.Details.Replace("Raphael", solverName, StringComparison.Ordinal),
+            };
 
     private static HashSet<uint> CollectDependentPrecraftRecipeIds(uint recipeId, CraftingListDefinition list)
     {
@@ -330,6 +348,17 @@ public static class RaphaelAssessmentService
 
         if (GatherBuddy.RaphaelSolveCoordinator.HasFailedSolution(request, out var failureReason))
         {
+            if (RaphaelSolveCoordinator.IsNoSolutionFailureReason(failureReason))
+            {
+                return new RaphaelAssessment(
+                    RaphaelAssessmentState.Unavailable,
+                    RaphaelAssessmentOutcome.None,
+                    "No valid solution for this crafter.",
+                    failureReason!,
+                    request,
+                    failureReason);
+            }
+
             return new RaphaelAssessment(
                 RaphaelAssessmentState.Failed,
                 RaphaelAssessmentOutcome.None,
@@ -377,7 +406,7 @@ public static class RaphaelAssessmentService
         var progressPercent = craft.CraftProgress <= 0 ? 0f : finalStep.Progress * 100f / craft.CraftProgress;
         var qualityPercent = craft.CraftQualityMax <= 0 ? 0f : finalStep.Quality * 100f / craft.CraftQualityMax;
         var hqChance = Calculations.GetHQChance(qualityPercent);
-        var summary = BuildReadySummary(outcome, hqChance);
+        var summary = BuildReadySummary(outcome, hqChance, qualityPercent);
         var details = outcome == RaphaelAssessmentOutcome.PartialQuality
             ? $"Progress {finalStep.Progress}/{craft.CraftProgress} ({progressPercent:F0}%), Quality {finalStep.Quality}/{craft.CraftQualityMax}, HQ Chance {hqChance}%, Steps {solution.ActionIds.Count}."
             : $"Progress {finalStep.Progress}/{craft.CraftProgress} ({progressPercent:F0}%), Quality {finalStep.Quality}/{craft.CraftQualityMax} ({qualityPercent:F0}%), Steps {solution.ActionIds.Count}.";
@@ -438,7 +467,7 @@ public static class RaphaelAssessmentService
             _ => 0,
         };
 
-    private static string BuildReadySummary(RaphaelAssessmentOutcome outcome, int hqChance)
+    private static string BuildReadySummary(RaphaelAssessmentOutcome outcome, int hqChance, float qualityPercent)
         => outcome switch
         {
             RaphaelAssessmentOutcome.FullQuality => "Validated — completes with full quality and progress.",
@@ -449,7 +478,7 @@ public static class RaphaelAssessmentService
             RaphaelAssessmentOutcome.NoQualityRequired => "Validated — completes progress. No quality target is required.",
             RaphaelAssessmentOutcome.PartialQuality => $"Validated — completes progress at {hqChance}% HQ chance.",
             RaphaelAssessmentOutcome.FailedDurability => "Raphael generated a solve, but simulation fails on durability.",
-            RaphaelAssessmentOutcome.FailedQualityRequirement => "Raphael generated a solve, but simulation misses the quality target.",
+            RaphaelAssessmentOutcome.FailedQualityRequirement => $"Raphael baseline simulation reaches {qualityPercent:F0}% quality; favorable conditions may improve the result.",
             RaphaelAssessmentOutcome.Incomplete => "Raphael generated a solve, but simulation does not finish the craft.",
             _ => "Raphael validation is ready.",
         };

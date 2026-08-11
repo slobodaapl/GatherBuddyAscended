@@ -56,6 +56,8 @@ internal sealed class GatherBuddyRebornMigration
 
     internal string SourceDirectory => _sourceDirectory.FullName;
 
+    internal bool AppliedThisStartup { get; private set; }
+
     internal void ScheduleMigration()
         => WriteState(Pending);
 
@@ -82,6 +84,7 @@ internal sealed class GatherBuddyRebornMigration
         }
 
         WriteState(Migrated);
+        AppliedThisStartup = true;
         _log.Information($"Migrated GatherBuddy Reborn configuration and state from {_sourceDirectory.FullName}.");
     }
 

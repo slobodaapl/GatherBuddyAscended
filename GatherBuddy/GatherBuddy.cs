@@ -120,6 +120,11 @@ public partial class GatherBuddy : IDalamudPlugin
             var rebornMigration = GatherBuddyRebornMigration.Prepare(pluginInterface, Log);
             Backup.CreateAutomaticBackup(Log, pluginInterface.ConfigDirectory, GatherBuddyBackupFiles());
             Config   = Configuration.Load();
+            if (rebornMigration.AppliedThisStartup)
+            {
+                Config.RaphaelSolverConfig.SolverMode = VulcanSolverMode.Donatello;
+                Config.Save();
+            }
             Language = Dalamud.ClientState.ClientLanguage;
             GameData = new GameData(Dalamud.GameData, Log, WorldData.WorldLocationsByNodeId, "fish_overrides.json");
             Time     = new SeTime();

@@ -1,4 +1,5 @@
 using GatherBuddy.Vulcan;
+using GatherBuddy.Crafting;
 
 var assertions = 0;
 
@@ -35,6 +36,18 @@ static StepState Root(Condition condition = Condition.Normal) => new()
     HeartAndSoulAvailable = true,
     TrainedPerfectionAvailable = true,
 };
+
+var noSolutionMessage = RaphaelSolveCoordinator.FormatFailureReason(
+    101,
+    "thread 'main' panicked: Failed to solve: NoSolution");
+Require(RaphaelSolveCoordinator.IsNoSolutionFailureReason(noSolutionMessage),
+    "legacy Raphael NoSolution panics must become a recognized domain outcome");
+Require(!noSolutionMessage.Contains("panicked", StringComparison.OrdinalIgnoreCase)
+     && !noSolutionMessage.Contains("Exit code", StringComparison.OrdinalIgnoreCase),
+    "player-facing NoSolution details must not expose panic or process diagnostics");
+var unexpectedFailure = RaphaelSolveCoordinator.FormatFailureReason(7, "sensitive raw stderr");
+Require(!unexpectedFailure.Contains("sensitive raw stderr", StringComparison.Ordinal),
+    "unexpected Raphael failures must direct players to logs instead of rendering raw stderr");
 
 var craft = Craft();
 var standardRecommendation = new StandardSolver(new StandardSolverConfig()).Solve(craft, Root());

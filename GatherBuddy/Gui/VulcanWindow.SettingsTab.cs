@@ -151,7 +151,7 @@ public partial class VulcanWindow
             ImGui.Separator();
             ImGui.Spacing();
 
-            ImGui.Text("Raphael Solver");
+            ImGui.Text("Raphael / Donatello Solver");
             ImGui.Separator();
             ImGui.Spacing();
 

@@ -798,7 +798,7 @@ public partial class VulcanWindow
             ImGui.Separator();
             ImGui.Spacing();
             ImGui.SetCursorPosX(ImGui.GetCursorPosX() + detailInset);
-            ImGui.TextColored(new Vector4(0.3f, 0.9f, 0.9f, 1.0f), "Raphael Validation:");
+            ImGui.TextColored(new Vector4(0.3f, 0.9f, 0.9f, 1.0f), $"{raphaelAssessment.SolverName} Validation:");
             ImGui.Spacing();
             ImGui.SetCursorPosX(ImGui.GetCursorPosX() + VulcanUiScaling.Scaled(24f));
             ImGui.TextColored(GetRaphaelAssessmentColor(raphaelAssessment), raphaelAssessment.Summary);
@@ -812,7 +812,7 @@ public partial class VulcanWindow
             {
                 ImGui.Spacing();
                 ImGui.SetCursorPosX(ImGui.GetCursorPosX() + VulcanUiScaling.Scaled(24f));
-                if (ImGui.Button("Queue Raphael Validation", new Vector2(0f, footerButtonHeight)))
+                if (ImGui.Button($"Queue {raphaelAssessment.SolverName} Validation", new Vector2(0f, footerButtonHeight)))
                     RaphaelAssessmentService.TryQueueWarmupForRecipe(recipe.Recipe.RowId, settings);
             }
             ImGui.Spacing();
