@@ -76,10 +76,36 @@ Require(afterQuickInnovation.CrafterDelineationsLeft == 0
 
 using var requestJson = JsonDocument.Parse(DonatelloNative.SerializeRequest(
     specialistCraft, specialistRoot, allowSpecialistActions: true, backloadProgress: false));
+var nativeRoot = requestJson.RootElement.GetProperty("root");
+var expectedRequestFields = new HashSet<string>
+{
+    "abiVersion", "maxCp", "maxDurability", "maxProgress", "maxQuality", "baseProgress",
+    "baseQuality", "jobLevel", "manipulation", "specialist", "backloadProgress", "root",
+};
+var expectedRootFields = new HashSet<string>
+{
+    "cp", "durability", "progress", "quality", "innerQuiet", "wasteNot", "manipulation",
+    "innovation", "veneration", "greatStrides", "muscleMemory", "finalAppraisal",
+    "carefulObservationCharges", "combo", "heartAndSoulActive", "heartAndSoulAvailable",
+    "quickInnovationAvailable", "trainedPerfectionActive", "trainedPerfectionAvailable",
+    "expedience", "condition", "crafterDelineations",
+};
+Require(requestJson.RootElement.EnumerateObject().Select(property => property.Name).ToHashSet()
+            .SetEquals(expectedRequestFields)
+        && nativeRoot.EnumerateObject().Select(property => property.Name).ToHashSet()
+            .SetEquals(expectedRootFields),
+    "Donatello requests must contain exactly the fields required by native ABI v2");
 Require(requestJson.RootElement.GetProperty("abiVersion").GetUInt32() == 2
         && !requestJson.RootElement.TryGetProperty("AbiVersion", out _)
-        && requestJson.RootElement.GetProperty("root").GetProperty("crafterDelineations").GetInt32() == 1,
-    "Donatello requests must use ABI v2 camelCase fields and include the remaining delineation count");
+        && nativeRoot.GetProperty("wasteNot").GetInt32() == 0
+        && nativeRoot.GetProperty("manipulation").GetInt32() == 0
+        && nativeRoot.GetProperty("innovation").GetInt32() == 0
+        && nativeRoot.GetProperty("veneration").GetInt32() == 0
+        && nativeRoot.GetProperty("greatStrides").GetInt32() == 0
+        && nativeRoot.GetProperty("muscleMemory").GetInt32() == 0
+        && nativeRoot.GetProperty("crafterDelineations").GetInt32() == 1
+        && !nativeRoot.TryGetProperty("manipulationLeft", out _),
+    "Donatello requests must match every ABI v2 camelCase field name exactly");
 var qualityRoot = GameStateBuilder.BuildInitialStepState(Craft() with { InitialQuality = 321 }, 321);
 Require(qualityRoot.Quality == 321, "initial HQ-material quality must survive root construction");
 
