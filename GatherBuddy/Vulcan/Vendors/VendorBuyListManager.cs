@@ -145,7 +145,7 @@ public sealed partial class VendorBuyListManager : IDisposable
         ResetExecutionState();
         _statusText    = "Timed out leaving the previous vendor interaction.";
         GatherBuddy.Log.Error($"[VendorBuyListManager] Timed out leaving the previous vendor interaction. Last blocker: {blocker}");
-        Communicator.PrintError("[GatherBuddyReborn] Timed out leaving the previous vendor interaction.");
+        Communicator.PrintError("[GatherBuddy Ascended] Timed out leaving the previous vendor interaction.");
     }
 
     public void OpenWindow()
@@ -572,7 +572,7 @@ public sealed partial class VendorBuyListManager : IDisposable
 
         GatherBuddy.Log.Debug($"[VendorBuyListManager] Skipping {entry.ItemName} for the current vendor-list run: {message}");
         if (announceFailure)
-            Communicator.PrintError($"[GatherBuddyReborn] {message}");
+            Communicator.PrintError($"[GatherBuddy Ascended] {message}");
     }
 
     private void MarkEntryPartiallyFulfilledForCurrentRun(VendorBuyListEntry entry, string message)
@@ -600,7 +600,7 @@ public sealed partial class VendorBuyListManager : IDisposable
         {
             _statusText = $"Vendor list '{list.Name}' complete.";
             GatherBuddy.Log.Information($"[VendorBuyListManager] Vendor list '{list.Name}' complete.");
-            Communicator.Print($"[GatherBuddyReborn] Vendor list '{list.Name}' complete.");
+            Communicator.Print($"[GatherBuddy Ascended] Vendor list '{list.Name}' complete.");
             return;
         }
         var resultParts = new List<string>();
@@ -612,7 +612,7 @@ public sealed partial class VendorBuyListManager : IDisposable
         var detail = string.Join(" and ", resultParts);
         _statusText = $"Vendor list '{list.Name}' completed with {detail}.";
         GatherBuddy.Log.Warning($"[VendorBuyListManager] Vendor list '{list.Name}' completed with {detail}.");
-        Communicator.PrintError($"[GatherBuddyReborn] Vendor list '{list.Name}' completed with {detail}.");
+        Communicator.PrintError($"[GatherBuddy Ascended] Vendor list '{list.Name}' completed with {detail}.");
     }
 
     private void EnsureListState()
@@ -687,7 +687,7 @@ public sealed partial class VendorBuyListManager : IDisposable
             _statusText = $"{entry.ItemName} target set to {targetQuantity:N0} in '{list.Name}'.";
 
         if (announce)
-            Communicator.Print($"[GatherBuddyReborn] Added {entry.ItemName} to '{list.Name}' with target {targetQuantity:N0}.");
+            Communicator.Print($"[GatherBuddy Ascended] Added {entry.ItemName} to '{list.Name}' with target {targetQuantity:N0}.");
         return true;
     }
 
@@ -733,7 +733,7 @@ public sealed partial class VendorBuyListManager : IDisposable
                 _statusText = $"{existing.ItemName} target set to {existing.TargetQuantity:N0} in '{list.Name}'.";
 
             if (announce)
-                Communicator.Print($"[GatherBuddyReborn] Added {existing.ItemName} to '{list.Name}' with target {existing.TargetQuantity:N0}.");
+                Communicator.Print($"[GatherBuddy Ascended] Added {existing.ItemName} to '{list.Name}' with target {existing.TargetQuantity:N0}.");
             return true;
         }
 
@@ -790,9 +790,9 @@ public sealed partial class VendorBuyListManager : IDisposable
         if (announce)
         {
             if (addedTargets.Count == 1)
-                Communicator.Print($"[GatherBuddyReborn] Added {addedTargets[0].Entry.ItemName} to '{list.Name}' with target {addedTargets[0].TargetQuantity:N0}.");
+                Communicator.Print($"[GatherBuddy Ascended] Added {addedTargets[0].Entry.ItemName} to '{list.Name}' with target {addedTargets[0].TargetQuantity:N0}.");
             else
-                Communicator.Print($"[GatherBuddyReborn] Added {addedTargets.Count:N0} items to '{list.Name}'.");
+                Communicator.Print($"[GatherBuddy Ascended] Added {addedTargets.Count:N0} items to '{list.Name}'.");
         }
 
         return addedTargets.Count;

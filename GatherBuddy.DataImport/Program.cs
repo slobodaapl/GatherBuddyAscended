@@ -11,7 +11,8 @@ namespace GatherBuddy.DataImport
 {
     class Program
     {
-        private const string OutputPath = "../../../../GatherBuddyReborn/GatherBuddy/CustomInfo";
+        private static readonly string OutputPath = Path.GetFullPath(
+            Path.Combine(AppContext.BaseDirectory, "../../../../GatherBuddy/CustomInfo"));
         private const string FishRecordsFile = "fish_records.json";
         private const int SpotCap = 50; 
 

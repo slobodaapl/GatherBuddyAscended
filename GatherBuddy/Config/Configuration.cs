@@ -121,7 +121,7 @@ public partial class Configuration : IPluginConfiguration
     public int SeColorAlarm     = DefaultSeColorAlarm;
 
     // Fish Timer
-    public bool   ShowFishTimer           { get; set; } = true;
+    public bool   ShowFishTimer           { get; set; } = false;
     public bool   FishTimerEdit           { get; set; } = true;
     public bool   FishTimerClickthrough   { get; set; } = false;
     public bool   HideUncaughtFish        { get; set; } = false;

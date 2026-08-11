@@ -40,7 +40,7 @@ namespace GatherBuddy;
 
 public partial class GatherBuddy : IDalamudPlugin
 {
-    public const string InternalName = "GatherBuddyReborn";
+    public const string InternalName = "GatherBuddyAscended";
 
     public string Name
         => InternalName;
@@ -117,6 +117,7 @@ public partial class GatherBuddy : IDalamudPlugin
             Icons.Init(Dalamud.GameData, Dalamud.Textures);
             Log     = new Logger();
             Version = Assembly.GetExecutingAssembly().GetName().Version?.ToString() ?? "";
+            var rebornMigration = GatherBuddyRebornMigration.Prepare(pluginInterface, Log);
             Backup.CreateAutomaticBackup(Log, pluginInterface.ConfigDirectory, GatherBuddyBackupFiles());
             Config   = Configuration.Load();
             Language = Dalamud.ClientState.ClientLanguage;
@@ -200,6 +201,8 @@ public partial class GatherBuddy : IDalamudPlugin
             WindowSystem.AddWindow(_craftingTreeWindow);
             WindowSystem.AddWindow(_vendorBuyListWindow);
             WindowSystem.AddWindow(_collectablesWindow);
+            if (rebornMigration.ShouldPrompt)
+                WindowSystem.AddWindow(new GatherBuddyRebornMigrationWindow(rebornMigration));
             Dalamud.PluginInterface.UiBuilder.Draw         += DrawUi;
             Dalamud.PluginInterface.UiBuilder.OpenConfigUi += Interface.Toggle;
             Dalamud.PluginInterface.UiBuilder.OpenMainUi   += Interface.Toggle;
@@ -262,7 +265,7 @@ public partial class GatherBuddy : IDalamudPlugin
             {
                 Log.Error("First Party GatherBuddy detected. Please uninstall it to use this version.");
                 Communicator.PrintError(
-                    "[GatherBuddy Reborn] First Party GatherBuddy detected. Please uninstall it and restart your game to use this version.");
+                    "[GatherBuddy Ascended] First Party GatherBuddy detected. Please uninstall it and restart your game to use this version.");
                 break;
             }
         }

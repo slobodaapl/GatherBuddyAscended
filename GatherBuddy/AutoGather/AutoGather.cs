@@ -763,7 +763,7 @@ namespace GatherBuddy.AutoGather
                 if (!AutoHook.Enabled)
                 {
                     Communicator.PrintError(
-                        "[GatherBuddyReborn] You have fish on your auto-gather list but AutoHook is not installed or enabled. Auto-gather cannot continue. Please install and enable AutoHook or remove fish from your auto-gather lists.");
+                        "[GatherBuddy Ascended] You have fish on your auto-gather list but AutoHook is not installed or enabled. Auto-gather cannot continue. Please install and enable AutoHook or remove fish from your auto-gather lists.");
                     AbortAutoGather();
                     return;
                 }
