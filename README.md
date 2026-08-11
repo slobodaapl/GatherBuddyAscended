@@ -1,10 +1,10 @@
 <p align="center">
   <a href="https://github.com/slobodaapl/GatherBuddyAscended">
-    <img src="images/gba.png" alt="GatherBuddy Ascended">
+    <img src="images/gba.png" alt="GatherBuddy Ascended" width="240">
   </a>
 </p>
 
-# GatherBuddy Ascended
+<h1 align="center">GatherBuddy Ascended</h1>
 
 [![Latest release](https://img.shields.io/github/v/release/slobodaapl/GatherBuddyAscended?style=for-the-badge)](https://github.com/slobodaapl/GatherBuddyAscended/releases/latest)
 ![GitHub downloads](https://img.shields.io/github/downloads/slobodaapl/GatherBuddyAscended/total?style=for-the-badge)
