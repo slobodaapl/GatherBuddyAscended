@@ -82,6 +82,16 @@ public static class CraftingProcessor
         CraftingEvents.RaiseSolverRecommendationReady(craft, step, _nextRecommendation, _activeSolverName);
     }
 
+    public static bool TryResumeCraft(CraftState craft, StepState step)
+    {
+        if (_activeSolver is not DonatelloSolver donatello)
+            return false;
+
+        _nextRecommendation = donatello.ResumeFromLiveState(step);
+        CraftingEvents.RaiseSolverRecommendationReady(craft, step, _nextRecommendation, _activeSolverName);
+        return true;
+    }
+
     public static void OnCraftFinished(CraftState craft, StepState finalStep, uint? recipeId, bool cancelled)
     {
         _activeSolver = null;

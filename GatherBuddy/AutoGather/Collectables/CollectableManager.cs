@@ -586,8 +586,9 @@ public unsafe class CollectableManager : IDisposable
                 AdvancePurchaseListsOrComplete();
                 return;
             case VendorBuyListManager.StartResult.NoList:
+            case VendorBuyListManager.StartResult.VendorUnavailable:
                 if (_overcapInterrupted)
-                    DisableAutoTurnInAndFail("The configured collectables purchase list is unavailable.");
+                    DisableAutoTurnInAndFail(GatherBuddy.VendorBuyListManager.StatusText);
                 else
                 {
                     _activePurchaseListId = null;

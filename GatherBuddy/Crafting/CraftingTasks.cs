@@ -133,6 +133,7 @@ public static class CraftingTasks
 
     public static void ResetRepairState()
     {
+        StopNavigation();
         _seenRepairConfirmation = false;
         _waitingForOccupied39 = false;
         _repairAutoStartTime = DateTime.MinValue;
@@ -271,13 +272,13 @@ public static class CraftingTasks
         return TaskResult.Done;
     }
 
-    public static TaskResult TaskNavigateToRepairNPC(RepairNPCData targetNPC)
+    public static TaskResult TaskNavigateToRepairNPC(RepairNPCData targetNPC, uint targetAetheryteId = 0)
     {
         if (_navigator == null)
         {
             GatherBuddy.Log.Information($"[CraftingTasks] Starting navigation to repair NPC: {targetNPC.Name}");
             _navigator = new RepairNPCNavigator();
-            _navigator.StartNavigation(targetNPC);
+            _navigator.StartNavigation(targetNPC, targetAetheryteId);
             return TaskResult.Retry;
         }
 

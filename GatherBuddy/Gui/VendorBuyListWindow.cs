@@ -251,6 +251,9 @@ public sealed partial class VendorBuyListWindow : Window
         var entries = manager.Entries.ToList();
         var pending = manager.GetPendingEntryCount();
         var currencyRequirements = BuildCurrencyRequirements(entries, manager);
+        var unresolvedOffers = entries.Count(entry =>
+            !VendorOfferMath.HasValidCurrencyCosts(entry.EffectiveCurrencyCosts)
+         || !VendorOfferMath.HasValidReceivedItems(entry.EffectiveReceivedItems, entry.ItemId));
         var vendorAutomationAvailable = VendorAutomationRequirements.IsAvailable;
 
         ImGui.TextColored(ImGuiColors.ParsedGold, activeList.Name);
@@ -259,6 +262,12 @@ public sealed partial class VendorBuyListWindow : Window
         {
             ImGui.Spacing();
             ImGui.TextColored(manager.IsRunning ? ImGuiColors.ParsedGold : ImGuiColors.DalamudGrey3, manager.StatusText);
+        }
+        if (unresolvedOffers > 0)
+        {
+            ImGui.Spacing();
+            ImGui.TextColored(ImGuiColors.DalamudYellow,
+                $"{unresolvedOffers:N0} offer(s) have unresolved cost/output data and cannot be purchased safely.");
         }
         if (!vendorAutomationAvailable)
         {
@@ -332,33 +341,46 @@ public sealed partial class VendorBuyListWindow : Window
         foreach (var entry in entries)
         {
             var remainingQuantity = manager.GetRemainingQuantity(entry);
-            if (remainingQuantity == 0 || entry.Cost == 0)
+            if (remainingQuantity == 0)
                 continue;
 
-            var currencyItemId = entry.CurrencyItemId;
-            var currencyName = GetCurrencyName(currencyItemId, entry.CurrencyName);
-            var currencyGroup = VendorShopResolver.GetCurrencyGroup(entry.ShopType, currencyItemId);
-            var availability = VendorCurrencyAvailabilityResolver.Resolve(currencyGroup, currencyItemId, currencyName);
-            var iconId = GetCurrencyIconId(currencyItemId);
-            var requiredAmount = (ulong)remainingQuantity * entry.Cost;
-            if (requirements.TryGetValue(currencyItemId, out var existing))
+            var receivedItems = entry.EffectiveReceivedItems;
+            var currencyCosts = entry.EffectiveCurrencyCosts;
+            if (!VendorOfferMath.HasValidReceivedItems(receivedItems, entry.ItemId)
+             || !VendorOfferMath.HasValidCurrencyCosts(currencyCosts))
+                continue;
+
+            var receivedQuantity = VendorOfferMath.SumReceivedQuantity(receivedItems, entry.ItemId);
+            if (receivedQuantity == 0)
+                continue;
+
+            var purchaseCount = VendorOfferMath.GetPurchaseCount(remainingQuantity, receivedQuantity);
+            foreach (var cost in currencyCosts)
             {
-                requirements[currencyItemId] = existing with
+                var currencyItemId = cost.CurrencyItemId;
+                var currencyName = GetCurrencyName(currencyItemId, cost.CurrencyName);
+                var availability = VendorCurrencyAvailabilityResolver.Resolve(cost.Group, currencyItemId, currencyName);
+                var iconId = GetCurrencyIconId(currencyItemId);
+                var requiredAmount = checked((ulong)purchaseCount * cost.Amount);
+                if (requirements.TryGetValue(currencyItemId, out var existing))
                 {
-                    RequiredAmount = existing.RequiredAmount + requiredAmount,
-                    CurrencyName = string.IsNullOrWhiteSpace(existing.CurrencyName) ? availability.CurrencyName : existing.CurrencyName,
-                    IconId = existing.IconId != 0 ? existing.IconId : iconId,
-                    AvailableAmount = existing.AvailableAmount != 0 ? existing.AvailableAmount : availability.AvailableAmount,
-                };
-                continue;
-            }
+                    requirements[currencyItemId] = existing with
+                    {
+                        RequiredAmount = checked(existing.RequiredAmount + requiredAmount),
+                        CurrencyName = string.IsNullOrWhiteSpace(existing.CurrencyName) ? availability.CurrencyName : existing.CurrencyName,
+                        IconId = existing.IconId != 0 ? existing.IconId : iconId,
+                        AvailableAmount = existing.AvailableAmount != 0 ? existing.AvailableAmount : availability.AvailableAmount,
+                    };
+                    continue;
+                }
 
-            requirements.Add(currencyItemId, new VendorCurrencyRequirement(
-                currencyItemId,
-                availability.CurrencyName,
-                iconId,
-                availability.AvailableAmount,
-                requiredAmount));
+                requirements.Add(currencyItemId, new VendorCurrencyRequirement(
+                    currencyItemId,
+                    availability.CurrencyName,
+                    iconId,
+                    availability.AvailableAmount,
+                    requiredAmount));
+            }
         }
 
         return requirements.Values
@@ -433,7 +455,7 @@ public sealed partial class VendorBuyListWindow : Window
 
         ImGui.TableSetupScrollFreeze(0, 1);
         ImGui.TableSetupColumn("Item",     ImGuiTableColumnFlags.WidthStretch, 1.25f);
-        ImGui.TableSetupColumn("Cost",     ImGuiTableColumnFlags.WidthFixed, VulcanUiScaling.Scaled(58f));
+        ImGui.TableSetupColumn("Cost",     ImGuiTableColumnFlags.WidthFixed, VulcanUiScaling.Scaled(140f));
         ImGui.TableSetupColumn("Want",     ImGuiTableColumnFlags.WidthFixed, VulcanUiScaling.Scaled(78f));
         ImGui.TableSetupColumn("Have",     ImGuiTableColumnFlags.WidthFixed, VulcanUiScaling.Scaled(54f));
         ImGui.TableSetupColumn("Need",     ImGuiTableColumnFlags.WidthFixed, VulcanUiScaling.Scaled(54f));
@@ -560,8 +582,7 @@ public sealed partial class VendorBuyListWindow : Window
             ImGui.SetTooltip(entry.ItemName);
 
         ImGui.TableNextColumn();
-        ImGui.AlignTextToFramePadding();
-        ImGui.TextUnformatted($"{entry.Cost:N0}");
+        DrawEntryCostCell(entry, iconVec, iconSize);
 
         ImGui.TableNextColumn();
         using (ImRaii.Disabled(isActive || manager.IsBusy))
@@ -609,6 +630,47 @@ public sealed partial class VendorBuyListWindow : Window
         }
     }
 
+    private void DrawEntryCostCell(VendorBuyListEntry entry, Vector2 iconVec, float iconSize)
+    {
+        var costs = entry.EffectiveCurrencyCosts;
+        if (!VendorOfferMath.HasValidCurrencyCosts(costs))
+        {
+            ImGui.TextColored(ImGuiColors.DalamudYellow, "Unknown");
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip("Vendor currency cost is unresolved; this entry cannot be purchased safely.");
+            return;
+        }
+
+        var tooltip = string.Join("\n", costs.Select(cost =>
+            $"{cost.Amount:N0} {GetCurrencyName(cost.CurrencyItemId, cost.CurrencyName)}"));
+        for (var i = 0; i < costs.Count; i++)
+        {
+            if (i > 0)
+            {
+                ImGui.SameLine(0, VulcanUiScaling.Scaled(2f));
+                ImGui.TextUnformatted("+");
+                ImGui.SameLine(0, VulcanUiScaling.Scaled(2f));
+            }
+
+            var cost = costs[i];
+            var currencyIconId = GetCurrencyIconId(cost.CurrencyItemId);
+            if (currencyIconId != 0)
+            {
+                var icon = Icons.DefaultStorage.TextureProvider.GetFromGameIcon(new GameIconLookup(currencyIconId));
+                if (icon.TryGetWrap(out var wrap, out _))
+                {
+                    ImGui.Image(wrap.Handle, iconVec);
+                    ImGui.SameLine(0, VulcanUiScaling.Scaled(2f));
+                }
+            }
+
+            ImGui.SetCursorPosY(ImGui.GetCursorPosY() + (iconSize - ImGui.GetTextLineHeight()) / 2f);
+            ImGui.TextUnformatted($"{cost.Amount:N0}");
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip(tooltip);
+        }
+    }
+
     private List<VendorListNpcOption> BuildVendorOptions(VendorShopEntry? liveEntry)
     {
         var options = new List<VendorListNpcOption>();
@@ -619,6 +681,10 @@ public sealed partial class VendorBuyListWindow : Window
         var selectableNpcs = VendorDevExclusions.GetSelectableNpcs(liveEntry.Npcs, "building the vendor buy list", liveEntry.ItemName);
         foreach (var npc in selectableNpcs)
         {
+            if (!VendorPurchaseManager.IsPurchaseSupported(liveEntry, npc))
+                continue;
+            if (!VendorAvailabilityResolver.Resolve(liveEntry, npc).IsAvailable)
+                continue;
             var location = VendorNpcLocationCache.TryGetFirstLocation(npc.NpcId);
             if (locationCacheReady && location == null)
                 continue;
@@ -655,9 +721,9 @@ public sealed partial class VendorBuyListWindow : Window
     {
         if (vendorOptions.Count == 0)
         {
-            ImGui.TextColored(ImGuiColors.DalamudGrey3, entry.VendorNpcName);
+            ImGui.TextColored(ImGuiColors.DalamudYellow, "Unavailable");
             if (ImGui.IsItemHovered())
-                ImGui.SetTooltip(entry.VendorNpcName);
+                ImGui.SetTooltip(manager.GetVendorUnavailableReason(entry));
             return null;
         }
 

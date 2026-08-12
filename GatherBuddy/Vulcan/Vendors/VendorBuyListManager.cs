@@ -21,6 +21,7 @@ public sealed partial class VendorBuyListManager : IDisposable
         NoPendingEntries,
         VendorDataLoading,
         LocationDataLoading,
+        VendorUnavailable,
         AnotherPurchaseRunning,
     }
     private readonly record struct VendorExecutionGroup(uint NpcId, VendorMenuShopType MenuShopType, uint ShopId);
@@ -327,6 +328,7 @@ public sealed partial class VendorBuyListManager : IDisposable
 
         if (!TryResolveLiveEntry(entry, out var liveEntry, out _, out _) || liveEntry == null)
         {
+            _statusText = $"Cannot select a vendor for {entry.ItemName}: {GetVendorUnavailableReason(entry)}";
             GatherBuddy.Log.Debug($"[VendorBuyListManager] Could not resolve live vendor options for {entry.ItemName} while updating the vendor.");
             return false;
         }
@@ -335,6 +337,12 @@ public sealed partial class VendorBuyListManager : IDisposable
         if (selectedVendor == null)
         {
             GatherBuddy.Log.Debug($"[VendorBuyListManager] Could not find vendor {vendor.NpcId}/{vendor.MenuShopType}/{vendor.ShopId}/{vendor.SourceShopId}:{vendor.ShopItemIndex} for {entry.ItemName} while updating the vendor.");
+            return false;
+        }
+        var availability = VendorAvailabilityResolver.Resolve(liveEntry, selectedVendor);
+        if (!availability.IsAvailable)
+        {
+            _statusText = $"Cannot select {selectedVendor.Name}: {availability.Reason}";
             return false;
         }
         if (MatchesVendor(entry, selectedVendor))
@@ -450,6 +458,14 @@ public sealed partial class VendorBuyListManager : IDisposable
             return StartResult.LocationDataLoading;
         }
 
+        foreach (var entry in activeList.Entries.Where(entry => entry.Enabled && GetRemainingQuantity(entry) > 0))
+        {
+            if (TryResolveLiveEntry(entry, out _, out _, out _, out var resolutionFailureReason))
+                continue;
+            _statusText = $"Cannot start '{activeList.Name}': {entry.ItemName} — {resolutionFailureReason}";
+            return StartResult.VendorUnavailable;
+        }
+
         if (GatherBuddy.VendorPurchaseManager.IsRunning)
         {
             _statusText = "Another vendor purchase is already running.";
@@ -495,53 +511,62 @@ public sealed partial class VendorBuyListManager : IDisposable
     }
 
     public bool TryResolveLiveEntry(VendorBuyListEntry entry, out VendorShopEntry? liveEntry, out VendorNpc? vendor, out VendorNpcLocation? location)
+        => TryResolveLiveEntry(entry, out liveEntry, out vendor, out location, out _);
+
+    private bool TryResolveLiveEntry(VendorBuyListEntry entry, out VendorShopEntry? liveEntry, out VendorNpc? vendor, out VendorNpcLocation? location,
+        out string failureReason)
     {
         liveEntry = null;
         vendor    = null;
         location  = null;
+        failureReason = string.Empty;
         var candidates = GetMatchingCandidates(entry);
         if (candidates.Count == 0)
-            return false;
-
-        liveEntry = candidates.FirstOrDefault(candidate => candidate.Npcs.Any(npc =>
-                MatchesVendor(entry, npc)))
-            ?? candidates.FirstOrDefault(candidate => candidate.Npcs.Any(npc =>
-                MatchesVendor(entry, npc, false)))
-            ?? candidates.FirstOrDefault(candidate => candidate.Npcs.Any(npc => VendorPurchaseManager.IsPurchaseSupported(candidate, npc)))
-            ?? candidates[0];
-
-        var resolvedLiveEntry = liveEntry;
-        var supportedVendors = VendorDevExclusions.GetSelectableNpcs(
-                resolvedLiveEntry.Npcs
-                    .Where(npc => VendorPurchaseManager.IsPurchaseSupported(resolvedLiveEntry, npc))
-                    .ToList(),
-                "resolving a vendor buy list entry",
-                entry.ItemName)
-            .ToList();
-        if (supportedVendors.Count == 0)
-            return false;
-        vendor = supportedVendors.FirstOrDefault(npc => MatchesVendor(entry, npc))
-            ?? supportedVendors.FirstOrDefault(npc => MatchesVendor(entry, npc, false))
-            ?? VendorPreferenceHelper.ResolvePreferredNpc(resolvedLiveEntry, supportedVendors)
-            ?? VendorPreferenceHelper.ResolvePreferredNpc(entry, supportedVendors)
-            ?? supportedVendors.FirstOrDefault();
-        if (vendor == null)
-            return false;
-
-        location = VendorNpcLocationCache.TryGetFirstLocation(vendor.NpcId);
-        if (location == null)
         {
-            var fallbackVendor = VendorPreferenceHelper.ResolvePreferredNpc(resolvedLiveEntry, supportedVendors)
-                ?? VendorPreferenceHelper.ResolvePreferredNpc(entry, supportedVendors)
-                ?? supportedVendors.FirstOrDefault();
-            if (fallbackVendor != null)
-            {
-                vendor   = fallbackVendor;
-                location = VendorNpcLocationCache.TryGetFirstLocation(vendor.NpcId);
-            }
+            failureReason = GetVendorUnavailableReason(entry);
+            return false;
         }
 
-        return true;
+        var resolved = candidates
+            .Select(candidate => (Entry: candidate, Vendors: GetAvailableSupportedVendors(candidate, "resolving a vendor buy list entry")))
+            .Where(candidate => candidate.Vendors.Count > 0)
+            .OrderByDescending(candidate => candidate.Vendors.Any(npc => MatchesVendor(entry, npc)))
+            .ThenByDescending(candidate => candidate.Vendors.Any(npc => MatchesVendor(entry, npc, false)))
+            .FirstOrDefault();
+        if (resolved.Entry == null)
+        {
+            failureReason = GetVendorUnavailableReason(entry);
+            return false;
+        }
+        liveEntry = resolved.Entry;
+        var supportedVendors = resolved.Vendors;
+        var preferredVendor = supportedVendors.FirstOrDefault(npc => MatchesVendor(entry, npc))
+            ?? supportedVendors.FirstOrDefault(npc => MatchesVendor(entry, npc, false))
+            ?? VendorPreferenceHelper.ResolvePreferredNpc(liveEntry, supportedVendors)
+            ?? VendorPreferenceHelper.ResolvePreferredNpc(entry, supportedVendors)
+            ?? supportedVendors.FirstOrDefault();
+        if (preferredVendor == null)
+        {
+            failureReason = GetVendorUnavailableReason(entry);
+            return false;
+        }
+
+        var orderedVendors = new[] { preferredVendor }
+            .Concat(supportedVendors.Where(candidate => !VendorPreferenceHelper.MatchesVendor(candidate, preferredVendor)));
+        foreach (var candidateVendor in orderedVendors)
+        {
+            var candidateLocation = VendorNpcLocationCache.TryGetFirstLocation(candidateVendor.NpcId);
+            if (candidateLocation == null)
+                continue;
+
+            vendor = candidateVendor;
+            location = candidateLocation;
+            return true;
+        }
+
+        vendor = preferredVendor;
+        failureReason = $"No vendor location data is available for {preferredVendor.Name}.";
+        return false;
     }
 
     public static int GetCurrentInventoryAndArmoryCount(uint itemId)
@@ -641,7 +666,8 @@ public sealed partial class VendorBuyListManager : IDisposable
     {
         var candidates = GetCandidateEntries(entry)
             .Where(candidate => candidate.ItemId == entry.ItemId
-                && candidate.Cost == entry.Cost)
+                && candidate.Cost == entry.Cost
+                && MatchesSavedOffer(entry, candidate))
             .ToList();
         if (entry.ShopType != VendorShopType.GrandCompanySeals)
             return candidates
@@ -693,8 +719,19 @@ public sealed partial class VendorBuyListManager : IDisposable
 
     private bool TrySetResolvedTarget(VendorBuyListDefinition list, VendorShopEntry entry, VendorNpc vendor, uint targetQuantity)
     {
+        if (!VendorCurrencyAvailabilityResolver.TryCaptureAuthoritative(entry.CurrencyCosts, out _, out var currencyFailure))
+        {
+            _statusText = $"Cannot add {entry.ItemName}: {currencyFailure}";
+            return false;
+        }
         if (!VendorPurchaseManager.IsPurchaseSupported(entry, vendor))
             return false;
+        var availability = VendorAvailabilityResolver.Resolve(entry, vendor);
+        if (!availability.IsAvailable)
+        {
+            _statusText = $"Cannot add {entry.ItemName}: {availability.Reason}";
+            return false;
+        }
 
         targetQuantity = Math.Max(1u, targetQuantity);
 
@@ -720,6 +757,11 @@ public sealed partial class VendorBuyListManager : IDisposable
         if (existingEntries.Count == 1)
         {
             var existing = existingEntries[0];
+            if (!TryResolveLiveEntry(existing, out _, out _, out _))
+            {
+                _statusText = $"Cannot add {existing.ItemName}: {GetVendorUnavailableReason(existing)}";
+                return false;
+            }
             existing.TargetQuantity = SaturatingAdd(Math.Max(existing.TargetQuantity, (uint)Math.Max(0, GetCurrentInventoryAndArmoryCount(itemId))), amount);
             existing.Enabled = true;
             if (selectList)
@@ -840,10 +882,33 @@ public sealed partial class VendorBuyListManager : IDisposable
     private static uint SaturatingAdd(uint left, uint right)
         => left > uint.MaxValue - right ? uint.MaxValue : left + right;
 
+    private static uint GetRequiredAlliedSocietyId(VendorShopEntry entry, VendorNpc vendor)
+        => entry.RequiredAlliedSocietyId != 0
+            ? entry.RequiredAlliedSocietyId
+            : vendor.RequiredAlliedSocietyId;
+
+    private static uint GetRequiredAlliedSocietyRank(VendorShopEntry entry, VendorNpc vendor)
+        => entry.RequiredAlliedSocietyRank != 0
+            ? entry.RequiredAlliedSocietyRank
+            : vendor.RequiredAlliedSocietyRank;
+
+    private static bool GetAlliedRequirementKnown(VendorShopEntry entry, VendorNpc vendor)
+        => entry.RequiredAlliedSocietyId != 0 || vendor.AlliedRequirementKnown;
+
+    private static bool MatchesAlliedVendorRoute(VendorBuyListEntry entry, VendorNpc vendor)
+        => (entry.RequiredAlliedSocietyId == vendor.RequiredAlliedSocietyId
+            || entry.RequiredAlliedSocietyId != 0 && vendor.RequiredAlliedSocietyId == 0)
+        && entry.RequiredAlliedSocietyRank == vendor.RequiredAlliedSocietyRank
+        && (entry.RequiredAlliedSocietyId != 0
+            || entry.AlliedRequirementKnown == vendor.AlliedRequirementKnown);
+
     private static bool MatchesVendor(VendorBuyListEntry entry, VendorNpc vendor, bool includeRoute = true)
         => entry.VendorNpcId == vendor.NpcId
         && entry.MenuShopType == vendor.MenuShopType
         && entry.ShopId == vendor.ShopId
+        && entry.UnlockQuestId == vendor.UnlockQuestId
+        && entry.RequiredGrandCompanyRank == vendor.RequiredGrandCompanyRank
+        && MatchesAlliedVendorRoute(entry, vendor)
         && (!includeRoute
          || entry.ShopType switch
          {
@@ -860,6 +925,12 @@ public sealed partial class VendorBuyListManager : IDisposable
          && existing.ShopType == entry.ShopType
          && existing.ItemId == entry.ItemId
          && existing.Cost == entry.Cost
+         && MatchesSavedOffer(existing, entry)
+         && existing.UnlockQuestId == vendor.UnlockQuestId
+         && existing.RequiredGrandCompanyRank == vendor.RequiredGrandCompanyRank
+         && existing.RequiredAlliedSocietyId == GetRequiredAlliedSocietyId(entry, vendor)
+         && existing.RequiredAlliedSocietyRank == GetRequiredAlliedSocietyRank(entry, vendor)
+         && existing.AlliedRequirementKnown == GetAlliedRequirementKnown(entry, vendor)
          && (entry.ShopType == VendorShopType.GrandCompanySeals
              ? existing.GcRankIndex == vendor.GcRankIndex
             && existing.GcCategoryIndex == vendor.GcCategoryIndex
@@ -892,8 +963,18 @@ public sealed partial class VendorBuyListManager : IDisposable
         target.VendorNpcName  = vendor.Name;
         target.MenuShopType   = vendor.MenuShopType;
         target.ShopId         = vendor.ShopId;
+        target.UnlockQuestId  = vendor.UnlockQuestId;
+        target.RequiredGrandCompanyRank = vendor.RequiredGrandCompanyRank;
         target.TargetQuantity = Math.Max(1u, targetQuantity);
+        target.CurrencyCosts   = entry.CurrencyCosts.ToList();
+        target.ReceivedItems   = entry.ReceivedItems.ToList();
+        target.RequiredAlliedSocietyId = GetRequiredAlliedSocietyId(entry, vendor);
+        target.RequiredAlliedSocietyRank = GetRequiredAlliedSocietyRank(entry, vendor);
+        target.AlliedRequirementKnown = GetAlliedRequirementKnown(entry, vendor);
     }
+
+    private static bool MatchesSavedOffer(VendorBuyListEntry saved, VendorShopEntry live)
+        => VendorOfferMath.MatchesPersistedOffer(saved, live);
 
     private static IEnumerable<VendorShopEntry> GetCandidateEntries(VendorBuyListEntry entry)
         => entry.ShopType switch
@@ -914,12 +995,7 @@ public sealed partial class VendorBuyListManager : IDisposable
         var candidates = GetDefaultEntryCandidates(itemId).ToList();
         foreach (var candidate in candidates)
         {
-            var supportedVendors = VendorDevExclusions.GetSelectableNpcs(
-                candidate.Npcs
-                    .Where(npc => VendorPurchaseManager.IsPurchaseSupported(candidate, npc))
-                    .ToList(),
-                "resolving a default vendor buy list entry",
-                candidate.ItemName);
+            var supportedVendors = GetAvailableSupportedVendors(candidate, "resolving a default vendor buy list entry");
             if (supportedVendors.Count == 0)
                 continue;
 
@@ -937,6 +1013,51 @@ public sealed partial class VendorBuyListManager : IDisposable
                 $"[VendorBuyListManager] Could not resolve a supported default vendor entry for item {itemId}; found {candidates.Count:N0} candidate vendor entries but none had an automation-supported route.");
 
         return false;
+    }
+
+    private static List<VendorNpc> GetAvailableSupportedVendors(VendorShopEntry entry, string context)
+    {
+        if (!VendorCurrencyAvailabilityResolver.TryCaptureAuthoritative(entry.CurrencyCosts, out _, out _))
+            return [];
+
+        return VendorDevExclusions.GetSelectableNpcs(
+                entry.Npcs
+                    .Where(npc => VendorPurchaseManager.IsPurchaseSupported(entry, npc))
+                    .Where(npc => VendorAvailabilityResolver.Resolve(entry, npc).IsAvailable)
+                    .ToList(),
+                context,
+                entry.ItemName)
+            .ToList();
+    }
+
+    public string GetVendorUnavailableReason(VendorBuyListEntry entry)
+    {
+        string? currencyFailure = null;
+        string? availabilityFailure = null;
+        foreach (var candidate in GetMatchingCandidates(entry))
+        {
+            if (!VendorOfferMath.HasValidCurrencyCosts(candidate.CurrencyCosts)
+             || !VendorOfferMath.HasValidReceivedItems(candidate.ReceivedItems, candidate.ItemId))
+            {
+                currencyFailure ??= "Vendor offer cost or output quantity is unresolved.";
+                continue;
+            }
+            if (!VendorCurrencyAvailabilityResolver.TryCaptureAuthoritative(candidate.CurrencyCosts, out _, out var candidateCurrencyFailure))
+            {
+                currencyFailure ??= candidateCurrencyFailure;
+                continue;
+            }
+
+            foreach (var vendor in candidate.Npcs.Where(npc => VendorPurchaseManager.IsPurchaseSupported(candidate, npc)))
+            {
+                var availability = VendorAvailabilityResolver.Resolve(candidate, vendor);
+                if (!availability.IsAvailable)
+                    availabilityFailure ??= availability.Reason;
+            }
+        }
+        return currencyFailure
+            ?? availabilityFailure
+            ?? "No unlocked, automation-supported vendor is available for this character.";
     }
 
     private static IEnumerable<VendorShopEntry> GetDefaultEntryCandidates(uint itemId)
@@ -1191,14 +1312,16 @@ public sealed partial class VendorBuyListManager : IDisposable
             return PurchaseContextResolutionResult.RetryableFailure;
         }
 
-        if (!TryResolveLiveEntry(entry, out var resolvedEntry, out var resolvedVendor, out var resolvedLocation)
+        if (!TryResolveLiveEntry(entry, out var resolvedEntry, out var resolvedVendor, out var resolvedLocation, out var resolutionFailureReason)
          || resolvedEntry == null
          || resolvedVendor == null)
         {
             liveEntry    = null!;
             vendor       = null!;
             location     = null!;
-            errorMessage = $"Could not resolve {entry.ItemName} in the {DescribeShopType(entry.ShopType)} vendor data.";
+            errorMessage = string.IsNullOrWhiteSpace(resolutionFailureReason)
+                ? $"Could not resolve {entry.ItemName} in the {DescribeShopType(entry.ShopType)} vendor data."
+                : resolutionFailureReason;
             return PurchaseContextResolutionResult.SkippableFailure;
         }
 

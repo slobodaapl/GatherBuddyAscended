@@ -3,6 +3,8 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Numerics;
+using FFXIVClientStructs.FFXIV.Client.Game.UI;
+using GatherBuddy.SeFunctions;
 using Lumina.Data.Files;
 using Lumina.Data.Parsing.Layer;
 using Lumina.Excel.Sheets;
@@ -22,10 +24,86 @@ public static class RepairNPCHelper
 {
     public static List<RepairNPCData> RepairNPCs { get; } = new();
 
+    public readonly record struct RepairNPCRoute(RepairNPCData NPC, uint AetheryteId, uint TeleportCost);
+
+    public static RepairNPCRoute? FindBestRepairRoute(RepairNPCData? preferredNPC = null)
+    {
+        var currentTerritory = Dalamud.ClientState.TerritoryType;
+        var playerPosition = Dalamud.Objects.LocalPlayer?.Position ?? Vector3.Zero;
+
+        if (preferredNPC != null && TryBuildRoute(preferredNPC, currentTerritory, out var preferredRoute))
+            return preferredRoute;
+
+        var currentTerritoryNPC = RepairNPCs
+            .Where(npc => npc.TerritoryType == currentTerritory)
+            .OrderBy(npc => playerPosition == Vector3.Zero ? 0 : Vector3.DistanceSquared(playerPosition, npc.Position))
+            .FirstOrDefault();
+        if (currentTerritoryNPC != null)
+            return new RepairNPCRoute(currentTerritoryNPC, 0, 0);
+
+        var best = RepairNPCs
+            .Select(npc => TryBuildRoute(npc, currentTerritory, out var route) ? route : (RepairNPCRoute?)null)
+            .Where(route => route.HasValue)
+            .Select(route => route!.Value)
+            .OrderBy(route => route.TeleportCost)
+            .ThenBy(route => route.NPC.TerritoryType)
+            .ThenBy(route => route.NPC.DataId)
+            .FirstOrDefault();
+        return best.NPC != null ? best : null;
+    }
+
+    public static unsafe uint FindCheapestAttunedAetheryte(uint territoryId, out uint teleportCost)
+    {
+        teleportCost = uint.MaxValue;
+        var telepo = Telepo.Instance();
+        var aetheryteSheet = Dalamud.GameData.GetExcelSheet<Aetheryte>();
+        if (telepo == null || aetheryteSheet == null)
+            return 0;
+
+        telepo->UpdateAetheryteList();
+        var costs = new Dictionary<uint, uint>();
+        for (var i = 0; i < telepo->TeleportList.Count; ++i)
+        {
+            var entry = telepo->TeleportList[i];
+            costs[entry.AetheryteId] = entry.GilCost;
+        }
+
+        var candidate = aetheryteSheet
+            .Where(aetheryte => aetheryte.IsAetheryte
+                && aetheryte.Territory.RowId == territoryId
+                && Teleporter.IsAttuned(aetheryte.RowId)
+                && costs.ContainsKey(aetheryte.RowId))
+            .Select(aetheryte => (Id: aetheryte.RowId, Cost: costs[aetheryte.RowId]))
+            .OrderBy(value => value.Cost)
+            .ThenBy(value => value.Id)
+            .FirstOrDefault();
+
+        if (candidate.Id == 0)
+            return 0;
+
+        teleportCost = candidate.Cost;
+        return candidate.Id;
+    }
+
+    private static bool TryBuildRoute(RepairNPCData npc, uint currentTerritory, out RepairNPCRoute route)
+    {
+        if (npc.TerritoryType == currentTerritory)
+        {
+            route = new RepairNPCRoute(npc, 0, 0);
+            return true;
+        }
+
+        var aetheryteId = FindCheapestAttunedAetheryte(npc.TerritoryType, out var cost);
+        route = new RepairNPCRoute(npc, aetheryteId, cost);
+        return aetheryteId != 0;
+    }
+
     public static void PopulateRepairNPCs()
     {
         try
         {
+            RepairNPCs.Clear();
+
             var territorySheet = Dalamud.GameData.GetExcelSheet<TerritoryType>();
             var eNpcResidentSheet = Dalamud.GameData.GetExcelSheet<ENpcResident>();
             var eNpcBaseSheet = Dalamud.GameData.GetExcelSheet<ENpcBase>();
@@ -74,17 +152,16 @@ public static class RepairNPCHelper
                 repairNPCsByDataId[eNpcResident.RowId] = (name, repairIndex);
             }
 
-            var addedDataIds = new HashSet<uint>();
+            var addedNPCs = new HashSet<(uint DataId, uint TerritoryId)>();
             
             foreach (var instance in allNpcInstances)
             {
                 if (!repairNPCsByDataId.TryGetValue(instance.DataId, out var npcData))
                     continue;
 
-                if (addedDataIds.Contains(instance.DataId))
+                if (!addedNPCs.Add((instance.DataId, instance.TerritoryId)))
                     continue;
 
-                addedDataIds.Add(instance.DataId);
                 RepairNPCs.Add(new RepairNPCData
                 {
                     DataId = instance.DataId,

@@ -211,6 +211,29 @@ public partial class VulcanWindow
             if (ImGui.IsItemHovered())
                 ImGui.SetTooltip("When disabled (default), Raphael generates non-specialist rotations even if you are a specialist.\nEnable only if you want Raphael to use specialist actions.\nChanging this clears the solution cache.");
 
+            var minimizeDonatelloSteps = raphaelConfig.DonatelloMinimizeSteps;
+            if (ImGui.Checkbox("  Attempt to minimize craft steps at no cost to quality###DonatelloMinimizeSteps", ref minimizeDonatelloSteps))
+            {
+                raphaelConfig.DonatelloMinimizeSteps = minimizeDonatelloSteps;
+                GatherBuddy.Config.Save();
+                Vulcan.DonatelloNative.ClearCache();
+            }
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip("May greatly increase solving time, but can reduce crafting time.");
+
+            ImGui.Text("  Solver cache memory (MiB): ");
+            ImGui.SameLine();
+            var cacheMemoryMiB = Math.Clamp(raphaelConfig.DonatelloCacheMemoryMiB, 64, 1024);
+            ImGui.SetNextItemWidth(VulcanUiScaling.Scaled(180f));
+            if (ImGui.SliderInt("###DonatelloCacheMemory", ref cacheMemoryMiB, 64, 1024))
+            {
+                raphaelConfig.DonatelloCacheMemoryMiB = cacheMemoryMiB;
+                GatherBuddy.Config.Save();
+                Vulcan.DonatelloNative.ConfigureCache(cacheMemoryMiB);
+            }
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip("Maximum retained memory for native Donatello caches. Active solve memory is not included.");
+
             var activeColor = coordinator.ActiveSolves > 0 ? ImGuiColors.HealerGreen : ImGuiColors.DalamudGrey;
             ImGui.TextColored(activeColor, $"  Active Solves: {coordinator.ActiveSolves}/{raphaelConfig.MaxConcurrentRaphaelProcesses}");
 
@@ -223,6 +246,7 @@ public partial class VulcanWindow
             if (ImGui.Button("Clear Cache", VulcanUiScaling.Scaled(150f, 0f)))
             {
                 coordinator.Clear();
+                Vulcan.DonatelloNative.ClearCache();
             }
             ImGui.EndGroup();
         }

@@ -332,6 +332,17 @@ public class ContextMenu : IDisposable
 
     private unsafe uint? GetRecipeIdFromContext(IMenuOpenedArgs args)
     {
+        if (args.AddonName == "RecipeNote")
+        {
+            var recipeNote = FFXIVClientStructs.FFXIV.Client.Game.UI.RecipeNote.Instance();
+            if (recipeNote != null && recipeNote->RecipeList != null)
+            {
+                var selectedRecipe = recipeNote->RecipeList->SelectedRecipe;
+                if (selectedRecipe != null && selectedRecipe->RecipeId > 0)
+                    return selectedRecipe->RecipeId;
+            }
+        }
+
         var itemId = GetContextItemId(args);
         if (!itemId.HasValue)
             return null;

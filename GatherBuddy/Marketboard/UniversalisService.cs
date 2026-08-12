@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Net.Http;
 using System.Text.Json;
 using System.Threading;
@@ -100,7 +101,7 @@ public sealed class UniversalisService : IDisposable
         await _throttle.WaitAsync(ct);
         try
         {
-            var response   = await _http.GetAsync(url, ct);
+            using var response = await _http.GetAsync(url, ct);
             var statusCode = (int)response.StatusCode;
 
             if (!response.IsSuccessStatusCode) return (null, statusCode);
@@ -125,6 +126,13 @@ public sealed class UniversalisService : IDisposable
         {
             _throttle.Release();
         }
+    }
+
+    internal static List<MarketItemData> ParseMarketResponse(string json)
+    {
+        var results = new List<MarketItemData>();
+        ParseMarketResponse(json, results);
+        return results;
     }
 
     private static void ParseMarketResponse(string json, List<MarketItemData> results)
@@ -157,7 +165,8 @@ public sealed class UniversalisService : IDisposable
 
     private static MarketItemData? ParseSingleItem(JsonElement el)
     {
-        if (!el.TryGetProperty("itemID", out var idEl)) return null;
+        var itemId = GetUInt(el, "itemID");
+        if (itemId == 0) return null;
 
         var listings = new List<MarketListing>();
         if (el.TryGetProperty("listings", out var listingsEl) &&
@@ -167,27 +176,98 @@ public sealed class UniversalisService : IDisposable
             {
                 listings.Add(new MarketListing
                 {
+                    ListingId   = GetULong(entry, "listingID"),
+                    RetainerId   = GetULong(entry, "retainerID"),
                     PricePerUnit = GetInt(entry, "pricePerUnit"),
                     Quantity     = GetInt(entry, "quantity"),
-                    IsHq         = entry.TryGetProperty("hq", out var hqEl) && hqEl.GetBoolean(),
+                    IsHq         = GetBool(entry, "hq") ?? false,
+                    WorldId      = GetUInt(entry, "worldID"),
                     WorldName    = GetString(entry, "worldName"),
+                    TotalTax     = GetLong(entry, "tax", "totalTax"),
+                    TownId       = GetInt(entry, "retainerCity"),
+                    IsMannequin  = GetBool(entry, "onMannequin"),
+                    // Universalis does not expose authoritative set-sale
+                    // metadata. Unknown must remain unknown until live UI
+                    // authority confirms it is safe to purchase.
+                    IsSellingAsSet = null,
                 });
             }
         }
 
         return new MarketItemData
         {
-            ItemId   = idEl.GetUInt32(),
+            ItemId   = itemId,
             MinPrice = GetFloat(el, "minPrice"),
             Listings = listings,
         };
     }
 
     private static float GetFloat(JsonElement el, string prop)
-        => el.TryGetProperty(prop, out var v) && v.TryGetSingle(out var f) ? f : 0f;
+    {
+        if (!el.TryGetProperty(prop, out var value))
+            return 0f;
+        if (value.TryGetSingle(out var number))
+            return number;
+        return value.ValueKind == JsonValueKind.String
+            && float.TryParse(value.GetString(), NumberStyles.Float, CultureInfo.InvariantCulture, out number)
+            ? number : 0f;
+    }
 
-    private static int GetInt(JsonElement el, string prop)
-        => el.TryGetProperty(prop, out var v) && v.TryGetInt32(out var i) ? i : 0;
+    private static int GetInt(JsonElement el, params string[] props)
+    {
+        foreach (var prop in props)
+        {
+            if (!el.TryGetProperty(prop, out var value))
+                continue;
+            if (value.TryGetInt32(out var integer))
+                return integer;
+            if (value.ValueKind == JsonValueKind.String
+                && int.TryParse(value.GetString(), NumberStyles.Integer, CultureInfo.InvariantCulture, out integer))
+                return integer;
+        }
+        return 0;
+    }
+
+    private static long GetLong(JsonElement el, params string[] props)
+    {
+        foreach (var prop in props)
+        {
+            if (!el.TryGetProperty(prop, out var value))
+                continue;
+            if (value.TryGetInt64(out var integer))
+                return integer;
+            if (value.ValueKind == JsonValueKind.String
+                && long.TryParse(value.GetString(), NumberStyles.Integer, CultureInfo.InvariantCulture, out integer))
+                return integer;
+        }
+        return 0;
+    }
+
+    private static ulong GetULong(JsonElement el, string prop)
+    {
+        if (!el.TryGetProperty(prop, out var value))
+            return 0;
+        if (value.TryGetUInt64(out var integer))
+            return integer;
+        return value.ValueKind == JsonValueKind.String
+            && ulong.TryParse(value.GetString(), NumberStyles.Integer, CultureInfo.InvariantCulture, out integer)
+            ? integer : 0;
+    }
+
+    private static uint GetUInt(JsonElement el, string prop)
+        => (uint)GetULong(el, prop);
+
+    private static bool? GetBool(JsonElement el, string prop)
+    {
+        if (!el.TryGetProperty(prop, out var value))
+            return null;
+        if (value.ValueKind == JsonValueKind.True) return true;
+        if (value.ValueKind == JsonValueKind.False) return false;
+        if (value.ValueKind == JsonValueKind.String
+            && bool.TryParse(value.GetString(), out var parsed))
+            return parsed;
+        return null;
+    }
 
     private static string GetString(JsonElement el, string prop)
         => el.TryGetProperty(prop, out var v) && v.ValueKind == JsonValueKind.String

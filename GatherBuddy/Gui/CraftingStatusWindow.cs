@@ -140,9 +140,19 @@ public class CraftingStatusWindow : Window
         ImGui.Separator();
         ImGui.Spacing();
 
-        if (currentState == CraftingQueueProcessor.QueueState.Complete)
+        if (currentState is CraftingQueueProcessor.QueueState.Complete or CraftingQueueProcessor.QueueState.Failed)
         {
-            ImGui.TextColored(new System.Numerics.Vector4(0.0f, 1.0f, 0.0f, 1.0f), "Queue Complete!");
+            var failed = currentState == CraftingQueueProcessor.QueueState.Failed;
+            ImGui.TextColored(
+                failed
+                    ? new System.Numerics.Vector4(1.0f, 0.25f, 0.25f, 1.0f)
+                    : new System.Numerics.Vector4(0.0f, 1.0f, 0.0f, 1.0f),
+                failed ? "Queue Stopped" : "Queue Complete!");
+            if (failed && !string.IsNullOrWhiteSpace(_queueProcessor.PauseReason))
+            {
+                ImGui.Spacing();
+                ImGui.TextWrapped(_queueProcessor.PauseReason);
+            }
             ImGui.Spacing();
             if (ImGui.Button("Close"))
             {
@@ -283,6 +293,7 @@ public class CraftingStatusWindow : Window
         {
             CraftingQueueProcessor.QueueState.Idle => "Idle",
             CraftingQueueProcessor.QueueState.NavigatingToRetainerBell => "Navigating to Retainer Bell",
+            CraftingQueueProcessor.QueueState.WithdrawingFromRetainer => "Withdrawing from Retainers",
             CraftingQueueProcessor.QueueState.WaitingForGather => "Gathering Materials",
             CraftingQueueProcessor.QueueState.WaitingForJobSwitch => "Switching Job",
             CraftingQueueProcessor.QueueState.Repairing => "Repairing Equipment",
@@ -290,6 +301,11 @@ public class CraftingStatusWindow : Window
             CraftingQueueProcessor.QueueState.WaitingForRaphaelSolution => "Solving with Raphael",
             CraftingQueueProcessor.QueueState.ReadyForCraft => "Ready to Craft",
             CraftingQueueProcessor.QueueState.Crafting => "Crafting",
+            CraftingQueueProcessor.QueueState.WaitingForAcquisitionData => "Loading acquisition data",
+            CraftingQueueProcessor.QueueState.PurchasingDependencies => "Purchasing dependencies",
+            CraftingQueueProcessor.QueueState.ReturningToHomeWorld => "Returning to Home World",
+            CraftingQueueProcessor.QueueState.ReturningToInn => "Going to inn",
+            CraftingQueueProcessor.QueueState.Failed => "Stopped",
             CraftingQueueProcessor.QueueState.Complete => "Complete",
             _ => "Unknown"
         };

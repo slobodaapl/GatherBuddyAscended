@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
 using Dalamud.Game.ClientState.Conditions;
 using FFXIVClientStructs.FFXIV.Client.Game;
 using FFXIVClientStructs.FFXIV.Component.GUI;
@@ -26,6 +28,8 @@ public static class CraftingGatherBridge
     private static CraftingExecutionPlan? _activeExecutionPlan = null;
     private static bool _isQueueMode = false;
     private static List<AutoGatherList> _disabledGatherLists = new();
+    private static bool _autoGatherStateCaptured;
+    private static bool _autoGatherWasEnabled;
     private static int? _ephemeralListId = null;
     private static bool _waitingForCollectables = false;
     private static bool _collectablesStartPending = false;
@@ -35,6 +39,15 @@ public static class CraftingGatherBridge
     private static DateTime _lastCollectablesHardFailLog = DateTime.MinValue;
     private static bool _waitingForCollectablesHomeReturn = false;
     private static bool _collectablesHomeReturnStarted = false;
+    private static Task _queueProcessorDrain = Task.CompletedTask;
+    private static CraftingQueueProcessor? _queueProcessorPendingDispose;
+    private static PendingQueueStart? _pendingQueueStart;
+    private static CollectableManager? _collectableManager;
+
+    private sealed record PendingQueueStart(
+        CraftingExecutionPlan ExecutionPlan,
+        CraftingListConsumableSettings? ListConsumables,
+        int? EphemeralListId);
     
     public static bool PreserveListOnDisable { get; set; } = false;
 
@@ -50,10 +63,16 @@ public static class CraftingGatherBridge
 
     public static void BindCollectableManager(CollectableManager manager)
     {
+        if (_collectableManager != null)
+        {
+            _collectableManager.OnFinishCollecting -= OnCollectablesFinished;
+            _collectableManager.OnError -= OnCollectablesError;
+        }
         manager.OnFinishCollecting -= OnCollectablesFinished;
         manager.OnError -= OnCollectablesError;
         manager.OnFinishCollecting += OnCollectablesFinished;
         manager.OnError += OnCollectablesError;
+        _collectableManager = manager;
     }
     
     public static uint RecipeToCraft => _recipeIdToCraft;
@@ -67,6 +86,35 @@ public static class CraftingGatherBridge
         => _activeExecutionPlan != null && _activeExecutionPlan.MatchesList(listId)
             ? _activeExecutionPlan
             : null;
+
+    /// <summary>
+    /// Invalidates market data before a stale-listing replan. A zero item ID
+    /// refreshes every dependency in the active plan; a nonzero ID refreshes
+    /// only that dependency. The scope matches the list's current-world
+    /// setting, so the subsequent planner cannot reuse the failed snapshot.
+    /// </summary>
+    internal static void InvalidateAcquisitionMarketData(uint itemId = 0)
+    {
+        var plan = _activeExecutionPlan;
+        var service = GatherBuddy.MarketboardService;
+        if (plan == null || service == null)
+            return;
+
+        var scope = plan.CurrentWorldOnly
+            ? service.GetCurrentWorld()
+            : service.GetDataCenter();
+        var itemIds = itemId != 0
+            ? new[] { itemId }
+            : plan.PrecraftsView.Keys
+                .Concat(plan.MaterialsView.Keys)
+                .Distinct()
+                .ToArray();
+        foreach (var dependencyItemId in itemIds)
+        {
+            if (dependencyItemId != 0)
+                service.ForceRefresh(dependencyItemId, scope);
+        }
+    }
     
     public static void DeleteTemporaryGatherList()
     {
@@ -153,28 +201,60 @@ public static class CraftingGatherBridge
     
     public static void Update()
     {
+        TryFinalizePendingProcessorDisposal();
+
+        if (_pendingQueueStart is { } pendingQueueStart)
+        {
+            if (!_queueProcessorDrain.IsCompleted)
+                return;
+
+            _pendingQueueStart = null;
+            StartQueueCore(
+                pendingQueueStart.ExecutionPlan,
+                pendingQueueStart.ListConsumables,
+                pendingQueueStart.EphemeralListId);
+        }
+
         if (_isQueueMode && _queueProcessor != null)
         {
-            UpdateCollectablesHomeReturnBeforeResume();
-            TryStartCollectablesInterruption();
-            _queueProcessor.Update();
+            var processor = _queueProcessor;
+            try
+            {
+                UpdateCollectablesHomeReturnBeforeResume();
+                TryStartCollectablesInterruption();
+                processor.Update();
+            }
+            catch (Exception ex)
+            {
+                GatherBuddy.Log.Error($"[CraftingGatherBridge] Queue update failed: {ex.Message}");
+                processor.FailFromBridge($"Crafting queue update failed: {ex.Message}");
+            }
             
-            if (_queueProcessor.CurrentState == CraftingQueueProcessor.QueueState.Complete && !_queueProcessor.HasPendingTasks())
+            if (ReferenceEquals(_queueProcessor, processor)
+                && (processor.CurrentState is CraftingQueueProcessor.QueueState.Complete or CraftingQueueProcessor.QueueState.Failed)
+                && !processor.HasPendingTasks())
             {
                 GatherBuddy.Log.Information("[CraftingGatherBridge] All completion tasks done, cleaning up");
-                RestoreDisabledGatherLists();
                 GatherBuddy.CraftingStatusWindow?.SetQueueProcessor(null);
-                _queueProcessor.Dispose();
+                var completedProcessor = processor;
+                try
+                {
+                    completedProcessor.QueueCompleted -= OnQueueCompleted;
+                    completedProcessor.Reset();
+                }
+                catch (Exception ex)
+                {
+                    GatherBuddy.Log.Warning($"[CraftingGatherBridge] Queue reset failed during cleanup: {ex.Message}");
+                }
+                QueueProcessorForDeferredDisposal(completedProcessor);
+                RestoreQueueOwnedState();
                 _queueProcessor = null;
                 _activeExecutionPlan = null;
                 _isQueueMode = false;
-
-                if (_ephemeralListId.HasValue)
-                {
-                    GatherBuddy.Log.Information($"[CraftingGatherBridge] Deleting ephemeral crafting list {_ephemeralListId.Value}");
-                    GatherBuddy.CraftingListManager.DeleteList(_ephemeralListId.Value);
-                    _ephemeralListId = null;
-                }
+                _waitingForGatherComplete = false;
+                _waitingForJobSwitch = false;
+                _jobSwitchTime = DateTime.MinValue;
+                DeleteEphemeralCraftingListSafely();
             }
         }
         
@@ -209,44 +289,92 @@ public static class CraftingGatherBridge
     
     public static void StartQueueCraftAndGather(CraftingExecutionPlan executionPlan, CraftingListConsumableSettings? listConsumables = null, int? ephemeralListId = null)
     {
+        if (!CraftingQueuePreflight.TryValidate(executionPlan, out var preflightFailure))
+        {
+            GatherBuddy.Log.Warning($"[CraftingGatherBridge] Queue preflight failed: {preflightFailure.Replace('\n', ' ')}");
+            Dalamud.Chat.PrintError($"[GatherBuddy Ascended] {preflightFailure}");
+            return;
+        }
+
+        CleanupPreviousQueueBeforeStart();
+        if (!_queueProcessorDrain.IsCompleted)
+        {
+            _pendingQueueStart = new PendingQueueStart(executionPlan, listConsumables, ephemeralListId);
+            GatherBuddy.Log.Information("[CraftingGatherBridge] Waiting for the previous queue's acquisition cleanup before starting the replacement queue");
+            return;
+        }
+
+        TryFinalizePendingProcessorDisposal();
+        _pendingQueueStart = null;
+        StartQueueCore(executionPlan, listConsumables, ephemeralListId);
+    }
+
+    private static void StartQueueCore(CraftingExecutionPlan executionPlan, CraftingListConsumableSettings? listConsumables, int? ephemeralListId)
+    {
+        _queueProcessorDrain = Task.CompletedTask;
         _isQueueMode = true;
         _ephemeralListId = ephemeralListId;
         _activeExecutionPlan = executionPlan;
         ResetCollectablesInterruptionState();
         _lastCollectablesHardFailLog = DateTime.MinValue;
-        _queueProcessor?.Dispose();
+        CaptureAndStopStandaloneGathering();
+        DisableStandaloneGatherLists();
         _queueProcessor = new CraftingQueueProcessor();
         _queueProcessor.QueueCompleted += OnQueueCompleted;
         _waitingForGatherComplete = true;
         GatherBuddy.Log.Information($"[CraftingGatherBridge] Starting queue automation with {executionPlan.QueueView.Count} recipes, retainerRestock={executionPlan.RetainerRestock}");
         _queueProcessor.StartQueue(executionPlan, listConsumables, GatherBuddy.RaphaelSolveCoordinator);
-        var hasRetainerWork = executionPlan.RetainerRestock && AllaganTools.Enabled
-            && (executionPlan.Materials.Count > 0 || executionPlan.RetainerConsumedCraftables.Count > 0);
-        if (!hasRetainerWork)
-            CreateGatherListForMissingIngredients(executionPlan.Materials);
+        // CraftingQueueProcessor owns the complete retainer/acquisition/gather
+        // sequence. It creates the temporary gather list only after its
+        // corresponding gate has completed.
 
         GatherBuddy.CraftingStatusWindow?.SetQueueProcessor(_queueProcessor);
+    }
+
+    private static void CleanupPreviousQueueBeforeStart()
+    {
+        if (_queueProcessor == null
+            && _gatherList == null
+            && _disabledGatherLists.Count == 0
+            && !_autoGatherStateCaptured
+            && !_ephemeralListId.HasValue)
+            return;
+
+        GatherBuddy.Log.Information("[CraftingGatherBridge] Cleaning up the previous craft queue before starting a new one");
+        ResetCollectablesInterruptionState();
+        _waitingForGatherComplete = false;
+        _waitingForJobSwitch = false;
+        _jobSwitchTime = DateTime.MinValue;
+        ReleaseCraftOwnedAutoGather(disable: true);
+
+        if (_queueProcessor != null)
+        {
+            var previousProcessor = _queueProcessor;
+            try
+            {
+                previousProcessor.QueueCompleted -= OnQueueCompleted;
+                previousProcessor.Reset();
+            }
+            catch (Exception ex)
+            {
+                GatherBuddy.Log.Warning($"[CraftingGatherBridge] Previous queue reset failed: {ex.Message}");
+            }
+            QueueProcessorForDeferredDisposal(previousProcessor);
+        }
+        RestoreQueueOwnedState();
+        _queueProcessor = null;
+        _activeExecutionPlan = null;
+        _isQueueMode = false;
     }
     
     public static void CreateGatherListForMissingIngredients(Dictionary<uint, int> missing)
     {
         try
         {
-            if (_plugin != null)
-            {
-                var enabledLists = _plugin.AutoGatherListsManager.Lists.Where(l => l.Enabled && !l.Fallback).ToList();
-                if (enabledLists.Count > 0)
-                {
-                    _disabledGatherLists.Clear();
-                    foreach (var existingList in enabledLists)
-                    {
-                        existingList.Enabled = false;
-                        _disabledGatherLists.Add(existingList);
-                        GatherBuddy.Log.Debug($"[CraftingGatherBridge] Disabled gather list '{existingList.Name}' before starting craft gather");
-                    }
-                    _plugin.AutoGatherListsManager.Save();
-                }
-            }
+            if (_plugin == null)
+                throw new InvalidOperationException("Plugin is not initialized.");
+
+            DisableStandaloneGatherLists();
 
             _gatherList = new AutoGatherList()
             {
@@ -268,7 +396,7 @@ public static class CraftingGatherBridge
                     GatherBuddy.Log.Debug($"[CraftingGatherBridge] Item {gatherItemId} not found in gatherables or fish, skipping");
             }
 
-            if (_gatherList.Items.Count > 0 && _plugin != null)
+            if (_gatherList.Items.Count > 0)
             {
                 _plugin.AutoGatherListsManager.AddList(_gatherList);
                 _plugin.AutoGatherListsManager.SetActiveItems();
@@ -281,6 +409,8 @@ public static class CraftingGatherBridge
                 else
                 {
                     _waitingForGatherComplete = true;
+                    if (GatherBuddy.AutoGather == null)
+                        throw new InvalidOperationException("AutoGather is not initialized.");
                     GatherBuddy.AutoGather.Enabled = true;
                     GatherBuddy.Log.Information($"Created crafting gather list with {_gatherList.Items.Count} items. Starting auto-gather.");
                 }
@@ -294,6 +424,100 @@ public static class CraftingGatherBridge
         catch (Exception ex)
         {
             GatherBuddy.Log.Error($"Failed to create gather list: {ex.Message}");
+            if (_queueProcessor != null && _isQueueMode)
+            {
+                _queueProcessor.FailFromBridge($"Cannot start crafting gather stage: {ex.Message}");
+                RestoreQueueOwnedState();
+            }
+            else
+            {
+                RestoreQueueOwnedState();
+                _recipeIdToCraft = 0;
+                _waitingForGatherComplete = false;
+            }
+        }
+    }
+
+    private static void DisableStandaloneGatherLists()
+    {
+        if (_plugin == null)
+            return;
+
+        var enabledLists = _plugin.AutoGatherListsManager.Lists
+            .Where(list => list.Enabled && !list.Fallback)
+            .ToList();
+        if (enabledLists.Count == 0)
+            return;
+
+        foreach (var existingList in enabledLists)
+        {
+            try
+            {
+                existingList.Enabled = false;
+                if (!_disabledGatherLists.Contains(existingList))
+                    _disabledGatherLists.Add(existingList);
+                GatherBuddy.Log.Debug($"[CraftingGatherBridge] Disabled gather list '{existingList.Name}' before starting craft acquisition");
+            }
+            catch (Exception ex)
+            {
+                GatherBuddy.Log.Warning($"[CraftingGatherBridge] Failed to disable gather list '{existingList.Name}': {ex.Message}");
+            }
+        }
+        try
+        {
+            _plugin.AutoGatherListsManager.SetActiveItems();
+            _plugin.AutoGatherListsManager.Save();
+        }
+        catch (Exception ex)
+        {
+            GatherBuddy.Log.Warning($"[CraftingGatherBridge] Failed to refresh disabled gather lists: {ex.Message}");
+        }
+    }
+
+    private static void CaptureAndStopStandaloneGathering()
+    {
+        if (_autoGatherStateCaptured)
+            return;
+
+        var autoGather = GatherBuddy.AutoGather;
+        if (autoGather == null)
+            return;
+
+        try
+        {
+            _autoGatherStateCaptured = true;
+            _autoGatherWasEnabled = autoGather.Enabled;
+            if (_autoGatherWasEnabled)
+            {
+                GatherBuddy.Log.Debug("[CraftingGatherBridge] Stopping standalone AutoGather before craft acquisition");
+                autoGather.Enabled = false;
+            }
+        }
+        catch (Exception ex)
+        {
+            _autoGatherStateCaptured = false;
+            _autoGatherWasEnabled = false;
+            GatherBuddy.Log.Warning($"[CraftingGatherBridge] Failed to stop standalone AutoGather before craft acquisition: {ex.Message}");
+        }
+    }
+
+    private static void RestoreAutoGatherState()
+    {
+        if (!_autoGatherStateCaptured)
+            return;
+
+        var wasEnabled = _autoGatherWasEnabled;
+        _autoGatherStateCaptured = false;
+        _autoGatherWasEnabled = false;
+        try
+        {
+            GatherBuddy.Log.Debug($"[CraftingGatherBridge] Restoring standalone AutoGather after craft queue cleanup (enabled={wasEnabled})");
+            if (GatherBuddy.AutoGather != null)
+                GatherBuddy.AutoGather.Enabled = wasEnabled;
+        }
+        catch (Exception ex)
+        {
+            GatherBuddy.Log.Warning($"[CraftingGatherBridge] Failed to restore standalone AutoGather: {ex.Message}");
         }
     }
     
@@ -378,9 +602,10 @@ public static class CraftingGatherBridge
         var allComplete = true;
         foreach (var item in _gatherList.Items)
         {
-            var have = GetInventoryCount(item.ItemId);
             var needed = _gatherList.Quantities.TryGetValue(item, out var qty) ? qty : 0;
-            if (have < needed)
+            var (nq, hq) = CraftingInventoryCounter.GetInventorySplitCounts(item.ItemId);
+            var demand = _activeExecutionPlan?.IngredientDemandsView.GetValueOrDefault(item.ItemId) ?? default;
+            if (!IsGatheringItemComplete(needed, demand, nq, hq))
             {
                 allComplete = false;
                 break;
@@ -389,6 +614,15 @@ public static class CraftingGatherBridge
 
         return allComplete;
     }
+
+    internal static bool IsGatheringItemComplete(
+        uint requiredQuantity,
+        IngredientQualityDemand demand,
+        int inventoryNq,
+        int inventoryHq)
+        => (long)Math.Max(0, inventoryNq) + Math.Max(0, inventoryHq) >= requiredQuantity
+            && Math.Max(0, inventoryNq) >= Math.Max(0, demand.RequiredNQ)
+            && Math.Max(0, inventoryHq) >= Math.Max(0, demand.RequiredHQ);
 
     private static unsafe int GetInventoryCount(uint itemId)
     {
@@ -429,11 +663,25 @@ public static class CraftingGatherBridge
 
         foreach (var list in _disabledGatherLists)
         {
-            list.Enabled = true;
-            GatherBuddy.Log.Debug($"[CraftingGatherBridge] Re-enabled gather list '{list.Name}'");
+            try
+            {
+                list.Enabled = true;
+                GatherBuddy.Log.Debug($"[CraftingGatherBridge] Re-enabled gather list '{list.Name}'");
+            }
+            catch (Exception ex)
+            {
+                GatherBuddy.Log.Warning($"[CraftingGatherBridge] Failed to re-enable gather list '{list.Name}': {ex.Message}");
+            }
         }
-        _plugin.AutoGatherListsManager.SetActiveItems();
-        _plugin.AutoGatherListsManager.Save();
+        try
+        {
+            _plugin.AutoGatherListsManager.SetActiveItems();
+            _plugin.AutoGatherListsManager.Save();
+        }
+        catch (Exception ex)
+        {
+            GatherBuddy.Log.Warning($"[CraftingGatherBridge] Failed to refresh restored gather lists: {ex.Message}");
+        }
         _disabledGatherLists.Clear();
     }
 
@@ -445,7 +693,9 @@ public static class CraftingGatherBridge
     private static void TryStartCollectablesInterruption()
     {
         if (_queueProcessor == null
-         || _queueProcessor.CurrentState is CraftingQueueProcessor.QueueState.Idle or CraftingQueueProcessor.QueueState.Complete
+         || _queueProcessor.CurrentState is CraftingQueueProcessor.QueueState.Idle
+             or CraftingQueueProcessor.QueueState.Complete
+             or CraftingQueueProcessor.QueueState.Failed
          || GatherBuddy.CollectableManager == null
          || GatherBuddy.CollectableManager.IsRunning
          || _waitingForCollectablesHomeReturn
@@ -715,26 +965,202 @@ public static class CraftingGatherBridge
     
     public static void StopQueue()
     {
+        _pendingQueueStart = null;
         if (_queueProcessor != null)
         {
             GatherBuddy.Log.Information("[CraftingGatherBridge] Stopping queue processor");
             ResetCollectablesInterruptionState();
             _lastCollectablesHardFailLog = DateTime.MinValue;
-            _ephemeralListId = null;
-            GatherBuddy.AutoGather.Enabled = false;
-            DeleteTemporaryGatherList();
-            _queueProcessor.Reset();
-            _queueProcessor.Dispose();
+            ReleaseCraftOwnedAutoGather(disable: true);
+            var stoppedProcessor = _queueProcessor;
+            try
+            {
+                stoppedProcessor.QueueCompleted -= OnQueueCompleted;
+                stoppedProcessor.Reset();
+            }
+            catch (Exception ex)
+            {
+                GatherBuddy.Log.Warning($"[CraftingGatherBridge] Queue reset failed while stopping: {ex.Message}");
+            }
+            QueueProcessorForDeferredDisposal(stoppedProcessor);
             _queueProcessor = null;
             _activeExecutionPlan = null;
             _isQueueMode = false;
-            RestoreDisabledGatherLists();
+            _waitingForGatherComplete = false;
+            _waitingForJobSwitch = false;
+            _jobSwitchTime = DateTime.MinValue;
+            RestoreQueueOwnedState();
             GatherBuddy.CraftingStatusWindow?.SetQueueProcessor(null);
         }
         else
         {
             GatherBuddy.Log.Information("[CraftingGatherBridge] No queue processor running");
+            _waitingForGatherComplete = false;
+            _waitingForJobSwitch = false;
+            _jobSwitchTime = DateTime.MinValue;
+            RestoreQueueOwnedState();
         }
+        TryFinalizePendingProcessorDisposal();
+    }
+
+    /// <summary>
+    /// Stops queue-owned work and waits for acquisition cleanup before the
+    /// plugin unloads services used by the processor. The caller must invoke
+    /// this before disposing vendor/native acquisition dependencies.
+    /// </summary>
+    public static async Task ShutdownAsync(CancellationToken cancellationToken = default)
+    {
+        StopQueue();
+        var drain = _queueProcessorDrain;
+        try
+        {
+            // Cleanup is mandatory before dependent vendor/native services
+            // are disposed; do not let a caller cancellation bypass it.
+            await drain.ConfigureAwait(false);
+        }
+        finally
+        {
+            TryFinalizePendingProcessorDisposal();
+            if (_collectableManager != null)
+            {
+                _collectableManager.OnFinishCollecting -= OnCollectablesFinished;
+                _collectableManager.OnError -= OnCollectablesError;
+            }
+            _collectableManager = null;
+            _plugin = null;
+            _queueProcessor = null;
+            _activeExecutionPlan = null;
+            _isQueueMode = false;
+            _recipeIdToCraft = 0;
+            _jobSwitchTime = DateTime.MinValue;
+            _waitingForGatherComplete = false;
+            _waitingForJobSwitch = false;
+            _waitingForCollectables = false;
+            _collectablesStartPending = false;
+            _collectablesHomeReturnStarted = false;
+            _waitingForCollectablesHomeReturn = false;
+            _nextCollectablesRetry = DateTime.MinValue;
+            _lastCollectablesWaitLog = DateTime.MinValue;
+            _lastCollectablesExitAttempt = DateTime.MinValue;
+            _lastCollectablesHardFailLog = DateTime.MinValue;
+            _autoGatherStateCaptured = false;
+            _autoGatherWasEnabled = false;
+            _pendingQueueStart = null;
+            _gatherList = null;
+            _disabledGatherLists.Clear();
+            _ephemeralListId = null;
+            _queueProcessorPendingDispose = null;
+            _queueProcessorDrain = Task.CompletedTask;
+            PreserveListOnDisable = false;
+        }
+    }
+
+    private static void QueueProcessorForDeferredDisposal(CraftingQueueProcessor processor)
+    {
+        _queueProcessorDrain = processor.AcquisitionDrainTask;
+        if (_queueProcessorDrain.IsCompleted)
+        {
+            processor.Dispose();
+            _queueProcessorPendingDispose = null;
+            return;
+        }
+
+        _queueProcessorPendingDispose = processor;
+    }
+
+    private static void TryFinalizePendingProcessorDisposal()
+    {
+        var processor = _queueProcessorPendingDispose;
+        if (processor == null || !_queueProcessorDrain.IsCompleted)
+            return;
+
+        _queueProcessorPendingDispose = null;
+        try
+        {
+            _queueProcessorDrain.GetAwaiter().GetResult();
+        }
+        catch (Exception ex)
+        {
+            GatherBuddy.Log.Warning($"[CraftingGatherBridge] Queue acquisition drain failed during cleanup: {ex.Message}");
+        }
+        finally
+        {
+            processor.Dispose();
+        }
+    }
+
+    private static void ReleaseCraftOwnedAutoGather(bool disable)
+    {
+        var autoGather = GatherBuddy.AutoGather;
+        if (autoGather == null)
+            return;
+
+        try
+        {
+            autoGather.SetCraftOwnedGathering(false);
+            if (disable)
+                autoGather.Enabled = false;
+        }
+        catch (Exception ex)
+        {
+            GatherBuddy.Log.Warning($"[CraftingGatherBridge] Failed to release AutoGather queue ownership: {ex.Message}");
+        }
+    }
+
+    private static void RestoreQueueOwnedState()
+    {
+        try
+        {
+            DeleteTemporaryGatherList();
+        }
+        catch (Exception ex)
+        {
+            GatherBuddy.Log.Warning($"[CraftingGatherBridge] Failed to delete temporary gather list: {ex.Message}");
+        }
+
+        try
+        {
+            RestoreDisabledGatherLists();
+        }
+        catch (Exception ex)
+        {
+            GatherBuddy.Log.Warning($"[CraftingGatherBridge] Failed to restore gather lists: {ex.Message}");
+        }
+
+        try
+        {
+            RestoreAutoGatherState();
+        }
+        catch (Exception ex)
+        {
+            GatherBuddy.Log.Warning($"[CraftingGatherBridge] Failed to restore standalone AutoGather: {ex.Message}");
+        }
+
+        DeleteEphemeralCraftingListSafely();
+        ReleaseCraftOwnedAutoGather(disable: false);
+    }
+
+    private static void DeleteEphemeralCraftingListSafely()
+    {
+        try
+        {
+            DeleteEphemeralCraftingList();
+        }
+        catch (Exception ex)
+        {
+            GatherBuddy.Log.Warning($"[CraftingGatherBridge] Failed to delete ephemeral crafting list: {ex.Message}");
+        }
+    }
+
+    private static void DeleteEphemeralCraftingList()
+    {
+        if (!_ephemeralListId.HasValue)
+            return;
+
+        var listId = _ephemeralListId.Value;
+        _ephemeralListId = null;
+        GatherBuddy.Log.Information($"[CraftingGatherBridge] Deleting ephemeral crafting list {listId}");
+        GatherBuddy.CraftingListManager.DeleteList(listId);
     }
 
     private static void LogCollectablesHardFailState(string hardFailReason)

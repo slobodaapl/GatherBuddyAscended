@@ -70,10 +70,16 @@ public class CraftingMaterialsWindow : Window
         bool ShowCurrencyTotals = false,
         bool PreferBicolorDefault = false);
 
-    private readonly record struct CurrencyOption(uint CurrencyItemId, uint CostPerItem, string Name, ushort IconId, VendorCurrencyGroup Group);
-    private readonly record struct CurrencyTotal(uint CurrencyItemId, long Amount, string Name, ushort IconId);
+    private readonly record struct CurrencyOption(
+        string OfferKey,
+        IReadOnlyList<VendorCurrencyCost> Costs,
+        uint ReceivedQuantity,
+        string Name,
+        IReadOnlyList<ushort> IconIds,
+        VendorCurrencyGroup Group);
+    private readonly record struct CurrencyTotal(uint CurrencyItemId, ulong Amount, string Name, ushort IconId);
 
-    private readonly Dictionary<uint, uint> _userSelectedCurrencyByItem = new();
+    private readonly Dictionary<uint, string> _userSelectedCurrencyByItem = new();
     private bool _cachedMaterialViewValid;
     private bool _cachedHasMaterials;
     private bool _cachedHasVisibleEntries;
@@ -406,44 +412,65 @@ public class CraftingMaterialsWindow : Window
 
     private static IReadOnlyList<CurrencyOption> ResolveCurrencyOptions(uint itemId)
     {
-        Dictionary<uint, CurrencyOption>? options = null;
+        Dictionary<string, CurrencyOption>? options = null;
         foreach (var entry in VendorShopResolver.SpecialShopEntries)
         {
-            if (entry.ItemId != itemId || entry.Cost == 0 || entry.CurrencyItemId == 0)
+            if (entry.ItemId != itemId)
                 continue;
-            options ??= new Dictionary<uint, CurrencyOption>();
-            if (!options.TryGetValue(entry.CurrencyItemId, out var existing) || entry.Cost < existing.CostPerItem)
-            {
-                options[entry.CurrencyItemId] = new CurrencyOption(
-                    entry.CurrencyItemId,
-                    entry.Cost,
-                    entry.CurrencyName,
-                    ResolveCurrencyIconId(entry.CurrencyItemId),
-                    entry.Group);
-            }
+            options ??= new Dictionary<string, CurrencyOption>(StringComparer.Ordinal);
+            var offerKey = entry.OfferSignature;
+            if (options.ContainsKey(offerKey))
+                continue;
+
+            var costs = entry.CurrencyCosts.ToArray();
+            var receivedQuantity = entry.ReceivedQuantity;
+            var isValid = VendorOfferMath.HasValidCurrencyCosts(costs)
+                       && VendorOfferMath.HasValidReceivedItems(entry.ReceivedItems, entry.ItemId)
+                       && receivedQuantity > 0;
+            var iconIds = isValid
+                ? costs.Select(cost => ResolveCurrencyIconId(cost.CurrencyItemId)).ToArray()
+                : Array.Empty<ushort>();
+            var name = isValid
+                ? string.Join(" + ", costs.Select(cost =>
+                    $"{cost.Amount:N0} {(string.IsNullOrWhiteSpace(cost.CurrencyName) ? $"Currency {cost.CurrencyItemId}" : cost.CurrencyName)}"))
+                : "Unknown vendor offer";
+            options[offerKey] = new CurrencyOption(
+                offerKey,
+                isValid ? costs : Array.Empty<VendorCurrencyCost>(),
+                isValid ? receivedQuantity : 0,
+                name,
+                iconIds,
+                isValid ? costs[0].Group : VendorCurrencyGroup.Other);
         }
         if (options == null)
             return Array.Empty<CurrencyOption>();
         return options.Values
-            .OrderBy(option => option.CostPerItem)
+            .OrderBy(option => option.Costs.Count == 0 ? 1 : 0)
+            .ThenBy(option => option.Costs.Aggregate<VendorCurrencyCost, ulong>(
+                0UL,
+                (total, cost) => checked(total + (ulong)cost.Amount)))
             .ThenBy(option => option.Name, StringComparer.OrdinalIgnoreCase)
             .ToList();
     }
 
-    private uint GetSelectedCurrencyItemId(MaterialEntry entry, bool preferBicolor)
+    private CurrencyOption? GetSelectedCurrencyOption(MaterialEntry entry, bool preferBicolor)
     {
         if (entry.CurrencyOptions.Count == 0)
-            return 0;
-        if (_userSelectedCurrencyByItem.TryGetValue(entry.ItemId, out var selected)
-         && entry.CurrencyOptions.Any(option => option.CurrencyItemId == selected))
-            return selected;
+            return null;
+        if (_userSelectedCurrencyByItem.TryGetValue(entry.ItemId, out var selected))
+        {
+            foreach (var option in entry.CurrencyOptions)
+                if (option.OfferKey == selected)
+                    return option;
+        }
         if (preferBicolor)
         {
-            var bicolor = entry.CurrencyOptions.FirstOrDefault(option => option.Group == VendorCurrencyGroup.BicolorGemstones);
-            if (bicolor.CurrencyItemId != 0)
-                return bicolor.CurrencyItemId;
+            var bicolor = entry.CurrencyOptions.FirstOrDefault(option =>
+                option.Costs.Any(cost => cost.Group == VendorCurrencyGroup.BicolorGemstones));
+            if (!string.IsNullOrEmpty(bicolor.OfferKey))
+                return bicolor;
         }
-        return entry.CurrencyOptions[0].CurrencyItemId;
+        return entry.CurrencyOptions[0];
     }
 
     private static void SortEntries(List<MaterialEntry> entries)
@@ -643,6 +670,13 @@ public class CraftingMaterialsWindow : Window
             {
                 GatherBuddy.MarketboardService?.QueueLookup(itemId, name, iconId);
                 GatherBuddy.VulcanWindow?.OpenToMarketboardItem(itemId);
+            }
+            if (ImGui.Selectable("Add to Marketplace Buy List"))
+            {
+                var manager = GatherBuddy.MarketplaceBuyListManager;
+                var active = manager?.ActiveList;
+                if (manager != null && active != null)
+                    manager.AddItem(active.Id, itemId, name, iconId, 1);
             }
 
             DrawVendorBuyListPopup(entry, vendorTargets);
@@ -846,7 +880,7 @@ public class CraftingMaterialsWindow : Window
 
     private List<CurrencyTotal> ComputeCurrencyTotals(IReadOnlyList<MaterialEntry> entries, bool preferBicolorDefault, bool ignoreOwned)
     {
-        var totals = new Dictionary<uint, (long Amount, string Name, ushort IconId)>();
+        var totals = new Dictionary<uint, (ulong Amount, string Name, ushort IconId)>();
         foreach (var entry in entries)
         {
             var quantity = ignoreOwned
@@ -854,15 +888,23 @@ public class CraftingMaterialsWindow : Window
                 : entry.Needed - entry.EffectiveAvailable;
             if (quantity <= 0)
                 continue;
-            var selectedCurrencyId = GetSelectedCurrencyItemId(entry, preferBicolorDefault);
-            if (selectedCurrencyId == 0)
+            var selectedOption = GetSelectedCurrencyOption(entry, preferBicolorDefault);
+            if (selectedOption is not { } option
+             || !VendorOfferMath.HasValidCurrencyCosts(option.Costs)
+             || option.ReceivedQuantity == 0)
                 continue;
-            var option = entry.CurrencyOptions.First(o => o.CurrencyItemId == selectedCurrencyId);
-            var totalCost = (long)option.CostPerItem * quantity;
-            if (totals.TryGetValue(option.CurrencyItemId, out var existing))
-                totals[option.CurrencyItemId] = (existing.Amount + totalCost, existing.Name, existing.IconId);
-            else
-                totals[option.CurrencyItemId] = (totalCost, option.Name, option.IconId);
+
+            var purchaseCount = VendorOfferMath.GetPurchaseCount((uint)quantity, option.ReceivedQuantity);
+            foreach (var (currencyItemId, totalCost) in VendorOfferMath.GetCurrencyTotals(option.Costs, purchaseCount))
+            {
+                var cost = option.Costs.First(component => component.CurrencyItemId == currencyItemId);
+                if (totals.TryGetValue(currencyItemId, out var existing))
+                    totals[currencyItemId] = (checked(existing.Amount + totalCost), existing.Name, existing.IconId);
+                else
+                    totals[currencyItemId] = (totalCost,
+                        string.IsNullOrWhiteSpace(cost.CurrencyName) ? $"Currency {currencyItemId}" : cost.CurrencyName,
+                        ResolveCurrencyIconId(currencyItemId));
+            }
         }
         return totals
             .Select(kvp => new CurrencyTotal(kvp.Key, kvp.Value.Amount, kvp.Value.Name, kvp.Value.IconId))
@@ -922,7 +964,8 @@ public class CraftingMaterialsWindow : Window
 
         var currencyIconIds = new HashSet<uint>();
         foreach (var option in entry.CurrencyOptions)
-            currencyIconIds.Add(option.IconId);
+            foreach (var iconId in option.IconIds)
+                currencyIconIds.Add(iconId);
 
         var filtered = new List<CraftingRowIcons.RowIcon>(sourceIcons.Count);
         foreach (var sourceIcon in sourceIcons)
@@ -937,7 +980,7 @@ public class CraftingMaterialsWindow : Window
         if (entry.CurrencyOptions.Count == 0)
             return false;
 
-        var selectedCurrencyId = GetSelectedCurrencyItemId(entry, preferBicolorDefault);
+        var selectedOption = GetSelectedCurrencyOption(entry, preferBicolorDefault);
         var lineH = ImGui.GetTextLineHeight();
         var iconSize = new Vector2(lineH, lineH);
         var drawList = ImGui.GetWindowDrawList();
@@ -952,33 +995,60 @@ public class CraftingMaterialsWindow : Window
             if (i > 0)
                 ImGui.SameLine(0, MaterialRowIconSpacing);
             var option = entry.CurrencyOptions[i];
-            var isSelected = option.CurrencyItemId == selectedCurrencyId;
+            var isSelected = selectedOption is { } selected
+                          && selected.OfferKey == option.OfferKey;
 
-            ImGui.PushID($"##matcur_{entry.ItemId}_{option.CurrencyItemId}");
+            ImGui.PushID($"##matcur_{entry.ItemId}_{option.OfferKey}");
             var clicked = false;
-            var cursorPosBefore = ImGui.GetCursorScreenPos();
-            if (option.IconId != 0)
+            if (option.IconIds.Count == 0)
             {
-                var icon = Icons.DefaultStorage.TextureProvider.GetFromGameIcon(new GameIconLookup(option.IconId));
-                if (icon.TryGetWrap(out var wrap, out _))
-                    clicked = ImGui.ImageButton(wrap.Handle, iconSize);
-                else
-                    ImGui.Dummy(iconSize);
+                clicked = ImGui.Button("?", iconSize);
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip("Unknown vendor offer; direct purchase is disabled.");
             }
             else
             {
-                ImGui.Dummy(iconSize);
+                for (var iconIndex = 0; iconIndex < option.IconIds.Count; iconIndex++)
+                {
+                    if (iconIndex > 0)
+                        ImGui.SameLine(0, MaterialRowIconSpacing);
+
+                    var cursorPosBefore = ImGui.GetCursorScreenPos();
+                    var iconId = option.IconIds[iconIndex];
+                    if (iconId != 0)
+                    {
+                        var icon = Icons.DefaultStorage.TextureProvider.GetFromGameIcon(new GameIconLookup(iconId));
+                        if (icon.TryGetWrap(out var wrap, out _))
+                        {
+                            if (iconIndex == 0)
+                                clicked |= ImGui.ImageButton(wrap.Handle, iconSize);
+                            else
+                                ImGui.Image(wrap.Handle, iconSize);
+                        }
+                        else if (iconIndex == 0)
+                            clicked |= ImGui.Button("?", iconSize);
+                        else
+                            ImGui.Dummy(iconSize);
+                    }
+                    else if (iconIndex == 0)
+                    {
+                        clicked |= ImGui.Button("?", iconSize);
+                    }
+                    else
+                    {
+                        ImGui.Dummy(iconSize);
+                    }
+
+                    if (!isSelected)
+                        drawList.AddRectFilled(cursorPosBefore, cursorPosBefore + iconSize,
+                            ImGui.ColorConvertFloat4ToU32(new Vector4(0f, 0f, 0f, 0.55f)));
+                    if (ImGui.IsItemHovered())
+                        ImGui.SetTooltip($"{option.Name}\nClick to use for totals.");
+                }
             }
 
-            if (!isSelected)
-                drawList.AddRectFilled(cursorPosBefore, cursorPosBefore + iconSize,
-                    ImGui.ColorConvertFloat4ToU32(new Vector4(0f, 0f, 0f, 0.55f)));
-
-            if (ImGui.IsItemHovered())
-                ImGui.SetTooltip($"{option.Name}: {option.CostPerItem:N0} per item\nClick to use for totals.");
-
             if (clicked)
-                _userSelectedCurrencyByItem[entry.ItemId] = option.CurrencyItemId;
+                _userSelectedCurrencyByItem[entry.ItemId] = option.OfferKey;
 
             ImGui.PopID();
         }

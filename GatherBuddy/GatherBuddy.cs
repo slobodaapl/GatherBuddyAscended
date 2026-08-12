@@ -4,6 +4,7 @@ using System.IO;
 using System.Linq;
 using System.Net.Http;
 using System.Reflection;
+using System.Threading;
 using System.Threading.Tasks;
 using Dalamud;
 using Dalamud.Game.ClientState.Objects.Enums;
@@ -21,6 +22,7 @@ using GatherBuddy.FishTimer;
 using GatherBuddy.GatherHelper;
 using GatherBuddy.AutoGather.Lists;
 using GatherBuddy.Crafting;
+using GatherBuddy.Crafting.Acquisition;
 using GatherBuddy.Gui;
 using GatherBuddy.Marketboard;
 using GatherBuddy.Plugin;
@@ -63,6 +65,8 @@ public partial class GatherBuddy : IDalamudPlugin
         Timeout = TimeSpan.FromMilliseconds(1500),
     };
 
+    private static readonly TimeSpan FrameworkDispatchTimeout = TimeSpan.FromSeconds(5);
+
     public static WeatherManager        WeatherManager  { get; private set; } = null!;
     public static UptimeManager         UptimeManager   { get; private set; } = null!;
     public static FishLog               FishLog         { get; private set; } = null!;
@@ -74,6 +78,8 @@ public partial class GatherBuddy : IDalamudPlugin
     public static AutoHookIntegration.BiteTimerService BiteTimerService { get; private set; } = null!;
     public static AutoGather.Collectables.CollectableManager CollectableManager { get; private set; } = null!;
     public static Crafting.CraftingListManager CraftingListManager { get; private set; } = null!;
+    public static NativeLiveAcquisitionEnvironment? LiveAcquisitionEnvironment { get; private set; }
+    public static LiveAcquisitionExecutor? LiveAcquisitionExecutor { get; private set; }
     public static Crafting.RaphaelSolveCoordinator RaphaelSolveCoordinator { get; private set; } = null!;
     public static Crafting.RecipeBrowserSettings RecipeBrowserSettings { get; private set; } = null!;
     public static Gui.CraftingStatusWindow? CraftingStatusWindow { get; private set; }
@@ -81,10 +87,12 @@ public partial class GatherBuddy : IDalamudPlugin
     public static Gui.CraftingMaterialsWindow? CraftingMaterialsWindow { get; private set; }
     public static Gui.CraftingTreeWindow? CraftingTreeWindow { get; private set; }
     public static Gui.VendorBuyListWindow? VendorBuyListWindow { get; private set; }
+    public static Gui.MarketplaceBuyListWindow? MarketplaceBuyListWindow { get; private set; }
     public static Gui.CollectablesWindow? CollectablesWindow { get; private set; }
     internal static Gui.NativeItemTooltipBridge? NativeItemTooltipBridge { get; private set; }
     public static ControllerSupportManager?      ControllerSupport      { get; private set; }
     public static MarketboardService?             MarketboardService     { get; private set; }
+    public static MarketplaceBuyListManager?      MarketplaceBuyListManager { get; private set; }
     public static Vulcan.Vendors.VendorNavigator  VendorNavigator        { get; private set; } = null!;
     public static Vulcan.Vendors.VendorPurchaseManager VendorPurchaseManager { get; private set; } = null!;
     public static Vulcan.Vendors.VendorBuyListManager VendorBuyListManager { get; private set; } = null!;
@@ -104,7 +112,10 @@ public partial class GatherBuddy : IDalamudPlugin
     internal Gui.CraftingMaterialsWindow?            _craftingMaterialsWindow;
     internal Gui.CraftingTreeWindow?                 _craftingTreeWindow;
     internal Gui.VendorBuyListWindow?                _vendorBuyListWindow;
+    internal Gui.MarketplaceBuyListWindow?           _marketplaceBuyListWindow;
     internal Gui.CollectablesWindow?                 _collectablesWindow;
+    private bool _disposeStarted;
+    private bool _disposeCompleted;
 
     internal readonly GatherBuddyIpc Ipc;
     //    internal readonly WotsitIpc Wotsit;
@@ -150,12 +161,16 @@ public partial class GatherBuddy : IDalamudPlugin
             AlarmManager.ForceEnable();
             CraftingListManager   = new Crafting.CraftingListManager();
             MarketboardService    = new MarketboardService();
+            MarketplaceBuyListManager = new MarketplaceBuyListManager(Config);
             RaphaelSolveCoordinator = new Crafting.RaphaelSolveCoordinator(Config.RaphaelSolverConfig);
             RecipeBrowserSettings = new Crafting.RecipeBrowserSettings();
             RecipeBrowserSettings.Load();
             VendorNavigator = new Vulcan.Vendors.VendorNavigator();
             VendorPurchaseManager = new Vulcan.Vendors.VendorPurchaseManager();
             VendorBuyListManager = new Vulcan.Vendors.VendorBuyListManager();
+            var liveVendorPurchase = new LiveVendorPurchaseAdapter(VendorPurchaseManager);
+            LiveAcquisitionEnvironment = new NativeLiveAcquisitionEnvironment(liveVendorPurchase.PurchaseAsync);
+            LiveAcquisitionExecutor = null;
             CraftingGameInterop.Initialize();
             CraftingGatherBridge.Initialize(this);
             CraftingGameInterop.CraftFinished += (recipe, cancelled) => CraftingGatherBridge.OnCraftFinished(recipe, cancelled);
@@ -193,6 +208,8 @@ public partial class GatherBuddy : IDalamudPlugin
             CraftingTreeWindow = _craftingTreeWindow;
             _vendorBuyListWindow = new Gui.VendorBuyListWindow();
             VendorBuyListWindow = _vendorBuyListWindow;
+            _marketplaceBuyListWindow = new Gui.MarketplaceBuyListWindow();
+            MarketplaceBuyListWindow = _marketplaceBuyListWindow;
             _collectablesWindow = new Gui.CollectablesWindow();
             CollectablesWindow = _collectablesWindow;
             NativeItemTooltipBridge = new Gui.NativeItemTooltipBridge();
@@ -205,6 +222,7 @@ public partial class GatherBuddy : IDalamudPlugin
             WindowSystem.AddWindow(_craftingMaterialsWindow);
             WindowSystem.AddWindow(_craftingTreeWindow);
             WindowSystem.AddWindow(_vendorBuyListWindow);
+            WindowSystem.AddWindow(_marketplaceBuyListWindow);
             WindowSystem.AddWindow(_collectablesWindow);
             if (rebornMigration.ShouldPrompt)
                 WindowSystem.AddWindow(new GatherBuddyRebornMigrationWindow(rebornMigration));
@@ -276,6 +294,193 @@ public partial class GatherBuddy : IDalamudPlugin
         }
     }
 
+    private static async Task<AcquisitionPlanningResult?> ReplanLiveAcquisitionAsync(
+        CancellationToken cancellationToken)
+    {
+        var plan = CraftingGatherBridge.GetActiveExecutionPlan();
+        if (plan == null)
+            return null;
+
+        // A stale live market listing invalidates the complete source plan.
+        // The normal builder queues a cache refresh and reports loading; wait
+        // for that refresh before allowing the executor to choose again.
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(30);
+        while (DateTime.UtcNow < deadline)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var evaluation = await EvaluateAcquisitionOnFrameworkThreadAsync(plan, cancellationToken)
+                .ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!evaluation.IsLoading)
+                return evaluation.Planning;
+            await Task.Delay(250, cancellationToken).ConfigureAwait(false);
+        }
+
+        return null;
+    }
+
+    internal static LiveAcquisitionExecutor? CreateLiveAcquisitionExecutor(LiveAcquisitionOptions options)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+        var environment = LiveAcquisitionEnvironment;
+        if (environment == null)
+            return null;
+
+        if (LiveAcquisitionExecutor is { IsRunning: true })
+            return null;
+
+        LiveAcquisitionExecutor?.Dispose();
+        LiveAcquisitionExecutor = new LiveAcquisitionExecutor(
+            environment,
+            options,
+            ReplanLiveAcquisitionAsync,
+            InvalidateAcquisitionMarketDataOnFrameworkThreadAsync);
+        return LiveAcquisitionExecutor;
+    }
+
+    internal static void ReleaseLiveAcquisitionExecutor(LiveAcquisitionExecutor? executor)
+    {
+        if (executor == null)
+            return;
+
+        executor.Dispose();
+        if (ReferenceEquals(LiveAcquisitionExecutor, executor))
+            LiveAcquisitionExecutor = null;
+    }
+
+    private static async Task<CraftingAcquisitionService.Evaluation> EvaluateAcquisitionOnFrameworkThreadAsync(
+        CraftingExecutionPlan plan,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (Dalamud.Framework.IsInFrameworkUpdateThread)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            plan.RefreshFromCurrentInventory();
+            cancellationToken.ThrowIfCancellationRequested();
+            var evaluation = CraftingAcquisitionService.Evaluate(plan);
+            cancellationToken.ThrowIfCancellationRequested();
+            return evaluation;
+        }
+
+        var dispatch = new FrameworkDispatchGate<CraftingAcquisitionService.Evaluation>();
+        void Evaluate(IFramework _)
+        {
+            if (!dispatch.TryClaim(cancellationToken))
+            {
+                Dalamud.Framework.Update -= Evaluate;
+                return;
+            }
+
+            try
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                plan.RefreshFromCurrentInventory();
+                cancellationToken.ThrowIfCancellationRequested();
+                var evaluation = CraftingAcquisitionService.Evaluate(plan);
+                dispatch.TryComplete(evaluation, cancellationToken);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                dispatch.TryCancel(cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                dispatch.TryFail(ex);
+            }
+            finally
+            {
+                Dalamud.Framework.Update -= Evaluate;
+            }
+        }
+
+        Dalamud.Framework.Update += Evaluate;
+        using var registration = cancellationToken.Register(() =>
+        {
+            if (dispatch.TryCancel(cancellationToken))
+                Dalamud.Framework.Update -= Evaluate;
+        });
+
+        var timeout = Task.Delay(FrameworkDispatchTimeout);
+        var completed = await Task.WhenAny(dispatch.Completion, timeout).ConfigureAwait(false);
+        if (completed == dispatch.Completion)
+            return await dispatch.Completion.ConfigureAwait(false);
+
+        cancellationToken.ThrowIfCancellationRequested();
+        dispatch.TryCancel();
+        Dalamud.Framework.Update -= Evaluate;
+        throw new TimeoutException(
+            "Dalamud framework callback did not run before the acquisition dispatch timeout.");
+    }
+
+    private static async Task InvalidateAcquisitionMarketDataOnFrameworkThreadAsync(
+        uint itemId,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (Dalamud.Framework == null)
+            throw new InvalidOperationException("Dalamud framework is unavailable for market-data invalidation.");
+
+        if (Dalamud.Framework.IsInFrameworkUpdateThread)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            CraftingGatherBridge.InvalidateAcquisitionMarketData(itemId);
+            cancellationToken.ThrowIfCancellationRequested();
+            return;
+        }
+
+        var dispatch = new FrameworkDispatchGate<bool>();
+        void Invalidate(IFramework _)
+        {
+            if (!dispatch.TryClaim(cancellationToken))
+            {
+                Dalamud.Framework.Update -= Invalidate;
+                return;
+            }
+
+            try
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                CraftingGatherBridge.InvalidateAcquisitionMarketData(itemId);
+                cancellationToken.ThrowIfCancellationRequested();
+                dispatch.TryComplete(true, cancellationToken);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                dispatch.TryCancel(cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                dispatch.TryFail(ex);
+            }
+            finally
+            {
+                Dalamud.Framework.Update -= Invalidate;
+            }
+        }
+
+        Dalamud.Framework.Update += Invalidate;
+        using var registration = cancellationToken.Register(() =>
+        {
+            if (dispatch.TryCancel(cancellationToken))
+                Dalamud.Framework.Update -= Invalidate;
+        });
+
+        var timeout = Task.Delay(FrameworkDispatchTimeout);
+        var completed = await Task.WhenAny(dispatch.Completion, timeout).ConfigureAwait(false);
+        if (completed == dispatch.Completion)
+        {
+            await dispatch.Completion.ConfigureAwait(false);
+            return;
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
+        dispatch.TryCancel();
+        Dalamud.Framework.Update -= Invalidate;
+        throw new TimeoutException(
+            "Dalamud framework callback did not run before market-data invalidation timeout.");
+    }
+
     private int      LastObjectsLength;
     private DateTime LastObjectsScan = DateTime.Now;
 
@@ -342,6 +547,78 @@ public partial class GatherBuddy : IDalamudPlugin
 
     void IDisposable.Dispose()
     {
+        if (_disposeStarted)
+            return;
+        _disposeStarted = true;
+
+        if (Dalamud.Framework == null)
+        {
+            // Partial construction can fail before Dalamud exposes the
+            // framework service. There is no safe callback target in that
+            // path; still run bridge cleanup before the final best-effort
+            // disposal.
+            _ = ShutdownBridgeThenDisposeAsync();
+            return;
+        }
+
+        if (Dalamud.Framework.IsInFrameworkUpdateThread)
+        {
+            _ = ShutdownBridgeThenDisposeAsync();
+            return;
+        }
+
+        Dalamud.Framework.Update += ShutdownBridgeDeferredOnFramework;
+    }
+
+    private void ShutdownBridgeDeferredOnFramework(IFramework framework)
+    {
+        Dalamud.Framework.Update -= ShutdownBridgeDeferredOnFramework;
+        _ = ShutdownBridgeThenDisposeAsync();
+    }
+
+    private async Task ShutdownBridgeThenDisposeAsync()
+    {
+        try
+        {
+            // CraftingGatherBridge stops the queue and awaits its acquisition
+            // drain. Only after this completes may vendor, market, or native
+            // acquisition dependencies be disposed.
+            await CraftingGatherBridge.ShutdownAsync().ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            Log?.Error($"[GatherBuddy] Crafting queue cleanup failed during shutdown: {ex.Message}");
+        }
+
+        // Native Dalamud/game objects must be released on the framework thread.
+        // The bridge drain is intentionally awaited off-thread, then the final
+        // disposal is marshalled back through the framework update event.
+        if (Dalamud.Framework == null)
+        {
+            DisposeCore();
+            return;
+        }
+
+        if (Dalamud.Framework.IsInFrameworkUpdateThread)
+        {
+            DisposeCore();
+            return;
+        }
+
+        Dalamud.Framework.Update += DisposeDeferredOnFramework;
+    }
+
+    private void DisposeDeferredOnFramework(IFramework framework)
+    {
+        Dalamud.Framework.Update -= DisposeDeferredOnFramework;
+        DisposeCore();
+    }
+
+    private void DisposeCore()
+    {
+        if (_disposeCompleted)
+            return;
+        _disposeCompleted = true;
         Config?.SaveIfDirty(force: true);
         MarketboardService?.Dispose();
         RaphaelSolveCoordinator?.Save();
@@ -362,6 +639,12 @@ public partial class GatherBuddy : IDalamudPlugin
         CollectableManager?.Dispose();
         VendorBuyListManager?.Dispose();
         VendorPurchaseManager?.Dispose();
+        LiveAcquisitionExecutor?.Dispose();
+        LiveAcquisitionExecutor = null;
+        LiveAcquisitionEnvironment = null;
+        _marketplaceBuyListWindow?.Dispose();
+        MarketplaceBuyListManager = null;
+        MarketplaceBuyListWindow = null;
         ControllerSupport?.Dispose();
         Ipc?.Dispose();
         NativeItemTooltipBridge?.Dispose();

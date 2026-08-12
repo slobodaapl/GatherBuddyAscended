@@ -14,6 +14,7 @@ namespace GatherBuddy.AutoGather
         public bool UseGivingLandOnCooldown { get; set; } = false;
 
         public int TimedNodePrecog { get; set; } = 20;
+        public int TimedNodeEarlyAbandonment { get; set; } = 0;
         public bool DoGathering { get; set; } = true;
         public bool AutoRetainerMultiMode { get; set; } = false;
         public int AutoRetainerMultiModeThreshold { get; set; } = 300;
@@ -33,6 +34,7 @@ namespace GatherBuddy.AutoGather
         public bool TeleportToNextNode { get; set; } = false;
         public bool GoHomeWhenIdle { get; set; } = true;
         public bool GoHomeWhenDone { get; set; } = true;
+        public bool ShowAutoHomeChatWarning { get; set; } = true;
         public bool UseSkillsForFallbackItems { get; set; } = false;
         public bool AbandonNodes { get; set; } = false;
         public uint ExecutionDelay { get; set; } = 0;

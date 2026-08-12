@@ -162,11 +162,13 @@ public static class CraftingListQueueBuilder
 
         foreach (var (itemId, _) in RecipeManager.GetIngredients(recipe.Value))
         {
-            var depRecipe = RecipeManager.GetRecipeForItem(itemId);
-            if (!depRecipe.HasValue)
-                continue;
-
-            var depItem = allRecipes.FirstOrDefault(r => r.RecipeId == depRecipe.Value.RowId && !r.IsOriginalRecipe);
+            var depItem = allRecipes.FirstOrDefault(candidate =>
+            {
+                if (candidate.IsOriginalRecipe)
+                    return false;
+                var candidateRecipe = RecipeManager.GetRecipe(candidate.RecipeId);
+                return candidateRecipe.HasValue && candidateRecipe.Value.ItemResult.RowId == itemId;
+            });
             if (depItem != null)
                 ProcessRecipeWithDependencies(depItem, allRecipes, processed, result);
         }

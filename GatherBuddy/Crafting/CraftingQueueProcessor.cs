@@ -1,8 +1,12 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
 using Dalamud.Game.ClientState.Conditions;
+using GatherBuddy.Crafting.Acquisition;
 using GatherBuddy.Automation;
+using GatherBuddy.Helpers;
 using GatherBuddy.Plugin;
 using GatherBuddy.Vulcan;
 using FFXIVClientStructs.FFXIV.Client.Game;
@@ -23,12 +27,17 @@ public class CraftingQueueProcessor : IDisposable
         NavigatingToRetainerBell,
         WithdrawingFromRetainer,
         WaitingForGather,
+        WaitingForAcquisitionData,
+        PurchasingDependencies,
+        ReturningToHomeWorld,
+        ReturningToInn,
         WaitingForJobSwitch,
         Repairing,
         ExtractingMateria,
         WaitingForRaphaelSolution,
         ReadyForCraft,
         Crafting,
+        Failed,
         Complete
     }
 
@@ -40,8 +49,25 @@ public class CraftingQueueProcessor : IDisposable
     private CraftingListConsumableSettings? _listConsumables = null;
     private DateTime _consumableDelayUntil = DateTime.MinValue;
     private bool _retainerRestock = false;
+    private bool _retainerWithdrawalCompleted;
+    private bool _acquisitionCompleted;
     private RetainerTaskExecutor? _retainerExecutor = null;
     private RetainerBellNavigator? _retainerBellNavigator = null;
+    private Task<LiveAcquisitionResult>? _acquisitionTask;
+    private CancellationTokenSource? _acquisitionCancellation;
+    private LiveAcquisitionExecutor? _acquisitionExecutor;
+    private readonly AcquisitionRunGenerationGate _acquisitionRuns = new();
+    private readonly object _acquisitionSync = new();
+    private long _acquisitionGeneration;
+    private readonly Dictionary<uint, (int NQ, int HQ)> _acquisitionInventoryBefore = new();
+    private readonly Dictionary<uint, int> _acquisitionPlannedQuantities = new();
+    private bool _navigationStarted;
+
+    private readonly record struct AcquisitionRunSnapshot(
+        long Generation,
+        LiveAcquisitionExecutor? Executor,
+        CancellationTokenSource? Cancellation,
+        Task<LiveAcquisitionResult>? Task);
 
     private bool _paused = false;
     private bool _pausedDuringGather = false;
@@ -69,6 +95,7 @@ public class CraftingQueueProcessor : IDisposable
     public CraftingListItem? CurrentRecipeItem => _currentQueueIndex < QueueItems.Count ? QueueItems[_currentQueueIndex] : null;
     public bool Paused => _paused;
     public string PauseReason => _pauseReason;
+    internal Task AcquisitionDrainTask => _acquisitionRuns.DrainTask;
     public uint CurrentProcessedRecipeId => _currentProcessedRecipeId;
     public int CurrentProcessedRecipeCount => _currentProcessedRecipeCount;
     public int CurrentProcessedRecipeTotal => _currentProcessedRecipeTotal;
@@ -93,9 +120,12 @@ public class CraftingQueueProcessor : IDisposable
 
     public void Dispose()
     {
+        CancelAcquisition();
         CraftingGameInterop.CraftFinished -= OnCraftFinished;
         CraftingGameInterop.QuickSynthProgress -= OnQuickSynthProgress;
         CraftingGameInterop.AutomationFaulted -= OnAutomationFaulted;
+        StateChanged = null;
+        QueueCompleted = null;
     }
 
     public void StartQueue(CraftingExecutionPlan executionPlan, CraftingListConsumableSettings? listConsumables = null, RaphaelSolveCoordinator? raphaelCoordinator = null)
@@ -112,8 +142,12 @@ public class CraftingQueueProcessor : IDisposable
         _missingIngredientFailures.Clear();
         _pauseReason = string.Empty;
         _retainerRestock = executionPlan.RetainerRestock;
+        _retainerWithdrawalCompleted = false;
+        _acquisitionCompleted = false;
         _retainerExecutor = null;
         _retainerBellNavigator = null;
+        CancelAcquisition();
+        _navigationStarted = false;
         var hasRetainerWork = _retainerRestock && AllaganTools.Enabled
             && (MaterialTargets.Count > 0 || RetainerPrecraftTargets.Count > 0);
 
@@ -135,7 +169,7 @@ public class CraftingQueueProcessor : IDisposable
         }
         else
         {
-            _currentState = QueueState.WaitingForGather;
+            BeginAcquisitionOrGather();
         }
         GatherBuddy.Log.Information($"[CraftingQueueProcessor] Starting queue with {QueueItems.Count} recipes");
         StateChanged?.Invoke(_currentState);
@@ -152,12 +186,496 @@ public class CraftingQueueProcessor : IDisposable
         if (_currentState != QueueState.WaitingForGather)
             return;
 
-        GatherBuddy.Log.Debug($"[CraftingQueueProcessor] Gather complete, moving to job check");
+        GatherBuddy.Log.Debug("[CraftingQueueProcessor] Gather complete, preparing post-acquisition navigation");
         YesAlready.Lock();
         CraftingGatherBridge.DeleteTemporaryGatherList();
-        
+        if (_executionPlan != null)
+            _executionPlan.RefreshFromCurrentInventory();
+        BeginPostGatherNavigation();
+    }
+
+    private void BeginAcquisitionOrGather()
+    {
+        if (_executionPlan == null || _currentState is QueueState.Failed or QueueState.Complete)
+            return;
+
+        if (!WaitForAcquisitionDrain())
+            return;
+
+        var evaluation = CraftingAcquisitionService.Evaluate(_executionPlan);
+        if (evaluation.IsLoading)
+        {
+            var stateChanged = _currentState != QueueState.WaitingForAcquisitionData;
+            _currentState = QueueState.WaitingForAcquisitionData;
+            _pauseReason = evaluation.Status;
+            if (stateChanged)
+                StateChanged?.Invoke(_currentState);
+            return;
+        }
+
+        if (!string.IsNullOrWhiteSpace(evaluation.Snapshot.ErrorReason))
+        {
+            FailQueue(CraftingAcquisitionService.FormatFailure(evaluation));
+            return;
+        }
+
+        if (!_executionPlan.AutoPurchaseBlockedDependencies)
+        {
+            BeginGatherStage();
+            return;
+        }
+
+        var planning = evaluation.Planning;
+        if (planning == null)
+        {
+            FailQueue("Automatic acquisition did not produce a planning result.");
+            return;
+        }
+        if (!planning.IsSuccess)
+        {
+            FailQueue(CraftingAcquisitionService.FormatFailure(evaluation));
+            return;
+        }
+
+        if (planning.SelectedPlan == null || planning.SelectedPlan.Transactions.Count == 0)
+        {
+            BeginGatherStage();
+            return;
+        }
+
+        if (!_acquisitionRuns.TryBeginRun(out var generation))
+        {
+            _currentState = QueueState.WaitingForAcquisitionData;
+            _pauseReason = "Waiting for the previous automatic acquisition cleanup to finish.";
+            return;
+        }
+
+        var executor = GatherBuddy.CreateLiveAcquisitionExecutor(new LiveAcquisitionOptions
+        {
+            CurrentWorldOnly = _executionPlan.CurrentWorldOnly,
+            PreferHQ = _executionPlan.PreferHQ,
+            PreferVendors = _executionPlan.PreferVendors,
+            PreferMarketForSpecialCurrency = _executionPlan.PreferMarketForSpecialCurrency,
+            MaximumGilSpend = _executionPlan.MaximumGilSpend,
+        });
+        if (executor == null)
+        {
+            _acquisitionRuns.TryReleaseActive(generation);
+            FailQueue("Automatic acquisition is unavailable because its live executor is not initialized.");
+            return;
+        }
+
+        CaptureAcquisitionInventory(planning);
+        var cancellation = new CancellationTokenSource();
+        Task<LiveAcquisitionResult> task;
+        try
+        {
+            task = executor.ExecuteAsync(
+                new AcquisitionResult(planning),
+                cancellation.Token);
+        }
+        catch (Exception ex)
+        {
+            cancellation.Dispose();
+            _acquisitionRuns.TryReleaseActive(generation);
+            GatherBuddy.ReleaseLiveAcquisitionExecutor(executor);
+            FailQueue($"Automatic acquisition could not start: {ex.Message}");
+            return;
+        }
+
+        lock (_acquisitionSync)
+        {
+            _acquisitionGeneration = generation;
+            _acquisitionExecutor = executor;
+            _acquisitionCancellation = cancellation;
+            _acquisitionTask = task;
+        }
+        _currentState = QueueState.PurchasingDependencies;
+        _pauseReason = string.Empty;
+        GatherBuddy.Log.Information($"[CraftingQueueProcessor] Starting automatic acquisition with {planning.SelectedPlan.Transactions.Count} transaction(s)");
+        StateChanged?.Invoke(_currentState);
+    }
+
+    private void UpdateAcquisition()
+    {
+        if (_acquisitionTask == null || !_acquisitionTask.IsCompleted)
+            return;
+
+        try
+        {
+            var result = _acquisitionTask.GetAwaiter().GetResult();
+            if (result.Status is not LiveAcquisitionStatus.Completed)
+            {
+                FailQueue(result.Message);
+                return;
+            }
+
+            GatherBuddy.Log.Information($"[CraftingQueueProcessor] Automatic acquisition complete; spent {result.GilSpent:N0} Gil");
+            var acquiredAvailability = BuildVerifiedAcquiredAvailability(result);
+            _executionPlan?.RegisterAcquiredAvailability(acquiredAvailability);
+            ReleaseAcquisition();
+            RebuildQueueAndMaterialsFromCurrentInventory();
+            _acquisitionCompleted = true;
+            BeginGatherStage();
+        }
+        catch (Exception ex)
+        {
+            FailQueue($"Automatic acquisition failed: {ex.Message}");
+        }
+    }
+
+    private void BeginGatherStage()
+    {
+        if (_executionPlan == null)
+            return;
+
+        _currentState = QueueState.WaitingForGather;
+        _pauseReason = string.Empty;
+        StateChanged?.Invoke(_currentState);
+        try
+        {
+            GatherBuddy.AutoGather?.SetCraftOwnedGathering(true);
+        }
+        catch (Exception ex)
+        {
+            FailQueue($"Cannot start crafting gather stage: {ex.Message}");
+            return;
+        }
+        CraftingGatherBridge.CreateGatherListForMissingIngredients(BuildCurrentMaterialDeficits());
+    }
+
+    private Dictionary<uint, int> BuildCurrentMaterialDeficits()
+        => ComputeCurrentMaterialDeficits(
+            MaterialTargets,
+            IngredientDemandTargets,
+            CraftingInventoryCounter.GetInventorySplitCounts);
+
+    internal static Dictionary<uint, int> ComputeCurrentMaterialDeficits(
+        IReadOnlyDictionary<uint, int> materialTargets,
+        IReadOnlyDictionary<uint, IngredientQualityDemand> ingredientDemands,
+        Func<uint, (int NQ, int HQ)> inventoryCounts)
+    {
+        ArgumentNullException.ThrowIfNull(materialTargets);
+        ArgumentNullException.ThrowIfNull(ingredientDemands);
+        ArgumentNullException.ThrowIfNull(inventoryCounts);
+
+        var deficits = new Dictionary<uint, int>();
+        foreach (var (itemId, requiredQuantity) in materialTargets)
+        {
+            if (itemId == 0 || requiredQuantity <= 0)
+                continue;
+
+            var (nq, hq) = inventoryCounts(itemId);
+            var demand = ingredientDemands.GetValueOrDefault(itemId);
+            var totalMissing = Math.Max(0, requiredQuantity - Math.Max(0, nq) - Math.Max(0, hq));
+            var requiredHqMissing = Math.Max(0, demand.RequiredHQ - Math.Max(0, hq));
+            var requiredNqMissing = Math.Max(0, demand.RequiredNQ - Math.Max(0, nq));
+            var missing = Math.Max(totalMissing, requiredHqMissing + requiredNqMissing);
+            if (missing > 0)
+                deficits[itemId] = missing;
+        }
+
+        return deficits;
+    }
+
+    private void BeginPostGatherNavigation()
+    {
+        _navigationStarted = false;
+        if (_executionPlan?.ReturnToHomeWorldBeforeCrafting == true && !HomeNavigationHelper.IsAtHomeWorld())
+        {
+            _currentState = QueueState.ReturningToHomeWorld;
+            StateChanged?.Invoke(_currentState);
+            return;
+        }
+
+        if (GatherBuddy.Config.GoToInnBeforeCrafting)
+        {
+            _currentState = QueueState.ReturningToInn;
+            StateChanged?.Invoke(_currentState);
+            return;
+        }
+
+        BeginFinalPreflight();
+    }
+
+    private void UpdatePostGatherNavigation()
+    {
+        if (Lifestream.Enabled && Lifestream.IsBusy())
+            return;
+
+        if (!_navigationStarted)
+        {
+            string? homeError;
+            var started = _currentState == QueueState.ReturningToHomeWorld
+                ? HomeNavigationHelper.TryStartReturnHomeWorld(out homeError)
+                : HomeNavigationHelper.TryStartInn(out homeError);
+            if (!started)
+            {
+                FailQueue(homeError ?? "Lifestream navigation could not be started.");
+                return;
+            }
+
+            _navigationStarted = true;
+            return;
+        }
+
+        if (Lifestream.Enabled && Lifestream.IsBusy())
+            return;
+
+        if (_currentState == QueueState.ReturningToHomeWorld && GatherBuddy.Config.GoToInnBeforeCrafting)
+        {
+            if (!HomeNavigationHelper.IsAtHomeWorld())
+            {
+                FailQueue("Lifestream finished, but the character did not return to the Home World.");
+                return;
+            }
+            _navigationStarted = false;
+            _currentState = QueueState.ReturningToInn;
+            StateChanged?.Invoke(_currentState);
+            return;
+        }
+
+        if (_currentState == QueueState.ReturningToHomeWorld && !HomeNavigationHelper.IsAtHomeWorld())
+        {
+            FailQueue("Lifestream finished, but the character did not return to the Home World.");
+            return;
+        }
+
+        BeginFinalPreflight();
+    }
+
+    private void BeginFinalPreflight()
+    {
+        DisableAutoGatherSafely();
+        if (_executionPlan == null)
+        {
+            FailQueue("Crafting execution plan was lost before final preflight.");
+            return;
+        }
+
+        _executionPlan.RefreshFromCurrentInventory();
+        if (!CraftingQueuePreflight.TryValidate(_executionPlan, out var failure, validatePrecrafts: true)
+            || !CraftingQueuePreflight.TryValidateMaterials(_executionPlan, out failure))
+        {
+            FailQueue(failure);
+            return;
+        }
+
         _currentState = QueueState.WaitingForJobSwitch;
         StateChanged?.Invoke(_currentState);
+    }
+
+    private void FailQueue(string reason)
+    {
+        reason = string.IsNullOrWhiteSpace(reason)
+            ? "Crafting queue stopped because its acquisition requirements could not be satisfied."
+            : reason;
+        _pauseReason = reason;
+        _tasks.Clear();
+        CancelAcquisition();
+        DisableAutoGatherSafely();
+        YesAlready.Unlock();
+        GatherBuddy.Log.Error($"[CraftingQueueProcessor] {reason}");
+        Dalamud.Chat.PrintError($"[GatherBuddy Ascended] {reason}");
+        _currentState = QueueState.Failed;
+        StateChanged?.Invoke(_currentState);
+    }
+
+    internal void FailFromBridge(string reason)
+        => FailQueue(reason);
+
+    private static void DisableAutoGatherSafely()
+    {
+        var autoGather = GatherBuddy.AutoGather;
+        if (autoGather == null)
+            return;
+
+        try
+        {
+            autoGather.SetCraftOwnedGathering(false);
+            autoGather.Enabled = false;
+        }
+        catch (Exception ex)
+        {
+            GatherBuddy.Log.Warning($"[CraftingQueueProcessor] Failed to restore AutoGather state: {ex.Message}");
+        }
+    }
+
+    private void CaptureAcquisitionInventory(AcquisitionPlanningResult planning)
+    {
+        _acquisitionInventoryBefore.Clear();
+        _acquisitionPlannedQuantities.Clear();
+        if (_executionPlan == null || planning.SelectedPlan == null)
+            return;
+
+        foreach (var (itemId, plannedQuantity) in planning.SelectedPlan.PurchasedQuantities)
+        {
+            if (itemId == 0
+                || !_executionPlan.PrecraftsView.TryGetValue(itemId, out var precraftDemand))
+                continue;
+
+            var cappedQuantity = Math.Min(Math.Max(0, plannedQuantity), Math.Max(0, precraftDemand));
+            if (cappedQuantity <= 0)
+                continue;
+
+            _acquisitionPlannedQuantities[itemId] = cappedQuantity;
+            _acquisitionInventoryBefore[itemId] = CraftingInventoryCounter.GetInventorySplitCounts(itemId);
+        }
+    }
+
+    private Dictionary<uint, AcquiredDependencyAvailability> BuildVerifiedAcquiredAvailability(
+        LiveAcquisitionResult result)
+    {
+        var verified = new Dictionary<uint, AcquiredDependencyAvailability>();
+        foreach (var (itemId, plannedQuantity) in _acquisitionPlannedQuantities)
+        {
+            var reportedQuantity = Math.Max(0, result.PurchasedQuantities.GetValueOrDefault(itemId));
+            var purchaseCap = Math.Min(plannedQuantity, reportedQuantity);
+            if (purchaseCap <= 0 || !_acquisitionInventoryBefore.TryGetValue(itemId, out var before))
+                continue;
+
+            var after = CraftingInventoryCounter.GetInventorySplitCounts(itemId);
+            var deltaNQ = Math.Max(0, after.NQ - before.NQ);
+            var deltaHQ = Math.Max(0, after.HQ - before.HQ);
+            var verifiedTotal = Math.Min(purchaseCap, checked(deltaNQ + deltaHQ));
+            if (verifiedTotal <= 0)
+                continue;
+
+            // Inventory deltas are authoritative for quality. HQ can satisfy
+            // ordinary quantity demand; NQ is never relabeled as HQ.
+            var verifiedHQ = Math.Min(deltaHQ, verifiedTotal);
+            var verifiedNQ = Math.Min(deltaNQ, verifiedTotal - verifiedHQ);
+            if (verifiedNQ > 0 || verifiedHQ > 0)
+            {
+                verified[itemId] = new AcquiredDependencyAvailability(verifiedNQ, verifiedHQ);
+            }
+        }
+
+        return verified;
+    }
+
+    private void CancelAcquisition()
+    {
+        AcquisitionRunSnapshot run;
+        TaskCompletionSource<bool>? completion;
+        lock (_acquisitionSync)
+        {
+            run = new AcquisitionRunSnapshot(
+                _acquisitionGeneration,
+                _acquisitionExecutor,
+                _acquisitionCancellation,
+                _acquisitionTask);
+            if (run.Executor == null && run.Cancellation == null && run.Task == null)
+                return;
+        }
+
+        if (!_acquisitionRuns.TryBeginDrain(run.Generation, out completion)
+            || completion == null)
+            return;
+
+        try
+        {
+            run.Cancellation?.Cancel();
+        }
+        catch (Exception ex)
+        {
+            GatherBuddy.Log.Warning($"[CraftingQueueProcessor] Automatic acquisition cancellation callback failed: {ex.Message}");
+        }
+
+        Task drain;
+        try
+        {
+            drain = run.Executor?.StopAsync() ?? run.Task ?? Task.CompletedTask;
+        }
+        catch (Exception ex)
+        {
+            GatherBuddy.Log.Warning($"[CraftingQueueProcessor] Automatic acquisition stop failed: {ex.Message}");
+            drain = Task.CompletedTask;
+        }
+
+        _ = FinishAcquisitionDrainAsync(run, drain, completion);
+    }
+
+    private bool WaitForAcquisitionDrain()
+    {
+        if (_acquisitionRuns.IsReadyToBegin())
+            return true;
+
+        var stateChanged = _currentState != QueueState.WaitingForAcquisitionData;
+        _currentState = QueueState.WaitingForAcquisitionData;
+        _pauseReason = "Waiting for the previous automatic acquisition cleanup to finish.";
+        if (stateChanged)
+            StateChanged?.Invoke(_currentState);
+        return false;
+    }
+
+    private async Task FinishAcquisitionDrainAsync(
+        AcquisitionRunSnapshot run,
+        Task drain,
+        TaskCompletionSource<bool> completion)
+    {
+        try
+        {
+            await drain.ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            GatherBuddy.Log.Warning($"[CraftingQueueProcessor] Automatic acquisition cleanup failed: {ex.Message}");
+        }
+        finally
+        {
+            ReleaseAcquisition(run, completion.Task);
+            _acquisitionRuns.TryCompleteDrain(run.Generation, completion);
+        }
+    }
+
+    private void ReleaseAcquisition()
+    {
+        AcquisitionRunSnapshot run;
+        lock (_acquisitionSync)
+        {
+            run = new AcquisitionRunSnapshot(
+                _acquisitionGeneration,
+                _acquisitionExecutor,
+                _acquisitionCancellation,
+                _acquisitionTask);
+        }
+        ReleaseAcquisition(run, null);
+    }
+
+    private void ReleaseAcquisition(AcquisitionRunSnapshot run, Task? expectedDrain)
+    {
+        var releaseExecutor = false;
+        var releaseCancellation = false;
+        lock (_acquisitionSync)
+        {
+            var isCurrent = _acquisitionRuns.IsCurrent(run.Generation)
+                && run.Generation == _acquisitionGeneration
+                && ReferenceEquals(run.Executor, _acquisitionExecutor)
+                && ReferenceEquals(run.Cancellation, _acquisitionCancellation)
+                && ReferenceEquals(run.Task, _acquisitionTask);
+            if (expectedDrain == null && _acquisitionRuns.IsDrainPending())
+                isCurrent = false;
+
+            releaseExecutor = run.Executor != null
+                && (isCurrent || !ReferenceEquals(run.Executor, _acquisitionExecutor));
+            releaseCancellation = run.Cancellation != null
+                && (isCurrent || !ReferenceEquals(run.Cancellation, _acquisitionCancellation));
+            if (isCurrent)
+            {
+                _acquisitionExecutor = null;
+                _acquisitionCancellation = null;
+                _acquisitionTask = null;
+                _acquisitionInventoryBefore.Clear();
+                _acquisitionPlannedQuantities.Clear();
+                _acquisitionRuns.TryReleaseActive(run.Generation);
+            }
+        }
+
+        if (releaseCancellation)
+            run.Cancellation!.Dispose();
+        if (releaseExecutor)
+            GatherBuddy.ReleaseLiveAcquisitionExecutor(run.Executor);
     }
 
     public void Update()
@@ -178,6 +696,16 @@ public class CraftingQueueProcessor : IDisposable
             case QueueState.WithdrawingFromRetainer:
                 break;
             case QueueState.WaitingForGather:
+                break;
+            case QueueState.WaitingForAcquisitionData:
+                BeginAcquisitionOrGather();
+                break;
+            case QueueState.PurchasingDependencies:
+                UpdateAcquisition();
+                break;
+            case QueueState.ReturningToHomeWorld:
+            case QueueState.ReturningToInn:
+                UpdatePostGatherNavigation();
                 break;
             case QueueState.WaitingForJobSwitch:
                 UpdateJobSwitch();
@@ -228,7 +756,7 @@ public class CraftingQueueProcessor : IDisposable
                 }
                 break;
             case QueueState.Complete:
-                
+            case QueueState.Failed:
                 break;
         }
     }
@@ -892,7 +1420,7 @@ public class CraftingQueueProcessor : IDisposable
     {
         GatherBuddy.Log.Information($"[CraftingQueueProcessor] Queue complete!");
         YesAlready.Unlock();
-        GatherBuddy.AutoGather.Enabled = false;
+        DisableAutoGatherSafely();
         
         var craftState = CraftingGameInterop.CurrentState;
         bool needExitCraft = craftState == CraftingGameInterop.CraftState.IdleBetween ||
@@ -1028,101 +1556,26 @@ public class CraftingQueueProcessor : IDisposable
         }
 
         var canSelfRepair = RepairManager.CanRepairAny();
-        var hasRepairNPC = RepairManager.RepairNPCNearby(out var npc);
         var prioritizeNPC = GatherBuddy.Config.VulcanRepairConfig.PrioritizeNPCRepair;
         var preferredNPC = GatherBuddy.Config.VulcanRepairConfig.PreferredRepairNPC;
-
-        if (prioritizeNPC && preferredNPC != null)
+        var repairPrice = RepairManager.GetNPCRepairPrice();
+        var gilCount = InventoryManager.Instance()->GetInventoryItemCount(1);
+        var npcRoute = RepairNPCHelper.FindBestRepairRoute(prioritizeNPC ? preferredNPC : null);
+        if (npcRoute.HasValue
+            && (ulong)gilCount < (ulong)repairPrice + npcRoute.Value.TeleportCost
+            && prioritizeNPC
+            && preferredNPC != null)
         {
-            if (hasRepairNPC && npc != null && npc.BaseId == preferredNPC.DataId)
-            {
-                var repairPrice = RepairManager.GetNPCRepairPrice();
-                var gilCount = InventoryManager.Instance()->GetInventoryItemCount(1);
-
-            if (gilCount >= repairPrice)
-            {
-                GatherBuddy.Log.Information($"[CraftingQueueProcessor] Using nearby preferred NPC repair (cost: {repairPrice} gil)");
-                _tasks.Add(() => CraftingTasks.TaskInteractWithRepairNPC());
-                _tasks.Add(() => CraftingTasks.TaskSelectRepairFromMenu());
-                _tasks.Add(() => CraftingTasks.TaskExecuteRepair());
-                _tasks.Add(() => CraftingTasks.TaskCloseRepairWindow());
-                _tasks.Add(() => { TransitionFromRepairComplete(); return CraftingTasks.TaskResult.Done; });
-                return;
-            }
-                else
-                {
-                    GatherBuddy.Log.Warning($"[CraftingQueueProcessor] Not enough gil for NPC repair ({gilCount}/{repairPrice})");
-                }
-            }
+            npcRoute = RepairNPCHelper.FindBestRepairRoute();
         }
 
-        if (prioritizeNPC && preferredNPC != null)
+        var canAffordNPC = npcRoute.HasValue
+            && (ulong)gilCount >= (ulong)repairPrice + npcRoute.Value.TeleportCost;
+
+        if (prioritizeNPC && canAffordNPC)
         {
-            var repairPrice = RepairManager.GetNPCRepairPrice();
-            var gilCount = InventoryManager.Instance()->GetInventoryItemCount(1);
-
-            if (gilCount >= repairPrice)
-            {
-                GatherBuddy.Log.Information($"[CraftingQueueProcessor] Navigating to preferred repair NPC: {preferredNPC.Name}");
-                _tasks.Add(() => CraftingTasks.TaskNavigateToRepairNPC(preferredNPC));
-                _tasks.Add(() => CraftingTasks.TaskInteractWithRepairNPC());
-                _tasks.Add(() => CraftingTasks.TaskSelectRepairFromMenu());
-                _tasks.Add(() => CraftingTasks.TaskExecuteRepair());
-                _tasks.Add(() => CraftingTasks.TaskCloseRepairWindow());
-                _tasks.Add(() => { TransitionFromRepairComplete(); return CraftingTasks.TaskResult.Done; });
-                return;
-            }
-            else
-            {
-                GatherBuddy.Log.Warning($"[CraftingQueueProcessor] Not enough gil for NPC repair ({gilCount}/{repairPrice})");
-            }
-        }
-        
-        if (prioritizeNPC && preferredNPC == null && hasRepairNPC && npc != null)
-        {
-            var repairPrice = RepairManager.GetNPCRepairPrice();
-            var gilCount = InventoryManager.Instance()->GetInventoryItemCount(1);
-
-            if (gilCount >= repairPrice)
-            {
-                GatherBuddy.Log.Information($"[CraftingQueueProcessor] Using nearby repair NPC (no preferred set, cost: {repairPrice} gil)");
-                _tasks.Add(() => CraftingTasks.TaskInteractWithRepairNPC());
-                _tasks.Add(() => CraftingTasks.TaskSelectRepairFromMenu());
-                _tasks.Add(() => CraftingTasks.TaskExecuteRepair());
-                _tasks.Add(() => CraftingTasks.TaskCloseRepairWindow());
-                _tasks.Add(() => { TransitionFromRepairComplete(); return CraftingTasks.TaskResult.Done; });
-                return;
-            }
-            else
-            {
-                GatherBuddy.Log.Warning($"[CraftingQueueProcessor] Not enough gil for NPC repair ({gilCount}/{repairPrice})");
-            }
-        }
-
-        if (prioritizeNPC && preferredNPC == null && !hasRepairNPC)
-        {
-            var currentZoneNPC = FindNearestRepairNPCInCurrentZone();
-            if (currentZoneNPC != null)
-            {
-                var repairPrice = RepairManager.GetNPCRepairPrice();
-                var gilCount = InventoryManager.Instance()->GetInventoryItemCount(1);
-
-            if (gilCount >= repairPrice)
-            {
-                GatherBuddy.Log.Information($"[CraftingQueueProcessor] Navigating to nearest repair NPC in current zone: {currentZoneNPC.Name}");
-                _tasks.Add(() => CraftingTasks.TaskNavigateToRepairNPC(currentZoneNPC));
-                _tasks.Add(() => CraftingTasks.TaskInteractWithRepairNPC());
-                _tasks.Add(() => CraftingTasks.TaskSelectRepairFromMenu());
-                _tasks.Add(() => CraftingTasks.TaskExecuteRepair());
-                _tasks.Add(() => CraftingTasks.TaskCloseRepairWindow());
-                _tasks.Add(() => { TransitionFromRepairComplete(); return CraftingTasks.TaskResult.Done; });
-                return;
-            }
-                else
-                {
-                    GatherBuddy.Log.Warning($"[CraftingQueueProcessor] Not enough gil for NPC repair ({gilCount}/{repairPrice})");
-                }
-            }
+            QueueNPCRepairTasks(npcRoute.Value, repairPrice);
+            return;
         }
 
         if (canSelfRepair)
@@ -1136,8 +1589,30 @@ public class CraftingQueueProcessor : IDisposable
             return;
         }
 
-        GatherBuddy.Log.Error("[CraftingQueueProcessor] Cannot repair: no dark matter and no repair NPC available");
+        if (!prioritizeNPC && canAffordNPC)
+        {
+            QueueNPCRepairTasks(npcRoute.Value, repairPrice);
+            return;
+        }
+
+        var reason = !npcRoute.HasValue
+            ? "no reachable repair NPC is available"
+            : $"NPC repair and travel cost {(ulong)repairPrice + npcRoute.Value.TeleportCost} gil, but only {gilCount} gil is available";
+        GatherBuddy.Log.Error($"[CraftingQueueProcessor] Cannot repair: self-repair unavailable and {reason}");
         _tasks.Add(() => { CompleteQueue(); return CraftingTasks.TaskResult.Abort; });
+    }
+
+    private void QueueNPCRepairTasks(RepairNPCHelper.RepairNPCRoute route, int repairPrice)
+    {
+        GatherBuddy.Log.Information(
+            $"[CraftingQueueProcessor] Using NPC repair at {route.NPC.Name} " +
+            $"(repair: {repairPrice} gil, teleport: {route.TeleportCost} gil)");
+        _tasks.Add(() => CraftingTasks.TaskNavigateToRepairNPC(route.NPC, route.AetheryteId));
+        _tasks.Add(() => CraftingTasks.TaskInteractWithRepairNPC());
+        _tasks.Add(() => CraftingTasks.TaskSelectRepairFromMenu());
+        _tasks.Add(() => CraftingTasks.TaskExecuteRepair());
+        _tasks.Add(() => CraftingTasks.TaskCloseRepairWindow());
+        _tasks.Add(() => { TransitionFromRepairComplete(); return CraftingTasks.TaskResult.Done; });
     }
 
     private void QueueRetainerBellNavigationTasks()
@@ -1271,25 +1746,18 @@ public class CraftingQueueProcessor : IDisposable
     private unsafe void TransitionFromRetainerWithdrawComplete()
     {
         RebuildQueueAndMaterialsFromCurrentInventory();
+        _retainerWithdrawalCompleted = true;
         GatherBuddy.Log.Debug("[CraftingQueueProcessor] Computing remaining materials after retainer withdrawal");
 
-        int stillGatherCount = 0;
-        var inventoryMgr = FFXIVClientStructs.FFXIV.Client.Game.InventoryManager.Instance();
-        foreach (var (itemId, totalNeeded) in MaterialTargets)
-        {
-            int inBag = 0;
-            if (inventoryMgr != null)
-                inBag = (int)(inventoryMgr->GetInventoryItemCount(itemId, false, false, false)
-                            + inventoryMgr->GetInventoryItemCount(itemId, true,  false, false));
-            if (inBag < totalNeeded)
-                stillGatherCount++;
-        }
+        var stillGatherCount = BuildCurrentMaterialDeficits().Count;
 
         GatherBuddy.Log.Information($"[CraftingQueueProcessor] After retainer withdrawal: {stillGatherCount} item(s) still need gathering");
 
-        _currentState = QueueState.WaitingForGather;
-        StateChanged?.Invoke(_currentState);
-        CraftingGatherBridge.CreateGatherListForMissingIngredients(MaterialTargets);
+        // Retainer withdrawal changes both the material deficits and the
+        // selected craft queue. Re-run the exact same acquisition gate before
+        // starting gathering; otherwise a dependency that became purchasable
+        // after withdrawal would be gathered or left unresolved.
+        BeginAcquisitionOrGather();
     }
     private void RebuildQueueAndMaterialsFromCurrentInventory()
     {
@@ -1383,32 +1851,6 @@ public class CraftingQueueProcessor : IDisposable
         }
     }
     
-    private RepairNPCData? FindNearestRepairNPCInCurrentZone()
-    {
-        var currentTerritory = Dalamud.ClientState.TerritoryType;
-        var playerPos = Dalamud.Objects.LocalPlayer?.Position;
-        
-        if (playerPos == null)
-            return null;
-        
-        var npcsInZone = RepairNPCHelper.RepairNPCs
-            .Where(npc => npc.TerritoryType == currentTerritory)
-            .ToList();
-        
-        if (npcsInZone.Count == 0)
-        {
-            GatherBuddy.Log.Warning($"[CraftingQueueProcessor] No repair NPCs found in current zone ({currentTerritory})");
-            return null;
-        }
-        
-        var nearest = npcsInZone
-            .OrderBy(npc => System.Numerics.Vector3.Distance(playerPos.Value, npc.Position))
-            .First();
-        
-        GatherBuddy.Log.Debug($"[CraftingQueueProcessor] Found nearest repair NPC in zone: {nearest.Name}");
-        return nearest;
-    }
-
     public void Pause(string? reason = null)
     {
         if (_paused || _currentState == QueueState.Complete || _currentState == QueueState.Idle)
@@ -1434,8 +1876,26 @@ public class CraftingQueueProcessor : IDisposable
                 GatherBuddy.Log.Debug("[CraftingQueueProcessor] Pausing auto-gather but keeping list");
                 _pausedDuringGather = true;
                 CraftingGatherBridge.PreserveListOnDisable = true;
-                GatherBuddy.AutoGather.Enabled = false;
+                try
+                {
+                    if (GatherBuddy.AutoGather != null)
+                        GatherBuddy.AutoGather.Enabled = false;
+                }
+                catch (Exception ex)
+                {
+                    GatherBuddy.Log.Warning($"[CraftingQueueProcessor] Failed to pause AutoGather: {ex.Message}");
+                }
                 CraftingGatherBridge.PreserveListOnDisable = false;
+            }
+            // Pausing hands standalone AutoGather policy back to the user;
+            // resume reclaims ownership only when the temporary list exists.
+            try
+            {
+                GatherBuddy.AutoGather?.SetCraftOwnedGathering(false);
+            }
+            catch (Exception ex)
+            {
+                GatherBuddy.Log.Warning($"[CraftingQueueProcessor] Failed to release AutoGather ownership while pausing: {ex.Message}");
             }
         }
     }
@@ -1444,6 +1904,14 @@ public class CraftingQueueProcessor : IDisposable
     {
         if (!_paused)
             return;
+
+        if (_currentState == QueueState.Crafting
+            && CraftingGameInterop.CurrentState is CraftingGameInterop.CraftState.InProgress or CraftingGameInterop.CraftState.WaitAction
+            && !CraftingGameInterop.TryResumeLiveCraft())
+        {
+            GatherBuddy.Log.Warning("[CraftingQueueProcessor] Could not resume the active craft from a stable live state; queue remains paused");
+            return;
+        }
 
         GatherBuddy.Log.Information("[CraftingQueueProcessor] Resuming queue");
         _paused = false;
@@ -1473,7 +1941,19 @@ public class CraftingQueueProcessor : IDisposable
             if (gatherList != null && gatherList.Items.Count > 0)
             {
                 GatherBuddy.Log.Debug("[CraftingQueueProcessor] Resuming auto-gather with existing list");
-                GatherBuddy.AutoGather.Enabled = true;
+                try
+                {
+                    if (GatherBuddy.AutoGather != null)
+                    {
+                        GatherBuddy.AutoGather.SetCraftOwnedGathering(true);
+                        GatherBuddy.AutoGather.Enabled = true;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    FailQueue($"Cannot resume crafting gather stage: {ex.Message}");
+                    return;
+                }
                 _pausedDuringGather = false;
             }
             else
@@ -1496,12 +1976,13 @@ public class CraftingQueueProcessor : IDisposable
         GatherBuddy.Log.Information("[CraftingQueueProcessor] Stopping queue");
         _paused = false;
         _pauseReason = string.Empty;
+        CancelAcquisition();
         _tasks.Clear();
         _retainerBellNavigator?.Stop();
         _retainerBellNavigator = null;
         YesAlready.Unlock();
         
-        GatherBuddy.AutoGather.Enabled = false;
+        DisableAutoGatherSafely();
         CraftingGatherBridge.DeleteTemporaryGatherList();
         
         CompleteQueue();
@@ -1528,6 +2009,8 @@ public class CraftingQueueProcessor : IDisposable
     public void Reset()
     {
         YesAlready.Unlock();
+        CancelAcquisition();
+        DisableAutoGatherSafely();
         _executionPlan = null;
         _currentQueueIndex = 0;
         _currentState = QueueState.Idle;
@@ -1542,6 +2025,8 @@ public class CraftingQueueProcessor : IDisposable
         _jobSwitchRequestedFor = 0u;
         _jobSwitchRequestedAt = DateTime.MinValue;
         _retainerRestock = false;
+        _retainerWithdrawalCompleted = false;
+        _acquisitionCompleted = false;
         _retainerExecutor = null;
         _retainerBellNavigator?.Stop();
         _retainerBellNavigator = null;

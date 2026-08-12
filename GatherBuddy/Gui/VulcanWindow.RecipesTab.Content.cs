@@ -311,6 +311,116 @@ public partial class VulcanWindow
         Communicator.Print($"Added {addedCount} filtered uncrafted recipe(s) to '{list.Name}'.");
     }
 
+    private void DrawAddRecipeToListContents(ExtendedRecipe recipe, bool applyBrowserOptions, bool closeAfterAdd)
+    {
+        var lists = GatherBuddy.CraftingListManager.Lists;
+
+        ImGui.TextColored(new Vector4(0.7f, 1.0f, 0.7f, 1.0f), "Create New List:");
+        ImGui.SetNextItemWidth(-1);
+        var createEnter = ImGui.InputTextWithHint("##NewListName", "List name...", ref _contextMenuNewListName, 128, ImGuiInputTextFlags.EnterReturnsTrue);
+        ImGui.Checkbox("Ephemeral##ctxNewListEphemeral", ref _contextMenuNewListEphemeral);
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("Delete this list automatically after crafting completes.\nCan be disabled later in the list editor.");
+        if ((ImGui.Button("Create & Add", new Vector2(-1, 0)) || createEnter) && !string.IsNullOrWhiteSpace(_contextMenuNewListName))
+        {
+            var newList = GatherBuddy.CraftingListManager.CreateNewList(_contextMenuNewListName.Trim(), _contextMenuNewListEphemeral);
+            AddRecipeToCraftList(newList, recipe, applyBrowserOptions);
+            GatherBuddy.Log.Information($"[VulcanWindow] Created list '{newList.Name}' and added {recipe.Name} x{_contextMenuAddQuantity}");
+            Communicator.Print($"Created '{newList.Name}' and added {recipe.Name} x{_contextMenuAddQuantity}.");
+            ImGui.CloseCurrentPopup();
+            return;
+        }
+
+        if (lists.Count == 0)
+        {
+            ImGui.TextDisabled("No crafting lists available");
+            return;
+        }
+
+        ImGui.Spacing();
+        ImGui.Separator();
+        var filteredLists = string.IsNullOrWhiteSpace(_contextMenuListSearch)
+            ? lists
+            : lists.Where(list => list.Name.Contains(_contextMenuListSearch, StringComparison.OrdinalIgnoreCase)).ToList();
+
+        ImGui.TextColored(new Vector4(1.0f, 0.9f, 0.6f, 1.0f), $"Add {recipe.Name} to list:");
+        ImGui.AlignTextToFramePadding();
+        ImGui.Text("Qty:");
+        ImGui.SameLine();
+        ImGui.SetNextItemWidth(VulcanUiScaling.Scaled(100f));
+        ImGui.InputInt("##ContextQty", ref _contextMenuAddQuantity, 1);
+        if (_contextMenuAddQuantity < 1)
+            _contextMenuAddQuantity = 1;
+        ImGui.SetNextItemWidth(-1);
+        ImGui.InputTextWithHint("##ContextListSearch", "Search lists...", ref _contextMenuListSearch, 128);
+
+        var rowHeight = ImGui.GetTextLineHeightWithSpacing();
+        var childPaddingY = ImGui.GetStyle().WindowPadding.Y * 2f;
+        var contentHeight = filteredLists.Count > 0 ? filteredLists.Count * rowHeight : rowHeight;
+        var childHeight = Math.Min(contentHeight + childPaddingY, VulcanUiScaling.Scaled(150f) + childPaddingY);
+        ImGui.BeginChild("##SingleAddScroll", new Vector2(0, childHeight), true);
+        if (filteredLists.Count == 0)
+            ImGui.TextDisabled("No matches");
+        foreach (var list in filteredLists)
+        {
+            if (!ImGui.MenuItem(list.Name))
+                continue;
+
+            AddRecipeToCraftList(list, recipe, applyBrowserOptions);
+            GatherBuddy.Log.Information($"Added {recipe.Name} x{_contextMenuAddQuantity} to crafting list '{list.Name}'");
+            Communicator.Print($"Added {recipe.Name} x{_contextMenuAddQuantity} to '{list.Name}'.");
+            _contextMenuLastAddedList = list.Name;
+            _contextMenuLastAddedAt = DateTime.Now;
+            if (closeAfterAdd)
+                ImGui.CloseCurrentPopup();
+        }
+        ImGui.EndChild();
+
+        if (_contextMenuLastAddedList == null || closeAfterAdd)
+            return;
+        var elapsed = (DateTime.Now - _contextMenuLastAddedAt).TotalSeconds;
+        if (elapsed < 1.5)
+        {
+            var alpha = (float)(1.0 - elapsed / 1.5);
+            ImGui.TextColored(new Vector4(0.4f, 1f, 0.4f, alpha), $"Added to '{_contextMenuLastAddedList}'!");
+        }
+        else
+        {
+            _contextMenuLastAddedList = null;
+        }
+    }
+
+    private void AddRecipeToCraftList(CraftingListDefinition list, ExtendedRecipe recipe, bool applyBrowserOptions)
+    {
+        list.AddRecipe(recipe.Recipe.RowId, _contextMenuAddQuantity);
+        var item = list.Recipes.First(entry => entry.RecipeId == recipe.Recipe.RowId);
+
+        if (applyBrowserOptions)
+        {
+            if (_browserRetainerRestock)
+                list.RetainerRestock = true;
+            if (_browserSkipFinalIfEnough)
+            {
+                list.SkipIfEnough = true;
+                list.SkipFinalIfEnough = true;
+            }
+            if (_browserQuickSynthAll)
+            {
+                list.QuickSynthAll = true;
+                list.QuickSynthAllPreferNQ = _browserQuickSynthAllPreferNQ;
+                list.QuickSynthAllPrecraftsOnly = _browserQuickSynthAllPrecraftsOnly;
+            }
+
+            var browserSettings = GatherBuddy.RecipeBrowserSettings.Get(recipe.Recipe.RowId);
+            if (browserSettings?.HasAnySettings() == true)
+                item.CraftSettings = browserSettings.Clone();
+        }
+
+        GatherBuddy.CraftingListManager.SaveList(list);
+        RaphaelAssessmentService.QueueWarmupForAddedListRecipe(recipe.Recipe.RowId, list);
+        RefreshOpenCraftingList(list.ID);
+    }
+
     private void DrawResultsList()
     {
         if (_filteredRecipes == null || _filteredRecipes.Count == 0)
@@ -464,8 +574,6 @@ public partial class VulcanWindow
                 
                 ImGui.Separator();
 
-                var lists = GatherBuddy.CraftingListManager.Lists;
-
                 if (ImGui.IsWindowAppearing())
                 {
                     _contextMenuListSearch      = string.Empty;
@@ -473,86 +581,7 @@ public partial class VulcanWindow
                     _contextMenuNewListName     = string.Empty;
                     _contextMenuNewListEphemeral = false;
                 }
-
-                ImGui.TextColored(new Vector4(0.7f, 1.0f, 0.7f, 1.0f), "Create New List:");
-                ImGui.SetNextItemWidth(-1);
-                var createEnter = ImGui.InputTextWithHint("##NewListName", "List name...", ref _contextMenuNewListName, 128, ImGuiInputTextFlags.EnterReturnsTrue);
-                ImGui.Checkbox("Ephemeral##ctxNewListEphemeral", ref _contextMenuNewListEphemeral);
-                if (ImGui.IsItemHovered())
-                    ImGui.SetTooltip("Delete this list automatically after crafting completes.\nCan be disabled later in the list editor.");
-                if ((ImGui.Button("Create & Add", new Vector2(-1, 0)) || createEnter) && !string.IsNullOrWhiteSpace(_contextMenuNewListName))
-                {
-                    var newList = GatherBuddy.CraftingListManager.CreateNewList(_contextMenuNewListName.Trim(), _contextMenuNewListEphemeral);
-                    newList.Recipes.Add(new CraftingListItem(recipe.Recipe.RowId, _contextMenuAddQuantity));
-                    GatherBuddy.CraftingListManager.SaveList(newList);
-                    RaphaelAssessmentService.QueueWarmupForAddedListRecipe(recipe.Recipe.RowId, newList);
-                    RefreshOpenCraftingList(newList.ID);
-                    GatherBuddy.Log.Information($"[VulcanWindow] Created list '{newList.Name}' and added {recipe.Name} x{_contextMenuAddQuantity}");
-                    Communicator.Print($"Created '{newList.Name}' and added {recipe.Name} x{_contextMenuAddQuantity}.");
-                    ImGui.CloseCurrentPopup();
-                }
-
-                if (lists.Count > 0)
-                {
-                    ImGui.Spacing();
-                    ImGui.Separator();
-
-                    var filteredLists = string.IsNullOrWhiteSpace(_contextMenuListSearch)
-                        ? lists
-                        : lists.Where(l => l.Name.Contains(_contextMenuListSearch, StringComparison.OrdinalIgnoreCase)).ToList();
-
-                    var rowH = ImGui.GetTextLineHeightWithSpacing();
-
-                    ImGui.TextColored(new Vector4(1.0f, 0.9f, 0.6f, 1.0f), $"Add {recipe.Name} to list:");
-                    ImGui.AlignTextToFramePadding();
-                    ImGui.Text("Qty:");
-                    ImGui.SameLine();
-                    ImGui.SetNextItemWidth(VulcanUiScaling.Scaled(100f));
-                    ImGui.InputInt("##ContextQty", ref _contextMenuAddQuantity, 1);
-                    if (_contextMenuAddQuantity < 1) _contextMenuAddQuantity = 1;
-                    ImGui.SetNextItemWidth(-1);
-                    ImGui.InputTextWithHint("##ContextListSearch", "Search lists...", ref _contextMenuListSearch, 128);
-                    var childPaddingY = ImGui.GetStyle().WindowPadding.Y * 2f;
-                    var singleContentH = filteredLists.Count > 0 ? filteredLists.Count * rowH : rowH;
-                    var singleH = Math.Min(singleContentH + childPaddingY, VulcanUiScaling.Scaled(150f) + childPaddingY);
-                    ImGui.BeginChild("##SingleAddScroll", new Vector2(0, singleH), true);
-                    if (filteredLists.Count == 0)
-                        ImGui.TextDisabled("No matches");
-                    foreach (var list in filteredLists)
-                    {
-                        if (ImGui.MenuItem(list.Name))
-                        {
-                            list.Recipes.Add(new CraftingListItem(recipe.Recipe.RowId, _contextMenuAddQuantity));
-                            GatherBuddy.CraftingListManager.SaveList(list);
-                            RaphaelAssessmentService.QueueWarmupForAddedListRecipe(recipe.Recipe.RowId, list);
-                            RefreshOpenCraftingList(list.ID);
-                            GatherBuddy.Log.Information($"Added {recipe.Name} x{_contextMenuAddQuantity} to crafting list '{list.Name}'");
-                            Communicator.Print($"Added {recipe.Name} x{_contextMenuAddQuantity} to '{list.Name}'.");
-                            _contextMenuLastAddedList = list.Name;
-                            _contextMenuLastAddedAt   = DateTime.Now;
-                        }
-                    }
-                    ImGui.EndChild();
-
-                    if (_contextMenuLastAddedList != null)
-                    {
-                        var elapsed = (DateTime.Now - _contextMenuLastAddedAt).TotalSeconds;
-                        if (elapsed < 1.5)
-                        {
-                            var alpha = (float)(1.0 - elapsed / 1.5);
-                            ImGui.TextColored(new Vector4(0.4f, 1f, 0.4f, alpha), $"Added to '{_contextMenuLastAddedList}'!");
-                        }
-                        else
-                        {
-                            _contextMenuLastAddedList = null;
-                        }
-                    }
-
-                }
-                else
-                {
-                    ImGui.TextDisabled("No crafting lists available");
-                }
+                DrawAddRecipeToListContents(recipe, false, false);
 
                 ImGui.EndPopup();
             }
@@ -819,7 +848,32 @@ public partial class VulcanWindow
         }
 
         var avail = ImGui.GetContentRegionAvail();
-        ImGui.SetCursorPosY(ImGui.GetCursorPosY() + Math.Max(0f, avail.Y - VulcanUiScaling.Scaled(96f)));
+        var optionRows = _browserQuickSynthAll ? 4f : 2f;
+        var browserFooterHeight = VulcanUiScaling.Scaled(96f) + (optionRows + 1f) * ImGui.GetFrameHeightWithSpacing();
+        ImGui.SetCursorPosY(ImGui.GetCursorPosY() + Math.Max(0f, avail.Y - browserFooterHeight));
+
+        ImGui.SetCursorPosX(ImGui.GetCursorPosX() + detailInset);
+        ImGui.Checkbox("Skip if Already Have Enough##browserSkipFinal", ref _browserSkipFinalIfEnough);
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("Reduce the requested final-craft quantity by the number already in your inventory. Generated precrafts already reuse available items.");
+
+        ImGui.SetCursorPosX(ImGui.GetCursorPosX() + detailInset);
+        ImGui.Checkbox("Quick Synth All##browserQuickSynthAll", ref _browserQuickSynthAll);
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("Force Quick Synthesis on every eligible generated precraft and the final craft.");
+
+        if (_browserQuickSynthAll)
+        {
+            ImGui.SetCursorPosX(ImGui.GetCursorPosX() + detailInset + VulcanUiScaling.Scaled(20f));
+            ImGui.Checkbox("Prefer NQ##browserQuickSynthPreferNQ", ref _browserQuickSynthAllPreferNQ);
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip("Use only NQ ingredients where the Quick Synth All override applies.");
+
+            ImGui.SetCursorPosX(ImGui.GetCursorPosX() + detailInset + VulcanUiScaling.Scaled(20f));
+            ImGui.Checkbox("Precrafts Only##browserQuickSynthPrecraftsOnly", ref _browserQuickSynthAllPrecraftsOnly);
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip("Apply Quick Synth All and Prefer NQ only to generated precrafts; craft the selected final recipe normally.");
+        }
 
         ImGui.SetCursorPosX(ImGui.GetCursorPosX() + detailInset);
         ImGui.TextColored(new Vector4(0.6f, 0.6f, 0.6f, 1), "Qty:");
@@ -855,6 +909,24 @@ public partial class VulcanWindow
         ImGui.SameLine();
         if (ImGui.Button("Settings", new Vector2(topRowButtonWidth, footerButtonHeight)))
             _craftSettingsPopup.Open(recipe.Recipe.RowId, recipe.Name);
+
+        ImGui.SetCursorPosX(ImGui.GetCursorPosX() + detailInset);
+        if (ImGui.Button("Add to Craft List", new Vector2(-1, footerButtonHeight)))
+        {
+            _contextMenuListSearch = string.Empty;
+            _contextMenuAddQuantity = _browserCraftQuantity;
+            _contextMenuNewListName = string.Empty;
+            _contextMenuNewListEphemeral = false;
+            ImGui.OpenPopup("Add Recipe to Craft List##browser");
+        }
+        if (ImGui.BeginPopupModal("Add Recipe to Craft List##browser", ImGuiWindowFlags.AlwaysAutoResize))
+        {
+            DrawAddRecipeToListContents(recipe, true, true);
+            if (ImGui.Button("Cancel", new Vector2(-1, 0)))
+                ImGui.CloseCurrentPopup();
+            ImGui.EndPopup();
+        }
+
         ImGui.SetCursorPosX(ImGui.GetCursorPosX() + detailInset);
         var canQuickSynth = recipe.Recipe.CanQuickSynth;
         var qsTooltip = artisanLoaded

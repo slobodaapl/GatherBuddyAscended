@@ -280,14 +280,7 @@ public static class RaphaelAssessmentService
 
     private static Recipe? ResolveSubRecipe(uint itemId, CraftingListDefinition list)
     {
-        if (list.PrecraftRecipeOverrides.TryGetValue(itemId, out var overrideRecipeId))
-        {
-            var overrideRecipe = RecipeManager.GetRecipe(overrideRecipeId);
-            if (overrideRecipe.HasValue)
-                return overrideRecipe;
-        }
-
-        return RecipeManager.GetRecipeForItem(itemId);
+        return list.ResolveRecipeForItem(itemId);
     }
     
     private static bool TryQueueWarmupForListContext(

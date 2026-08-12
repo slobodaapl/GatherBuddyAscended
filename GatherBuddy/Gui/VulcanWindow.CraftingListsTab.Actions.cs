@@ -111,13 +111,15 @@ public partial class VulcanWindow
         var ingredients = RecipeManager.GetIngredients(recipe.Value);
         foreach (var (itemId, _) in ingredients)
         {
-            var depRecipe = RecipeManager.GetRecipeForItem(itemId);
-            if (depRecipe.HasValue)
+            var depItem = allRecipes.FirstOrDefault(candidate =>
             {
-                var depItem = allRecipes.FirstOrDefault(r => r.RecipeId == depRecipe.Value.RowId && !r.IsOriginalRecipe);
-                if (depItem != null)
-                    ProcessRecipeWithDependencies(depItem, allRecipes, processed, result);
-            }
+                if (candidate.IsOriginalRecipe)
+                    return false;
+                var candidateRecipe = RecipeManager.GetRecipe(candidate.RecipeId);
+                return candidateRecipe.HasValue && candidateRecipe.Value.ItemResult.RowId == itemId;
+            });
+            if (depItem != null)
+                ProcessRecipeWithDependencies(depItem, allRecipes, processed, result);
         }
 
         processed.Add(recipeItem.RecipeId);

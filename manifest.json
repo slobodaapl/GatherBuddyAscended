@@ -24,5 +24,6 @@
   "IsTestingExclusive": false,
   "IconUrl": "https://raw.githubusercontent.com/slobodaapl/GatherBuddyAscended/main/images/gba.png",
   "Punchline": "Simplify Gathering and Fishing to the extreme.",
+  "Changelog": "GatherBuddy Ascended 2.0\n\n• Added automatic craft-list material acquisition from unlocked vendors and marketboards.\n• Added purchase estimates, maximum Gil budgets, HQ/NQ/vendor/current-world preferences, multi-world routing, and fail-closed currency/unlock checks.\n• Added Marketplace search, persistent buy lists, Universalis price caching, current-world filtering, and typo-tolerant item search.\n• Donatello now replans faster and recovers more reliably when craft conditions change.\n• Added cordial strength ordering, HQ/NQ preference, and an option to avoid wasting GP recovery above the cap.\n• Improved auto-crafting and auto-gathering flow, including retainer restocking, material deficits, class selection, repair, navigation, and queue recovery.\n• Added earlier errors for missing crafting jobs, gearsets, recipe unlocks, gathering unlocks, unavailable vendors, currencies, and travel requirements.\n• Fixed multiple crafting-list, specialist-action, quality-selection, search, navigation, and cleanup bugs.",
   "AcceptsFeedback": true
 }

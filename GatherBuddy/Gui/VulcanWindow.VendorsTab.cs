@@ -20,11 +20,10 @@ public partial class VulcanWindow
     private sealed record VendorDisplayRow(
         VendorShopEntry Entry,
         ISharedImmediateTexture Icon,
-        ushort CurrencyIconId,
         IReadOnlyList<VendorDisplayNpcOption> NpcOptions,
         string FallbackVendorName,
-        string IdSuffix,
-        string CostText
+        IReadOnlyList<string> UnavailableReasons,
+        string IdSuffix
     );
     private enum VendorSortColumn { Name, Cost, Currency, Vendor, Location }
     private enum VendorSortDirection { Ascending, Descending }
@@ -71,8 +70,8 @@ public partial class VulcanWindow
     private readonly Dictionary<uint, ushort>            _vendorCurrencyIconIds = new();
     private readonly Dictionary<uint, string>            _vendorCurrencyNames   = new();
     private readonly Dictionary<uint, string>            _vendorZoneNames = new();
-    private readonly Dictionary<(VendorShopType ShopType, uint ItemId, uint CurrencyItemId, uint Cost), int> _vendorPurchaseQuantities = new();
-    private (VendorShopType ShopType, uint ItemId, uint CurrencyItemId, uint Cost)? _vendorEditingQuantityKey;
+    private readonly Dictionary<string, int>                    _vendorPurchaseQuantities = new(StringComparer.Ordinal);
+    private string?                                              _vendorEditingQuantityKey;
     private string                                       _vendorEditingQuantityText = string.Empty;
     private bool                                         _vendorEditingQuantityFocus;
     private static readonly Vector4                      VendorMarkerButtonColor     = new(0.45f, 0.80f, 1.00f, 1f);
@@ -84,8 +83,8 @@ public partial class VulcanWindow
         new("InventoryTools", "Allagan Tools"),
         new(VendorAutomationRequirements.AllaganItemSearchInternalName, "Allagan Item Search"),
     ];
-    private static (VendorShopType ShopType, uint ItemId, uint CurrencyItemId, uint Cost) VendorQuantityKey(VendorShopEntry entry)
-        => (entry.ShopType, entry.ItemId, entry.CurrencyItemId, entry.Cost);
+    private static string VendorQuantityKey(VendorShopEntry entry)
+        => entry.OfferSignature;
 
     private int GetVendorPurchaseQuantity(VendorShopEntry entry)
     {
@@ -133,7 +132,37 @@ public partial class VulcanWindow
         => VendorPreferenceHelper.SetPreferredNpc(entry, vendor);
 
     private static string GetVendorDisplayRowId(VendorShopEntry entry)
-        => $"{(int)entry.ShopType}_{(int)entry.Group}_{entry.ItemId}_{entry.CurrencyItemId}_{entry.Cost}";
+    {
+        var requirements = string.Join("_",
+            string.Join(",", (entry.RequiredQuestIds ?? []).Order()),
+            entry.RequiredAchievementId,
+            entry.RequiredContentId,
+            entry.RequiredContentMustBeComplete ? 1 : 0,
+            entry.RequiredAlliedSocietyId,
+            entry.RequiredAlliedSocietyRank);
+        var routes = string.Join("_", entry.Npcs
+            .OrderBy(npc => npc.NpcId)
+            .ThenBy(npc => npc.MenuShopType)
+            .ThenBy(npc => npc.ShopId)
+            .ThenBy(npc => npc.SourceShopId)
+            .ThenBy(npc => npc.ShopItemIndex)
+            .Select(npc => string.Join(":",
+                npc.NpcId,
+                (int)npc.MenuShopType,
+                npc.ShopId,
+                npc.InclusionPageIndex,
+                npc.InclusionSubPageIndex,
+                npc.ShopItemIndex,
+                npc.SourceShopId,
+                npc.GcRankIndex,
+                npc.GcCategoryIndex,
+                npc.UnlockQuestId,
+                npc.RequiredGrandCompanyRank,
+                npc.RequiredAlliedSocietyId,
+                npc.RequiredAlliedSocietyRank,
+                npc.AlliedRequirementKnown ? 1 : 0)));
+        return $"{(int)entry.ShopType}_{(int)entry.Group}_{entry.OfferSignature}_{requirements}_{routes}";
+    }
 
     private static int GetCurrentGrandCompanyEntryCount()
         => VendorShopResolver.GcShopEntries.Count(VendorShopResolver.MatchesCurrentGrandCompany);
@@ -141,7 +170,7 @@ public partial class VulcanWindow
     private static uint GetCurrentGrandCompanyCurrencyItemId()
         => VendorShopResolver.GetCurrentGrandCompanySealCurrencyItemId() is var currencyItemId && currencyItemId != 0
             ? currencyItemId
-            : VendorShopResolver.GetGrandCompanySealCurrencyItemId(1);
+            : VendorShopResolver.GetSealCurrencyItemIdForGameGrandCompany(0);
 
     private ushort GetVendorCurrencyIconId(uint currencyItemId)
     {
@@ -262,8 +291,30 @@ public partial class VulcanWindow
     {
         var selectableNpcs = VendorDevExclusions.GetSelectableNpcs(entry.Npcs, "building the Vendors tab", entry.ItemName);
         var npcOptions = new List<VendorDisplayNpcOption>(selectableNpcs.Count);
+        var unavailableReasons = new List<string>();
+        var currencyAvailable = VendorOfferMath.HasValidCurrencyCosts(entry.CurrencyCosts);
+        if (!currencyAvailable)
+        {
+            unavailableReasons.Add("Vendor currency cost is unresolved; direct purchase is disabled.");
+        }
+        else if (!VendorCurrencyAvailabilityResolver.TryCaptureAuthoritative(entry.CurrencyCosts, out _, out var currencyFailure))
+        {
+            currencyAvailable = false;
+            unavailableReasons.Add(currencyFailure);
+        }
+
         foreach (var npc in selectableNpcs)
         {
+            if (!currencyAvailable)
+                continue;
+
+            var availability = VendorAvailabilityResolver.Resolve(entry, npc);
+            if (!availability.IsAvailable)
+            {
+                unavailableReasons.Add($"{npc.Name}: {availability.Reason}");
+                continue;
+            }
+
             var location = VendorNpcLocationCache.TryGetFirstLocation(npc.NpcId);
             if (locationCacheReady && location == null)
                 continue;
@@ -277,15 +328,30 @@ public partial class VulcanWindow
         return new VendorDisplayRow(
             entry,
             Icons.DefaultStorage.TextureProvider.GetFromGameIcon(new GameIconLookup(entry.IconId)),
-            GetVendorCurrencyIconId(entry.CurrencyItemId),
             npcOptions,
             selectableNpcs.Count > 0
                 ? selectableNpcs[0].Name
                 : entry.Npcs.Count > 0
                     ? entry.Npcs[0].Name
                     : "Unknown",
-            GetVendorDisplayRowId(entry),
-            $"{entry.Cost:N0}");
+            unavailableReasons,
+            GetVendorDisplayRowId(entry));
+    }
+
+    private static string GetVendorUnavailableTooltip(VendorDisplayRow row)
+        => row.UnavailableReasons.Count == 0
+            ? "No unlocked, automation-supported vendor route is available."
+            : "Vendor route unavailable:\n" + string.Join("\n", row.UnavailableReasons);
+
+    private static string? GetVendorOfferInvalidReason(VendorShopEntry entry)
+    {
+        if (!VendorOfferMath.HasValidCurrencyCosts(entry.CurrencyCosts))
+            return "Vendor currency cost is unresolved; direct purchase is disabled.";
+        if (!VendorCurrencyAvailabilityResolver.TryCaptureAuthoritative(entry.CurrencyCosts, out _, out var currencyFailure))
+            return $"{currencyFailure} Direct purchase is disabled.";
+        if (!VendorOfferMath.HasValidReceivedItems(entry.ReceivedItems, entry.ItemId))
+            return "Vendor output quantity is unresolved; direct purchase is disabled.";
+        return null;
     }
 
     private VendorDisplayNpcOption? GetSelectedVendorOption(VendorDisplayRow row)
@@ -849,20 +915,43 @@ public partial class VulcanWindow
 
     private void DrawVendorCostCell(VendorDisplayRow row, Vector2 iconVec, float iconSize)
     {
-        if (row.CurrencyIconId != 0)
+        var costs = row.Entry.CurrencyCosts;
+        if (!VendorOfferMath.HasValidCurrencyCosts(costs))
         {
-            var currencyIcon = Icons.DefaultStorage.TextureProvider.GetFromGameIcon(new GameIconLookup(row.CurrencyIconId));
-            if (currencyIcon.TryGetWrap(out var wrap, out _))
-            {
-                ImGui.Image(wrap.Handle, iconVec);
-                ImGui.SameLine(0, VulcanUiScaling.Scaled(4f));
-            }
+            ImGui.TextColored(ImGuiColors.DalamudYellow, "Unknown");
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip("Vendor currency cost is unresolved; direct purchase is disabled.");
+            return;
         }
 
-        ImGui.SetCursorPosY(ImGui.GetCursorPosY() + (iconSize - ImGui.GetTextLineHeight()) / 2f);
-        ImGui.TextUnformatted(row.CostText);
-        if (ImGui.IsItemHovered())
-            ImGui.SetTooltip(GetVendorCurrencyName(row.Entry.CurrencyItemId, row.Entry.CurrencyName));
+        var tooltip = string.Join("\n", costs.Select(cost =>
+            $"{cost.Amount:N0} {GetVendorCurrencyName(cost.CurrencyItemId, cost.CurrencyName)}"));
+        for (var i = 0; i < costs.Count; i++)
+        {
+            if (i > 0)
+            {
+                ImGui.SameLine(0, VulcanUiScaling.Scaled(2f));
+                ImGui.TextUnformatted("+");
+                ImGui.SameLine(0, VulcanUiScaling.Scaled(2f));
+            }
+
+            var cost = costs[i];
+            var currencyIconId = GetVendorCurrencyIconId(cost.CurrencyItemId);
+            if (currencyIconId != 0)
+            {
+                var currencyIcon = Icons.DefaultStorage.TextureProvider.GetFromGameIcon(new GameIconLookup(currencyIconId));
+                if (currencyIcon.TryGetWrap(out var wrap, out _))
+                {
+                    ImGui.Image(wrap.Handle, iconVec);
+                    ImGui.SameLine(0, VulcanUiScaling.Scaled(2f));
+                }
+            }
+
+            ImGui.SetCursorPosY(ImGui.GetCursorPosY() + (iconSize - ImGui.GetTextLineHeight()) / 2f);
+            ImGui.TextUnformatted($"{cost.Amount:N0}");
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip(tooltip);
+        }
     }
 
     private void DrawVendorItemTable()
@@ -895,9 +984,10 @@ public partial class VulcanWindow
                 $"Buy List: {buyListManager.StatusText}");
             ImGui.Spacing();
         }
-        if (purchaseManager.IsRunning)
+        if (!string.IsNullOrWhiteSpace(purchaseManager.StatusText))
         {
-            ImGui.TextColored(ImGuiColors.ParsedGold, purchaseManager.StatusText);
+            ImGui.TextColored(purchaseManager.IsRunning ? ImGuiColors.ParsedGold : ImGuiColors.DalamudYellow,
+                purchaseManager.StatusText);
             ImGui.Spacing();
         }
 
@@ -1037,7 +1127,10 @@ public partial class VulcanWindow
     {
         if (row.NpcOptions.Count == 0)
         {
-            ImGui.TextColored(ImGuiColors.DalamudGrey3, row.FallbackVendorName);
+            ImGui.TextColored(ImGuiColors.DalamudYellow,
+                row.UnavailableReasons.Count > 0 ? "Unavailable" : row.FallbackVendorName);
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip(GetVendorUnavailableTooltip(row));
             return;
         }
 
@@ -1097,16 +1190,29 @@ public partial class VulcanWindow
 
     private void DrawVendorAddToListButton(VendorDisplayRow row, VendorDisplayNpcOption? selectedNpc)
     {
+        if (GetVendorOfferInvalidReason(row.Entry) is { } offerReason)
+        {
+            DrawVendorIconButton($"vendor_add_disabled_{row.IdSuffix}", FontAwesomeIcon.Plus,
+                VendorBuyListButtonColor, offerReason, true);
+            return;
+        }
         if (selectedNpc == null)
         {
             DrawVendorIconButton($"vendor_add_disabled_{row.IdSuffix}", FontAwesomeIcon.Plus,
-                VendorBuyListButtonColor, "No vendor available for the buy list", true);
+                VendorBuyListButtonColor, GetVendorUnavailableTooltip(row), true);
             return;
         }
         if (!VendorPurchaseManager.IsPurchaseSupported(row.Entry, selectedNpc.Npc))
         {
             DrawVendorIconButton($"vendor_add_disabled_{row.IdSuffix}", FontAwesomeIcon.Plus,
                 VendorBuyListButtonColor, "Automation is not available for the selected vendor route", true);
+            return;
+        }
+        var availability = VendorAvailabilityResolver.Resolve(row.Entry, selectedNpc.Npc);
+        if (!availability.IsAvailable)
+        {
+            DrawVendorIconButton($"vendor_add_disabled_{row.IdSuffix}", FontAwesomeIcon.Plus,
+                VendorBuyListButtonColor, availability.Reason, true);
             return;
         }
         var buyListManager = GatherBuddy.VendorBuyListManager;
@@ -1135,7 +1241,19 @@ public partial class VulcanWindow
     private void DrawVendorGoButton(VendorDisplayRow row, VendorDisplayNpcOption? selectedNpc)
     {
         var location = selectedNpc?.Location;
-        if (selectedNpc == null || location == null)
+        if (GetVendorOfferInvalidReason(row.Entry) is { } offerReason)
+        {
+            DrawVendorIconButton($"vendor_go_disabled_{row.IdSuffix}", FontAwesomeIcon.ShoppingCart,
+                VendorAutomationButtonColor, offerReason, true);
+            return;
+        }
+        if (selectedNpc == null)
+        {
+            DrawVendorIconButton($"vendor_go_disabled_{row.IdSuffix}", FontAwesomeIcon.ShoppingCart,
+                VendorAutomationButtonColor, GetVendorUnavailableTooltip(row), true);
+            return;
+        }
+        if (location == null)
         {
             DrawVendorIconButton($"vendor_go_disabled_{row.IdSuffix}", FontAwesomeIcon.ShoppingCart,
                 VendorAutomationButtonColor, "No location data available", true);
@@ -1143,6 +1261,16 @@ public partial class VulcanWindow
         }
 
         var entry            = row.Entry;
+        if (selectedNpc != null)
+        {
+            var availability = VendorAvailabilityResolver.Resolve(entry, selectedNpc.Npc);
+            if (!availability.IsAvailable)
+            {
+                DrawVendorIconButton($"vendor_go_disabled_{row.IdSuffix}", FontAwesomeIcon.ShoppingCart,
+                    VendorAutomationButtonColor, availability.Reason, true);
+                return;
+            }
+        }
         var canPurchaseHere  = VendorPurchaseManager.IsPurchaseSupported(entry, selectedNpc.Npc);
         if (canPurchaseHere && !VendorAutomationRequirements.IsAvailable)
         {
@@ -1203,8 +1331,8 @@ public partial class VulcanWindow
             .ToList();
         SortVendorDisplayRows(_vendorDisplay);
 
-        if (_vendorEditingQuantityKey.HasValue
-         && !_vendorDisplay.Any(row => VendorQuantityKey(row.Entry) == _vendorEditingQuantityKey.Value))
+        if (_vendorEditingQuantityKey != null
+         && !_vendorDisplay.Any(row => VendorQuantityKey(row.Entry) == _vendorEditingQuantityKey))
             StopEditingVendorQuantity();
         _vendorDisplayBuiltWithResolvedLocations = locationCacheReady;
     }

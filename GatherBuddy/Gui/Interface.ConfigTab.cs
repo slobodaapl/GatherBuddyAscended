@@ -80,7 +80,18 @@ public partial class Interface
                 GatherBuddy.Config.AutoGatherConfig.GoHomeWhenIdle, b => GatherBuddy.Config.AutoGatherConfig.GoHomeWhenIdle = b);
             ImGui.SameLine();
             ImGuiEx.PluginAvailabilityIndicator([new("Lifestream")]);
+            DrawCheckbox("Show auto-home chat warning",
+                "Print why automatic home navigation was triggered and where to disable it",
+                GatherBuddy.Config.AutoGatherConfig.ShowAutoHomeChatWarning,
+                b => GatherBuddy.Config.AutoGatherConfig.ShowAutoHomeChatWarning = b);
         }
+
+        public static void DrawCraftingInnNavigationBox()
+            => DrawCheckbox(
+                "Go to inn before crafting",
+                "When a crafting-list run finishes gathering and purchasing, use Lifestream to enter an inn before crafting. Disabled by default.",
+                GatherBuddy.Config.GoToInnBeforeCrafting,
+                b => GatherBuddy.Config.GoToInnBeforeCrafting = b);
 
         public static void DrawUseSkillsForFallabckBox()
             => DrawCheckbox("Use skills for fallback items", "Use skills when gathering items from fallback presets",
@@ -253,6 +264,19 @@ public partial class Interface
             }
 
             ImGuiUtil.HoverTooltip("How far in advance of the node actually being up GBR should consider the node to be up");
+        }
+
+        public static void DrawTimedNodeEarlyAbandonment()
+        {
+            ImGui.SetNextItemWidth(150);
+            var tmp = GatherBuddy.Config.AutoGatherConfig.TimedNodeEarlyAbandonment;
+            if (ImGui.DragInt("Timed Node Early Abandonment (Seconds)", ref tmp, 1, 0, 600))
+            {
+                GatherBuddy.Config.AutoGatherConfig.TimedNodeEarlyAbandonment = tmp;
+                GatherBuddy.Config.Save();
+            }
+
+            ImGuiUtil.HoverTooltip("How many seconds before a timed node disappears GBR should stop navigating to it");
         }
 
         public static void DrawExecutionDelay()
@@ -1529,6 +1553,7 @@ public partial class Interface
             new("Anti-Stuck Cooldown",                            ConfigFunctions.DrawAntiStuckCooldown),
             new("Stuck Threshold",                                ConfigFunctions.DrawStuckThreshold),
             new("Timed Node Precognition",                        ConfigFunctions.DrawTimedNodePrecog),
+            new("Timed Node Early Abandonment",                  ConfigFunctions.DrawTimedNodeEarlyAbandonment),
             new("Execution delay Milliseconds",                   ConfigFunctions.DrawExecutionDelay),
             new("Enable Gathering Window Interaction",            ConfigFunctions.DrawAutoGatherBox),
             new("Disable map marker navigation",                  ConfigFunctions.DrawUseFlagBox),
@@ -1547,6 +1572,10 @@ public partial class Interface
             new("Prefer Cheaper Aetherytes Prefer Less Travel Time", ConfigFunctions.DrawAetherytePreference),
             new("Skip Nearby Teleports",                          ConfigFunctions.DrawSkipTeleportBox),
             new("Add In-Game Context Menus",                      ConfigFunctions.DrawContextMenuBox),
+        ]),
+        new("Crafting", "Navigation",
+        [
+            new("Go to inn before crafting", ConfigFunctions.DrawCraftingInnNavigationBox),
         ]),
         new("General", "Set Names",
         [

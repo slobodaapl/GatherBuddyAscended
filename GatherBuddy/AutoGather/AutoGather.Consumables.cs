@@ -1,6 +1,7 @@
 using System.Collections.Generic;
 using System.Linq;
 using GatherBuddy.Helpers;
+using GatherBuddy.AutoGather.Helpers;
 using FFXIVClientStructs.FFXIV.Client.Game;
 using Lumina.Excel.Sheets;
 using GatherBuddy.Utilities;
@@ -176,17 +177,20 @@ namespace GatherBuddy.AutoGather
         {
             if (Throttler.Throttle("DoUseConsumablesWithoutCastTime", 5000) || skipThrottle)
             {
-                if (config.Consumables.Cordial.Enabled
-                    && config.Consumables.Cordial.ItemId > 0
+                var cordial = config.Consumables.Cordial;
+                var cordialItemId = Player.Object != null
+                    ? CordialSelector.Select(cordial, Player.Object.CurrentGp, Player.Object.MaxGp, GetInventoryItemCount)
+                    : 0;
+                if (cordial.Enabled
+                    && cordialItemId > 0
                     && !IsCordialOnCooldown
                     && Player.Object != null
-                    && Player.Object.CurrentGp >= config.Consumables.Cordial.MinGP
-                    && Player.Object.CurrentGp <= config.Consumables.Cordial.MaxGP
+                    && Player.Object.CurrentGp >= cordial.MinGP
+                    && (cordial.PreventGpOvercap || Player.Object.CurrentGp <= cordial.MaxGP)
                     && Player.Object.CurrentGp < Player.Object.MaxGp
-                    && GetInventoryItemCount(config.Consumables.Cordial.ItemId) > 0
                 )
                 {
-                    EnqueueActionWithDelay(() => UseItem(config.Consumables.Cordial.ItemId));
+                    EnqueueActionWithDelay(() => UseItem(cordialItemId));
                     return true;
                 }
 

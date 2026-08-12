@@ -33,7 +33,7 @@ namespace GatherBuddy.AutoGather
         public bool CollectableManualScores { get; set; } = false;
         public int CollectableTagetScore { get => collectableTagetScore; set => collectableTagetScore = Math.Max(0, Math.Min(MaxCollectability, value)); }
         public int CollectableMinScore { get => collectableMinScore; set => collectableMinScore = Math.Max(0, Math.Min(MaxCollectability, value)); }
-        public bool ChooseBestActionsAutomatically { get; set; } = false;
+        public bool ChooseBestActionsAutomatically { get; set; } = true;
         public bool SpendGPOnBestNodesOnly { get; set; } = false;
         public GatheringActionsRec GatherableActions { get; init; } = new();
         public CollectableActionsRec CollectableActions { get; init; } = new();
@@ -79,6 +79,25 @@ namespace GatherBuddy.AutoGather
         public record class ActionConfigConsumable : ActionConfig
         {
             public uint ItemId { get; set; } = 0;
+        }
+        public enum CordialSelectionMode
+        {
+            Specific,
+            StrongestFirst,
+            WeakestFirst,
+        }
+        public enum CordialHqPreference
+        {
+            HqBeforeNq,
+            NqBeforeHq,
+            NqOnly,
+            HqOnly,
+        }
+        public record class CordialConfig : ActionConfigConsumable
+        {
+            public CordialSelectionMode SelectionMode { get; set; }
+            public CordialHqPreference HqPreference { get; set; }
+            public bool PreventGpOvercap { get; set; }
         }
         public record class ToggleConfig
         {
@@ -183,7 +202,7 @@ namespace GatherBuddy.AutoGather
         }
         public record class ConsumablesRec
         {
-            public ActionConfigConsumable Cordial { get; init; } = new() { Enabled = false };
+            public CordialConfig Cordial { get; init; } = new() { Enabled = false };
             public ActionConfigConsumable Food { get; init; } = new() { Enabled = false };
             public ActionConfigConsumable Potion { get; init; } = new() { Enabled = false };
             public ActionConfigConsumable Manual { get; init; } = new() { Enabled = false };

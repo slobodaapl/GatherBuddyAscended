@@ -246,6 +246,7 @@ namespace GatherBuddy.AutoGather
                     _consecutiveAmissCount = 0;
                     _stuckAtSpotStartTime = DateTime.MinValue;
                     _lastJiggleTime = DateTime.MinValue;
+                    _npcRepairFailure = null;
                     _jiggleAttempts.Clear();
                     _fishingSpotArrivalTime.Clear();
                     ResetPendingFishingTargetChange();
@@ -308,9 +309,25 @@ namespace GatherBuddy.AutoGather
             }
         }
 
-        public bool GoHome()
+        public bool CraftOwnedGathering { get; private set; }
+
+        public void SetCraftOwnedGathering(bool enabled)
+        {
+            CraftOwnedGathering = enabled;
+            GatherBuddy.Log.Debug($"[AutoGather] Craft-owned gathering suppression {(enabled ? "enabled" : "disabled")}");
+        }
+
+        public bool GoHome(string reason = "automation recovery")
         {
             StopNavigation();
+
+            if (CraftOwnedGathering
+                && (string.Equals(reason, "gathering is idle", StringComparison.Ordinal)
+                    || string.Equals(reason, "gathering is done", StringComparison.Ordinal)))
+            {
+                GatherBuddy.Log.Debug($"[AutoGather] Suppressed standalone home navigation during craft-owned gathering ({reason})");
+                return false;
+            }
 
             if (WentHome)
                 return false;
@@ -322,6 +339,8 @@ namespace GatherBuddy.AutoGather
 
             if (Lifestream.Enabled && !Lifestream.IsBusy())
             {
+                if (GatherBuddy.Config.AutoGatherConfig.ShowAutoHomeChatWarning)
+                    Communicator.Print(AutoHomeNotification.Build(reason));
                 var command = GatherBuddy.Config.AutoGatherConfig.LifestreamCommand;
                 if (command.Contains("/li "))
                     command = command.Replace("/li ", "");
@@ -789,6 +808,12 @@ namespace GatherBuddy.AutoGather
                     return;
                 }
 
+                if (!_activeItemList.HasReachableItemsToGather)
+                {
+                    AbortAutoGather("All remaining items are unreachable");
+                    return;
+                }
+
                 if (GatherBuddy.CollectableManager?.IsRunning == true)
                 {
                     AutoStatus = "Turning in collectables...";
@@ -815,7 +840,7 @@ namespace GatherBuddy.AutoGather
                 }
 
                 if (!waitAtAetheryte && GatherBuddy.Config.AutoGatherConfig.GoHomeWhenIdle)
-                    if (GoHome())
+                    if (GoHome("gathering is idle"))
                         return;
 
                 if (HasReducibleItems())
@@ -1213,7 +1238,7 @@ namespace GatherBuddy.AutoGather
                 StopNavigation();
 
                 if (!MoveToTerritory(next.Location))
-                    AbortAutoGather();
+                    _activeItemList.MarkPermanentlyUnreachable(next);
 
                 return;
             }
@@ -1459,7 +1484,7 @@ namespace GatherBuddy.AutoGather
                         
                         TaskManager.Enqueue(() => 
                         {
-                            var wentHome = GoHome();
+                            var wentHome = GoHome("fishing recovery after repeated 'The fish sense something amiss' failures");
                             if (wentHome)
                             {
                                 GatherBuddy.Log.Information("[AutoGather] Teleported home. Waiting before returning to fishing spot...");
@@ -2082,7 +2107,7 @@ namespace GatherBuddy.AutoGather
                 Task.Run(() => _soundHelper.StartHonkSoundTask(3));
             CloseGatheringAddons();
             if (GatherBuddy.Config.AutoGatherConfig.GoHomeWhenDone)
-                EnqueueActionWithDelay(() => { GoHome(); });
+                EnqueueActionWithDelay(() => { GoHome("gathering is done"); });
             TaskManager.Enqueue(() =>
             {
                 Enabled    = false;
@@ -2382,7 +2407,7 @@ namespace GatherBuddy.AutoGather
                     {
                         if (nextItem.Node?.NodeType is NodeType.Legendary or NodeType.Unspoiled)
                         {
-                            if (nextItem.Time.InRange(AdjustedServerTime) && 
+                            if (IsTimedTargetAvailable(nextItem.Time) &&
                                 !_activeItemList.DebugVisitedTimedLocations.ContainsKey(nextItem.Node))
                             {
                                 return false;

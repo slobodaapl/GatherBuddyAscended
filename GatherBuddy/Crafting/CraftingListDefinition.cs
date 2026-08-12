@@ -29,11 +29,19 @@ public class CraftingListDefinition
     public bool QuickSynthAll { get; set; } = false;
     public bool QuickSynthAllPreferNQ { get; set; } = false;
     public bool QuickSynthAllPrecraftsOnly { get; set; } = false;
+    public bool PreferBestClassForMultiRecipeItems { get; set; } = false;
     public bool UseAllHQ { get; set; } = false;
     public bool Materia { get; set; } = false;
     public bool Repair { get; set; } = false;
     public int RepairPercent { get; set; } = 50;
     public bool RetainerRestock { get; set; } = false;
+    public bool AutoPurchaseBlockedDependencies { get; set; } = false;
+    public bool PreferMarketForSpecialCurrency { get; set; } = true;
+    public bool PreferHQ { get; set; } = false;
+    public bool PreferVendors { get; set; } = false;
+    public bool CurrentWorldOnly { get; set; } = false;
+    public long? MaximumGilSpend { get; set; }
+    public bool ReturnToHomeWorldBeforeCrafting { get; set; } = false;
     public bool Ephemeral { get; set; } = false;
 
     public bool ShouldApplyQuickSynthAllOverrides(bool isOriginalRecipe)
@@ -62,8 +70,25 @@ public class CraftingListDefinition
             : CraftingQualityOverrideMode.None;
     }
 
-    public CraftingListPlan CreatePlan(bool useRetainerCraftableAvailability = false)
-        => CraftingListPlanner.Build(this, new CraftingListPlannerOptions(useRetainerCraftableAvailability));
+    public CraftingListPlan CreatePlan(
+        bool useRetainerCraftableAvailability = false,
+        IReadOnlyDictionary<uint, AcquiredDependencyAvailability>? acquiredAvailability = null)
+        => CraftingListPlanner.Build(
+            this,
+            new CraftingListPlannerOptions(
+                UseRetainerCraftableAvailability: useRetainerCraftableAvailability,
+                AcquiredAvailability: acquiredAvailability));
+
+    public Acquisition.AcquisitionPlanningSettings GetAcquisitionSettings()
+        => new()
+        {
+            AutoPurchaseBlockedDependencies = AutoPurchaseBlockedDependencies,
+            PreferMarketForSpecialCurrency = PreferMarketForSpecialCurrency,
+            PreferHQ = PreferHQ,
+            PreferVendors = PreferVendors,
+            CurrentWorldOnly = CurrentWorldOnly,
+            MaximumGilSpend = MaximumGilSpend,
+        };
 
     public void BuildExpandedList()
     {
@@ -83,6 +108,7 @@ public class CraftingListDefinition
             FolderPath = FolderPath,
             Order = Order,
             CreatedAt = CreatedAt,
+            ExpandedList = new List<uint>(ExpandedList),
             Consumables = Consumables.Clone(),
             DefaultPrecraftMacroId = DefaultPrecraftMacroId,
             DefaultFinalMacroId = DefaultFinalMacroId,
@@ -93,11 +119,19 @@ public class CraftingListDefinition
             QuickSynthAll = QuickSynthAll,
             QuickSynthAllPreferNQ = QuickSynthAllPreferNQ,
             QuickSynthAllPrecraftsOnly = QuickSynthAllPrecraftsOnly,
+            PreferBestClassForMultiRecipeItems = PreferBestClassForMultiRecipeItems,
             UseAllHQ = UseAllHQ,
             Materia = Materia,
             Repair = Repair,
             RepairPercent = RepairPercent,
             RetainerRestock = RetainerRestock,
+            AutoPurchaseBlockedDependencies = AutoPurchaseBlockedDependencies,
+            PreferMarketForSpecialCurrency = PreferMarketForSpecialCurrency,
+            PreferHQ = PreferHQ,
+            PreferVendors = PreferVendors,
+            CurrentWorldOnly = CurrentWorldOnly,
+            MaximumGilSpend = MaximumGilSpend,
+            ReturnToHomeWorldBeforeCrafting = ReturnToHomeWorldBeforeCrafting,
             Ephemeral = Ephemeral,
         };
 
@@ -132,7 +166,39 @@ public class CraftingListDefinition
         foreach (var (itemId, recipeId) in PrecraftRecipeOverrides)
             snapshot.PrecraftRecipeOverrides[itemId] = recipeId;
 
+        if (snapshot.PreferBestClassForMultiRecipeItems)
+        {
+            var bestRecipes = RecipeManager.GetBestClassRecipes();
+            foreach (var item in snapshot.Recipes)
+            {
+                var recipe = RecipeManager.GetRecipe(item.RecipeId);
+                if (recipe.HasValue && bestRecipes.TryGetValue(recipe.Value.ItemResult.RowId, out var bestRecipeId))
+                    item.RecipeId = bestRecipeId;
+            }
+            foreach (var (itemId, recipeId) in bestRecipes)
+                snapshot.PrecraftRecipeOverrides[itemId] = recipeId;
+        }
+
         return snapshot;
+    }
+
+    public Recipe? ResolveRecipeForItem(uint itemId)
+    {
+        if (PrecraftRecipeOverrides.TryGetValue(itemId, out var overrideRecipeId))
+        {
+            var overrideRecipe = RecipeManager.GetRecipe(overrideRecipeId);
+            if (overrideRecipe.HasValue && overrideRecipe.Value.ItemResult.RowId == itemId)
+                return overrideRecipe;
+        }
+
+        foreach (var item in Recipes)
+        {
+            var selectedRecipe = RecipeManager.GetRecipe(item.RecipeId);
+            if (selectedRecipe.HasValue && selectedRecipe.Value.ItemResult.RowId == itemId)
+                return selectedRecipe;
+        }
+
+        return RecipeManager.GetRecipeForItem(itemId);
     }
 
     public Dictionary<uint, int> ListMaterials() => new(CreatePlan().Materials);

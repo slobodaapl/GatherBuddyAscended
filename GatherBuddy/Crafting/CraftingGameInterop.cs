@@ -62,6 +62,10 @@ public static class CraftingGameInterop
     private static Vulcan.CraftState? _vulcanCraftState = null;
     private static Vulcan.StepState? _vulcanStepState = null;
     private static bool _vulcanPredictionPendingObservation;
+    private static Vulcan.StepState? _vulcanPreActionStepState;
+    private static VulcanSkill _vulcanPendingAction;
+    private static Vulcan.StepState? _unreconciledObservedState;
+    private static DateTime _unreconciledObservedSince = DateTime.MinValue;
     private static CraftingActionExecutor? _actionExecutor = null;
     private static CraftingQualityPolicy? _currentQualityPolicy = null;
     private static Dictionary<uint, int>? _currentIngredientPreferences = null;
@@ -76,6 +80,7 @@ public static class CraftingGameInterop
     private static DateTime _nextActionAllowedAt = DateTime.MinValue;
     private static CraftPreparationFailure? _lastPreparationFailure = null;
     private static bool _automationFaultReported;
+    private static readonly TimeSpan ReconciliationGracePeriod = TimeSpan.FromMilliseconds(500);
 
 
     public static Vulcan.UserMacroLibrary UserMacroLibrary => _userMacroLibrary ??= new();
@@ -88,6 +93,43 @@ public static class CraftingGameInterop
 
     public static CraftState CurrentState => _currentState;
     public static Recipe? CurrentRecipe => _currentRecipe;
+
+    public static bool TryResumeLiveCraft()
+    {
+        if (_currentState is not (CraftState.InProgress or CraftState.WaitAction)
+            || !Dalamud.Conditions[ConditionFlag.Crafting]
+            || Dalamud.Conditions[ConditionFlag.ExecutingCraftingAction]
+            || _vulcanCraftState == null
+            || _currentRecipeId == null)
+            return false;
+
+        var liveState = SynthesisReader.ReadCurrentStepState(_vulcanCraftState, _vulcanStepState);
+        if (liveState == null)
+        {
+            if (!Dalamud.Conditions[ConditionFlag.PreparingToCraft])
+                return false;
+
+            var completedState = Finish(cancelled: false);
+            if (completedState != _currentState)
+            {
+                GatherBuddy.Log.Debug($"[Crafting] State transition: {_currentState} -> {completedState}");
+                _currentState = completedState;
+                StateChanged?.Invoke(completedState);
+            }
+            return true;
+        }
+
+        if (!CraftingProcessor.TryResumeCraft(_vulcanCraftState, liveState))
+            return false;
+
+        _vulcanStepState = liveState;
+        _vulcanPredictionPendingObservation = false;
+        _nextActionAllowedAt = DateTime.MinValue;
+        _automationFaultReported = false;
+        ResetReconciliationTracking();
+        GatherBuddy.Log.Information($"[Crafting] Resumed from live state: {liveState}");
+        return true;
+    }
 
     public static void Initialize()
     {
@@ -176,10 +218,17 @@ public static class CraftingGameInterop
         _vulcanCraftState = null;
         _vulcanStepState = null;
         _vulcanPredictionPendingObservation = false;
+        ResetReconciliationTracking();
         _currentQualityPolicy = null;
         _currentSelectedMacroId = null;
         _lastPreparationFailure = null;
         _automationFaultReported = false;
+        StateChanged = null;
+        CraftStarted = null;
+        CraftFinished = null;
+        CraftAdvanced = null;
+        QuickSynthProgress = null;
+        AutomationFaulted = null;
         CraftingProcessor.Dispose();
     }
 
@@ -980,8 +1029,11 @@ public static class CraftingGameInterop
             var (result, nextStep) = Vulcan.Simulator.Execute(craft, step, recommendation.Action, 0.5f, 0.5f);
             if (result == Vulcan.Simulator.ExecuteResult.Succeeded || result == Vulcan.Simulator.ExecuteResult.Failed)
             {
+                _vulcanPreActionStepState = step;
+                _vulcanPendingAction = recommendation.Action;
                 _vulcanStepState = nextStep;
                 _vulcanPredictionPendingObservation = true;
+                ResetUnreconciledObservation();
             }
         }
         catch (Exception ex)
@@ -1333,6 +1385,7 @@ public static class CraftingGameInterop
         CraftStarted?.Invoke(recipe, _currentRecipeId.Value);
         _vulcanStepState = observedInitialStep;
         _vulcanPredictionPendingObservation = false;
+        ResetReconciliationTracking();
         _automationFaultReported = false;
         if (_vulcanCraftState != null && _vulcanStepState != null)
         {
@@ -1395,32 +1448,47 @@ public static class CraftingGameInterop
                     return CraftState.WaitFinish;
                 }
                 
-                if (_vulcanPredictionPendingObservation)
+                var reconciled = _vulcanPredictionPendingObservation
+                    ? _vulcanPreActionStepState != null
+                      && StepStateReconciler.TryReconcileAction(
+                          _vulcanCraftState,
+                          _vulcanPreActionStepState,
+                          _vulcanPendingAction,
+                          actualState,
+                          out actualState)
+                    : StepStateReconciler.TryReconcileExternalAction(
+                        _vulcanCraftState,
+                        _vulcanStepState,
+                        actualState,
+                        out actualState);
+                if (!reconciled)
                 {
-                    _vulcanPredictionPendingObservation = false;
-                }
-                else if (!StepStateReconciler.TryReconcileExternalAction(
-                             _vulcanCraftState,
-                             _vulcanStepState,
-                             actualState,
-                             out actualState))
-                {
+                    if (!UnreconciledObservationIsStable(actualState))
+                        return CraftState.InProgress;
+
                     if (!_automationFaultReported)
                     {
                         const string reason = "Could not reconcile the live crafting state; automation stopped before issuing an unsafe action";
                         _automationFaultReported = true;
-                        GatherBuddy.Log.Error($"[Crafting] {reason}");
+                        GatherBuddy.Log.Error($"[Crafting] {reason}. PendingAction={_vulcanPendingAction}; Previous={(_vulcanPreActionStepState ?? _vulcanStepState)}; Observed={actualState}");
                         AutomationFaulted?.Invoke(reason);
                     }
                     return CraftState.InProgress;
                 }
+                _vulcanPredictionPendingObservation = false;
+                ResetReconciliationTracking();
                 _vulcanStepState = actualState;
             }
             else
             {
-                GatherBuddy.Log.Debug($"[Crafting] Could not read actual state from Synthesis window, using simulation");
-                if (_vulcanStepState.Progress >= _vulcanCraftState.CraftProgress)
-                    return CraftState.WaitFinish;
+                if (Dalamud.Conditions[ConditionFlag.PreparingToCraft])
+                {
+                    GatherBuddy.Log.Debug("[Crafting] Synthesis window closed and preparation menu returned; craft finished");
+                    return Finish(cancelled: false);
+                }
+
+                GatherBuddy.Log.Debug("[Crafting] Could not read actual state from Synthesis window; waiting without issuing an action");
+                return CraftState.InProgress;
             }
             
             if (_currentRecipe != null)
@@ -1459,9 +1527,7 @@ public static class CraftingGameInterop
         if (Dalamud.Conditions[ConditionFlag.ExecutingCraftingAction])
             return CraftState.WaitFinish;
 
-        var synthesisAddon = Dalamud.GameGui.GetAddonByName("Synthesis");
-        var synthVisible = synthesisAddon != null && synthesisAddon.Address != nint.Zero;
-        if (!synthVisible)
+        if (!SynthesisReader.IsSynthesisWindowOpen())
         {
             GatherBuddy.Log.Debug($"[Crafting] Craft finished, closing windows");
             return Finish(cancelled: false);
@@ -1502,6 +1568,7 @@ public static class CraftingGameInterop
         _vulcanCraftState = null;
         _vulcanStepState = null;
         _vulcanPredictionPendingObservation = false;
+        ResetReconciliationTracking();
         _automationFaultReported = false;
         
         GatherBuddy.Log.Debug($"[Crafting] Craft finished. Preparing={Dalamud.Conditions[ConditionFlag.PreparingToCraft]}, Crafting={Dalamud.Conditions[ConditionFlag.Crafting]}");
@@ -1510,6 +1577,32 @@ public static class CraftingGameInterop
             return CraftState.IdleBetween;
 
         return CraftState.IdleNormal;
+    }
+
+    private static bool UnreconciledObservationIsStable(Vulcan.StepState observed)
+    {
+        if (_unreconciledObservedState == null
+            || !StepStateReconciler.ObservableEquivalent(_unreconciledObservedState, observed))
+        {
+            _unreconciledObservedState = observed with { };
+            _unreconciledObservedSince = DateTime.Now;
+            return false;
+        }
+
+        return DateTime.Now - _unreconciledObservedSince >= ReconciliationGracePeriod;
+    }
+
+    private static void ResetUnreconciledObservation()
+    {
+        _unreconciledObservedState = null;
+        _unreconciledObservedSince = DateTime.MinValue;
+    }
+
+    private static void ResetReconciliationTracking()
+    {
+        _vulcanPreActionStepState = null;
+        _vulcanPendingAction = VulcanSkill.None;
+        ResetUnreconciledObservation();
     }
 
     private static uint? GetRecipeIdFromUI()

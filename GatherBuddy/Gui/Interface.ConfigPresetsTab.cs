@@ -648,8 +648,9 @@ namespace GatherBuddy.Gui
                 var min = action.MinGP;
                 var max = action.MaxGP;
                 var editDone = false;
+                var preventCordialOvercap = action is ConfigPreset.CordialConfig { PreventGpOvercap: true };
 
-                ImGui.SetNextItemWidth(halfWidth);
+                ImGui.SetNextItemWidth(preventCordialOvercap ? SetInputWidth : halfWidth);
                 if (ImGui.DragInt("##MinGP", ref min, 1, 0, ConfigPreset.MaxGP))
                 {
                     state.ChangingMin = true;
@@ -657,18 +658,21 @@ namespace GatherBuddy.Gui
                 }
                 editDone = ImGui.IsItemDeactivatedAfterEdit();
 
-                ImGui.SameLine();
-                ImGui.SetNextItemWidth(halfWidth);
-                if (ImGui.DragInt("##MaxGP", ref max, 1, 0, ConfigPreset.MaxGP))
+                if (!preventCordialOvercap)
                 {
-                    state.ChangingMin = false;
-                    action.MaxGP = max;
+                    ImGui.SameLine();
+                    ImGui.SetNextItemWidth(halfWidth);
+                    if (ImGui.DragInt("##MaxGP", ref max, 1, 0, ConfigPreset.MaxGP))
+                    {
+                        state.ChangingMin = false;
+                        action.MaxGP = max;
+                    }
+                    editDone = editDone || ImGui.IsItemDeactivatedAfterEdit();
                 }
-                editDone = editDone || ImGui.IsItemDeactivatedAfterEdit();
 
                 if (editDone)
                 {
-                    if (action.MinGP > action.MaxGP)
+                    if (!preventCordialOvercap && action.MinGP > action.MaxGP)
                     {
                         if (state.ChangingMin)
                             action.MaxGP = action.MinGP;
@@ -679,7 +683,12 @@ namespace GatherBuddy.Gui
                     save();
                 }
                 ImGui.SameLine(0, ImGui.GetStyle().ItemInnerSpacing.X);
-                ImGui.TextUnformatted("Minimum and maximum GP");
+                ImGui.TextUnformatted(preventCordialOvercap ? "Minimum GP" : "Minimum and maximum GP");
+
+                if (action is ConfigPreset.CordialConfig cordial
+                 && ImGuiUtil.Checkbox("Don't use if it would restore over max GP", "",
+                        cordial.PreventGpOvercap, value => cordial.PreventGpOvercap = value))
+                    save();
             }
 
             if (action is ConfigPreset.ActionConfigBoon action3)
@@ -770,14 +779,40 @@ namespace GatherBuddy.Gui
                     .Select(x => x with { name = $"{x.name} ({x.count})" })
                     .ToList();
 
-                var       selected = (action7.ItemId > 0 ? list.FirstOrDefault(x => x.rowid == action7.ItemId).name : null) ?? string.Empty;
+                var cordial = action7 as ConfigPreset.CordialConfig;
+                var selected = cordial?.SelectionMode switch
+                {
+                    ConfigPreset.CordialSelectionMode.StrongestFirst => "Hi-Cordial > Cordial > Watered Cordial",
+                    ConfigPreset.CordialSelectionMode.WeakestFirst   => "Watered Cordial > Cordial > Hi-Cordial",
+                    _ => (action7.ItemId > 0 ? list.FirstOrDefault(x => x.rowid == action7.ItemId).name : null) ?? string.Empty,
+                };
                 using var combo    = ImRaii.Combo($"Select {name.ToLower()}", selected);
                 if (combo)
                 {
-                    if (ImGui.Selectable(string.Empty, action7.ItemId <= 0))
+                    if (ImGui.Selectable(string.Empty,
+                            action7.ItemId <= 0 && cordial?.SelectionMode is null or ConfigPreset.CordialSelectionMode.Specific))
                     {
                         action7.ItemId = 0;
+                        if (cordial != null)
+                            cordial.SelectionMode = ConfigPreset.CordialSelectionMode.Specific;
                         save();
+                    }
+
+                    if (cordial != null)
+                    {
+                        if (ImGui.Selectable("Hi-Cordial > Cordial > Watered Cordial",
+                                cordial.SelectionMode == ConfigPreset.CordialSelectionMode.StrongestFirst))
+                        {
+                            cordial.SelectionMode = ConfigPreset.CordialSelectionMode.StrongestFirst;
+                            save();
+                        }
+                        if (ImGui.Selectable("Watered Cordial > Cordial > Hi-Cordial",
+                                cordial.SelectionMode == ConfigPreset.CordialSelectionMode.WeakestFirst))
+                        {
+                            cordial.SelectionMode = ConfigPreset.CordialSelectionMode.WeakestFirst;
+                            save();
+                        }
+                        ImGui.Separator();
                     }
 
                     bool? separatorState = null;
@@ -794,8 +829,28 @@ namespace GatherBuddy.Gui
                         if (ImGui.Selectable(itemname, action7.ItemId == rowid))
                         {
                             action7.ItemId = rowid;
+                            if (cordial != null)
+                                cordial.SelectionMode = ConfigPreset.CordialSelectionMode.Specific;
                             save();
                         }
+                    }
+                }
+
+                if (cordial?.SelectionMode is ConfigPreset.CordialSelectionMode.StrongestFirst or ConfigPreset.CordialSelectionMode.WeakestFirst)
+                {
+                    var preferenceNames = new[]
+                    {
+                        "Use HQ before NQ",
+                        "Use NQ before HQ",
+                        "Use only NQ",
+                        "Use only HQ",
+                    };
+                    var preference = (int)cordial.HqPreference;
+                    ImGui.SetNextItemWidth(SetInputWidth);
+                    if (ImGui.Combo("HQ usage preference", ref preference, preferenceNames, preferenceNames.Length))
+                    {
+                        cordial.HqPreference = (ConfigPreset.CordialHqPreference)preference;
+                        save();
                     }
                 }
             }
@@ -845,6 +900,5 @@ namespace GatherBuddy.Gui
         }
     }
 }
-
 
 

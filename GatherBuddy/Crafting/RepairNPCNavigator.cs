@@ -21,6 +21,7 @@ public class RepairNPCNavigator
 
     private NavigationState _state = NavigationState.Idle;
     private RepairNPCData? _targetNPC;
+    private uint _targetAetheryteId;
     private DateTime _stateStartTime;
     private bool _teleportAttempted;
     private const double TeleportCooldown = 3.0;
@@ -31,9 +32,10 @@ public class RepairNPCNavigator
     public bool IsFailed => _state == NavigationState.Failed;
     public bool IsNavigating => _state != NavigationState.Idle && !IsComplete;
 
-    public void StartNavigation(RepairNPCData targetNPC)
+    public void StartNavigation(RepairNPCData targetNPC, uint targetAetheryteId = 0)
     {
         _targetNPC = targetNPC;
+        _targetAetheryteId = targetAetheryteId;
         _state = NavigationState.Idle;
         _teleportAttempted = false;
         _stateStartTime = DateTime.UtcNow;
@@ -100,7 +102,9 @@ public class RepairNPCNavigator
 
         if (!_teleportAttempted)
         {
-            var aetheryteId = FindNearestAetheryteForTerritory(_targetNPC!.TerritoryType);
+            var aetheryteId = _targetAetheryteId != 0
+                ? _targetAetheryteId
+                : RepairNPCHelper.FindCheapestAttunedAetheryte(_targetNPC!.TerritoryType, out _);
             if (aetheryteId == 0)
             {
                 GatherBuddy.Log.Error($"[RepairNPCNavigator] Could not find aetheryte for territory {_targetNPC.TerritoryType}");
@@ -227,27 +231,6 @@ public class RepairNPCNavigator
                 _state = NavigationState.Failed;
             }
         }
-    }
-
-    private uint FindNearestAetheryteForTerritory(uint territoryId)
-    {
-        var territorySheet = Dalamud.GameData.GetExcelSheet<Lumina.Excel.Sheets.TerritoryType>();
-        if (territorySheet == null || !territorySheet.TryGetRow(territoryId, out var territory))
-            return 0;
-
-        var aetheryteSheet = Dalamud.GameData.GetExcelSheet<Lumina.Excel.Sheets.Aetheryte>();
-        if (aetheryteSheet == null)
-            return 0;
-
-        foreach (var aetheryte in aetheryteSheet)
-        {
-            if (aetheryte.Territory.RowId == territoryId && aetheryte.IsAetheryte)
-            {
-                return aetheryte.RowId;
-            }
-        }
-
-        return 0;
     }
 
     public void Stop()

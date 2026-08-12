@@ -280,8 +280,14 @@ namespace GatherBuddy.AutoGather
         private static unsafe uint FreeInventorySlots
             => InventoryManager.Instance()->GetEmptySlotsInBag();
 
-        public static TimeStamp AdjustedServerTime
+        public static TimeStamp TimedNodeStartTime
             => GatherBuddy.Time.ServerTime.AddSeconds(GatherBuddy.Config.AutoGatherConfig.TimedNodePrecog);
+
+        public static TimeStamp TimedNodeEndTime
+            => GatherBuddy.Time.ServerTime.AddSeconds(GatherBuddy.Config.AutoGatherConfig.TimedNodeEarlyAbandonment);
+
+        public static bool IsTimedTargetAvailable(TimeInterval time)
+            => time.Start <= TimedNodeStartTime && TimedNodeEndTime < time.End;
 
         private ConfigPreset MatchConfigPreset(Gatherable? item)
             => _plugin.Interface.MatchConfigPreset(item);

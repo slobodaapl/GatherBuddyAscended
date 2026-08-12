@@ -44,6 +44,35 @@ internal static class StepStateReconciler
         return unique != null;
     }
 
+    internal static bool TryReconcileAction(
+        CraftState craft,
+        StepState previous,
+        VulcanSkill action,
+        StepState observed,
+        out StepState reconciled)
+    {
+        StepState? unique = null;
+        var successRate = Simulator.GetSuccessRate(previous, action);
+        foreach (var successRoll in successRate < 1.0f ? new[] { 0.0f, 1.0f } : new[] { 0.0f })
+        {
+            var (result, candidate) = Simulator.Execute(craft, previous, action, successRoll, 0.5f);
+            if (result == Simulator.ExecuteResult.CantUse || !ActionOutcomeEquivalent(candidate, observed))
+                continue;
+
+            candidate = OverlayObserved(candidate, observed);
+            if (unique != null && !PersistentEquivalent(unique, candidate))
+            {
+                reconciled = observed;
+                return false;
+            }
+
+            unique = candidate;
+        }
+
+        reconciled = unique ?? observed;
+        return unique != null;
+    }
+
     internal static bool ObservableEquivalent(StepState left, StepState right)
         => left.Condition == right.Condition && ActionOutcomeEquivalent(left, right);
 

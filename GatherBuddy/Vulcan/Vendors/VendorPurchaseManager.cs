@@ -44,6 +44,9 @@ public sealed class VendorPurchaseManager : IDisposable
         uint              CurrencyItemId,
         string            CurrencyName,
         VendorCurrencyGroup CurrencyGroup,
+        IReadOnlyList<VendorCurrencyCost> CurrencyCosts,
+        uint              ReceivedQuantity,
+        IReadOnlyList<VendorReceivedItem> ReceivedItems,
         uint              Quantity,
         VendorNpc         Vendor,
         VendorNpcLocation Location,
@@ -58,8 +61,11 @@ public sealed class VendorPurchaseManager : IDisposable
         uint            CompletedQuantity,
         VendorNpc       Vendor,
         string          Message,
-        bool            WasLimitedByScripReserve
-    );
+        bool            WasLimitedByScripReserve)
+    {
+        public IReadOnlyDictionary<uint, int> OutputQuantities { get; init; }
+            = new Dictionary<uint, int>();
+    }
 
     private static readonly TimeSpan ActionThrottle       = TimeSpan.FromMilliseconds(400);
     private static readonly TimeSpan InteractionCooldown  = TimeSpan.FromSeconds(1);
@@ -75,6 +81,9 @@ public sealed class VendorPurchaseManager : IDisposable
     private DateTime               _lastActionTime = DateTime.MinValue;
     private int                    _interactionAttempts;
     private int                    _ownedCountBeforePurchase;
+    private readonly Dictionary<uint, int> _ownedCountsBeforePurchase = new();
+    private readonly Dictionary<uint, int> _completedOutputQuantities = new();
+    private VendorCurrencyWalletSnapshot? _currencyBalancesBeforePurchase;
     private uint                   _completedQuantity;
     private uint                   _currentBatchQuantity;
     private string                 _statusText = string.Empty;
@@ -114,7 +123,9 @@ public sealed class VendorPurchaseManager : IDisposable
         && vendor.GcCategoryIndex >= 0;
 
     public static bool IsPurchaseSupported(VendorShopEntry entry, VendorNpc vendor)
-        => entry.ShopType switch
+        => VendorOfferMath.HasValidCurrencyCosts(entry.CurrencyCosts)
+        && VendorOfferMath.HasValidReceivedItems(entry.ReceivedItems, entry.ItemId)
+        && (entry.ShopType switch
         {
             VendorShopType.GilShop => vendor.MenuShopType == VendorMenuShopType.GilShop,
             VendorShopType.SpecialCurrency =>
@@ -125,7 +136,46 @@ public sealed class VendorPurchaseManager : IDisposable
                 || IsDirectSpecialShopPurchaseSupported(entry, vendor)),
             VendorShopType.GrandCompanySeals => IsGrandCompanyPurchaseSupported(vendor),
             _ => false,
-        };
+        });
+
+    public static bool ValidateOutputInventory(
+        IEnumerable<VendorReceivedItem> expectedOutputs,
+        IReadOnlyDictionary<uint, int> inventoryDeltas,
+        uint purchaseCount,
+        out string failure)
+    {
+        var outputList = expectedOutputs?
+            .Where(output => output is null || output.ItemId != 0 || output.Quantity != 0)
+            .ToArray()
+            ?? Array.Empty<VendorReceivedItem>();
+        if (purchaseCount == 0
+            || outputList.Length == 0
+            || outputList.Any(output => output == null || output.ItemId == 0 || output.Quantity == 0))
+        {
+            failure = "Vendor output vector is empty or invalid.";
+            return false;
+        }
+
+        var normalizedOutputs = outputList
+            .GroupBy(output => output.ItemId)
+            .Select(group => new VendorReceivedItem(
+                group.Key,
+                checked((uint)group.Aggregate(0UL, (total, item) => checked(total + item.Quantity)))))
+            .ToArray();
+        foreach (var output in normalizedOutputs)
+        {
+            var expected = checked((ulong)output.Quantity * purchaseCount);
+            var actual = inventoryDeltas.GetValueOrDefault(output.ItemId);
+            if ((ulong)Math.Max(0, actual) < expected)
+            {
+                failure = $"Output {output.ItemId:N0} inventory delta was {actual:N0}/{expected:N0}.";
+                return false;
+            }
+        }
+
+        failure = string.Empty;
+        return true;
+    }
 
     public void StartPurchase(VendorShopEntry entry, VendorNpc vendor, VendorNpcLocation location, uint quantity, bool continueCurrentVendorInteraction = false,
         VendorPurchaseConstraints? purchaseConstraints = null)
@@ -133,6 +183,31 @@ public sealed class VendorPurchaseManager : IDisposable
         if (VendorDevExclusions.IsExcluded(vendor))
         {
             GatherBuddy.Log.Warning($"[VendorPurchaseManager] Ignoring purchase request for dev-excluded vendor {vendor.Name} ({vendor.NpcId}/{vendor.MenuShopType}/{vendor.ShopId}/{vendor.SourceShopId}:{vendor.ShopItemIndex}, gc={vendor.GcRankIndex}/{vendor.GcCategoryIndex})");
+            return;
+        }
+        if (!VendorOfferMath.HasValidReceivedItems(entry.ReceivedItems, entry.ItemId))
+        {
+            _statusText = $"Cannot purchase {entry.ItemName}: vendor output quantity is unknown.";
+            GatherBuddy.Log.Warning($"[VendorPurchaseManager] Blocked purchase of {entry.ItemName}: vendor output quantity is zero or missing");
+            return;
+        }
+        if (!VendorOfferMath.HasValidCurrencyCosts(entry.CurrencyCosts))
+        {
+            _statusText = $"Cannot purchase {entry.ItemName}: vendor currency cost is unknown.";
+            GatherBuddy.Log.Warning($"[VendorPurchaseManager] Blocked purchase of {entry.ItemName}: vendor currency cost vector is empty or invalid");
+            return;
+        }
+        if (!VendorCurrencyAvailabilityResolver.TryCaptureAuthoritative(entry.CurrencyCosts, out _, out var currencyFailure))
+        {
+            _statusText = $"Cannot purchase {entry.ItemName}: {currencyFailure}";
+            GatherBuddy.Log.Warning($"[VendorPurchaseManager] Blocked purchase of {entry.ItemName}: {currencyFailure}");
+            return;
+        }
+        var availability = VendorAvailabilityResolver.Resolve(entry, vendor);
+        if (!availability.IsAvailable)
+        {
+            _statusText = $"Cannot purchase {entry.ItemName}: {availability.Reason}";
+            GatherBuddy.Log.Warning($"[VendorPurchaseManager] Blocked purchase of {entry.ItemName}: {availability.State} — {availability.Reason}");
             return;
         }
         if (!IsPurchaseSupported(entry, vendor))
@@ -151,10 +226,12 @@ public sealed class VendorPurchaseManager : IDisposable
 
         var requestedQuantity = quantity == 0 ? 1u : quantity;
         VendorInteractionHelper.ResetShopSelectionState(vendor);
-        _request = new VendorPurchaseRequest(entry.ItemId, entry.ItemName, entry.Cost, entry.CurrencyItemId, entry.CurrencyName, entry.Group, requestedQuantity, vendor,
-            location, entry.ShopType);
+        _request = new VendorPurchaseRequest(entry.ItemId, entry.ItemName, entry.Cost, entry.CurrencyItemId, entry.CurrencyName, entry.Group,
+            entry.CurrencyCosts, entry.ReceivedQuantity, entry.ReceivedItems, requestedQuantity, vendor, location, entry.ShopType);
         _interactionAttempts = 0;
         _ownedCountBeforePurchase = CountItemOnCharacter(entry.ItemId);
+        _completedOutputQuantities.Clear();
+        CaptureOutputInventory();
         _completedQuantity = 0;
         _currentBatchQuantity = 0;
         _inclusionPageSelected = false;
@@ -223,7 +300,10 @@ public sealed class VendorPurchaseManager : IDisposable
             _completedQuantity,
             _request.Vendor,
             $"Cancelled purchase of {_request.ItemName} from {_request.Vendor.Name}.",
-            false);
+            false)
+        {
+            OutputQuantities = CompletedOutputs(),
+        };
         ResetState();
         PurchaseFinished?.Invoke(result);
     }
@@ -249,8 +329,9 @@ public sealed class VendorPurchaseManager : IDisposable
         if (_request == null || remainingQuantity == 0)
             return 0;
 
+        var transactionsNeeded = VendorOfferMath.GetPurchaseCount(remainingQuantity, _request.ReceivedQuantity);
         var requiresSinglePurchaseBatch = RequiresSinglePurchaseBatch(_request.ItemId);
-        return Math.Min(remainingQuantity, requiresSinglePurchaseBatch ? 1u : MaxPurchaseBatchSize);
+        return Math.Min(transactionsNeeded, requiresSinglePurchaseBatch ? 1u : MaxPurchaseBatchSize);
     }
 
     private bool TryPrepareBatchQuantity(uint remainingQuantity)
@@ -263,31 +344,73 @@ public sealed class VendorPurchaseManager : IDisposable
         if (desiredBatchQuantity == 0)
             return false;
 
-        if (_request.Cost == 0)
+        var affordableBatchQuantity = desiredBatchQuantity;
+        VendorCurrencyAvailability limitingAvailability = default;
+        VendorCurrencyCost limitingCost = default;
+        var hasLimitingCost = false;
+        var wasLimitedByScripReserve = false;
+        if (!VendorOfferMath.HasValidCurrencyCosts(_request.CurrencyCosts))
         {
-            _currentBatchQuantity = desiredBatchQuantity;
-            return true;
-        }
-
-        var availability = VendorCurrencyAvailabilityResolver.Resolve(_request.CurrencyGroup, _request.CurrencyItemId, _request.CurrencyName);
-        var reserveAmount = GetReservedScripAmount();
-        var spendableAmount = GetSpendableCurrencyAmount(availability.AvailableAmount, reserveAmount);
-        var maxByAvailableCurrency = availability.AvailableAmount / _request.Cost;
-        var maxBySpendableCurrency = spendableAmount / _request.Cost;
-        var wasLimitedByScripReserve = maxBySpendableCurrency < maxByAvailableCurrency;
-        var affordableBatchQuantity = Math.Min(desiredBatchQuantity, maxBySpendableCurrency);
-        if (affordableBatchQuantity == 0)
-        {
-            HandleCurrencyExhaustion(availability, spendableAmount, reserveAmount, wasLimitedByScripReserve);
+            Fail($"Cannot purchase {_request.ItemName}: the vendor currency cost is unresolved.");
             return false;
         }
+        if (!VendorCurrencyAvailabilityResolver.TryCaptureAuthoritative(_request.CurrencyCosts,
+                out var currencySnapshot, out var currencyFailure))
+        {
+            Fail($"Cannot purchase {_request.ItemName}: {currencyFailure}");
+            return false;
+        }
+        _currencyBalancesBeforePurchase = currencySnapshot;
+        foreach (var cost in _request.CurrencyCosts
+                     .Where(cost => cost.CurrencyItemId != 0 && cost.Amount != 0)
+                     .GroupBy(cost => cost.CurrencyItemId)
+                     .Select(group => new VendorCurrencyCost(
+                         group.Key,
+                         checked((uint)group.Aggregate(
+                             0UL,
+                             (total, cost) => checked(total + (ulong)cost.Amount))),
+                         group.First().CurrencyName,
+                         group.First().Group)))
+        {
+            if (!currencySnapshot.Balances.TryGetValue(cost.CurrencyItemId, out var balance)
+                || !currencySnapshot.Sources.TryGetValue(cost.CurrencyItemId, out var source)
+                || !VendorCurrencyAvailabilityResolver.IsAuthoritativeSource(source))
+            {
+                Fail($"Cannot purchase {_request.ItemName}: {VendorCurrencyAvailabilityResolver.NonAuthoritativeBalanceReason}");
+                return false;
+            }
+            var availability = new VendorCurrencyAvailability(
+                cost.CurrencyItemId,
+                cost.CurrencyName,
+                checked((uint)Math.Max(0, balance)),
+                source);
+            var reserveAmount = GetReservedScripAmount(cost);
+            var spendableAmount = GetSpendableCurrencyAmount(availability.AvailableAmount, reserveAmount);
+            var maxByAvailableCurrency = availability.AvailableAmount / cost.Amount;
+            var maxBySpendableCurrency = spendableAmount / cost.Amount;
+            if (maxBySpendableCurrency < affordableBatchQuantity)
+            {
+                affordableBatchQuantity = maxBySpendableCurrency;
+                limitingAvailability = availability;
+                limitingCost = cost;
+                hasLimitingCost = true;
+                wasLimitedByScripReserve = maxBySpendableCurrency < maxByAvailableCurrency;
+            }
+        }
 
+        if (hasLimitingCost && affordableBatchQuantity == 0)
+        {
+            var reserveAmount = GetReservedScripAmount(limitingCost);
+            var spendableAmount = GetSpendableCurrencyAmount(limitingAvailability.AvailableAmount, reserveAmount);
+            HandleCurrencyExhaustion(limitingAvailability, limitingCost.Amount, spendableAmount, reserveAmount, wasLimitedByScripReserve);
+            return false;
+        }
 
         _currentBatchQuantity = affordableBatchQuantity;
         return true;
     }
 
-    private void HandleCurrencyExhaustion(VendorCurrencyAvailability availability, uint spendableAmount, uint reserveAmount,
+    private void HandleCurrencyExhaustion(VendorCurrencyAvailability availability, uint cost, uint spendableAmount, uint reserveAmount,
         bool wasLimitedByScripReserve)
     {
         if (_request == null)
@@ -296,11 +419,11 @@ public sealed class VendorPurchaseManager : IDisposable
         var remainingQuantity = GetRemainingQuantity();
         var message = wasLimitedByScripReserve
             ? _completedQuantity > 0
-                ? $"Purchased {_completedQuantity:N0}/{_request.Quantity:N0}x {_request.ItemName} from {_request.Vendor.Name}. Stopped to keep {reserveAmount:N0} {availability.CurrencyName} in reserve with {availability.AvailableAmount:N0} remaining and {spendableAmount:N0} spendable (cost {_request.Cost:N0} each)."
-                : $"Skipping {_request.ItemName} from {_request.Vendor.Name}. Keeping {reserveAmount:N0} {availability.CurrencyName} in reserve leaves {spendableAmount:N0} spendable, but {_request.Cost:N0} are needed for 1x."
+                ? $"Purchased {_completedQuantity:N0}/{_request.Quantity:N0}x {_request.ItemName} from {_request.Vendor.Name}. Stopped to keep {reserveAmount:N0} {availability.CurrencyName} in reserve with {availability.AvailableAmount:N0} remaining and {spendableAmount:N0} spendable (cost {cost:N0} per transaction)."
+                : $"Skipping {_request.ItemName} from {_request.Vendor.Name}. Keeping {reserveAmount:N0} {availability.CurrencyName} in reserve leaves {spendableAmount:N0} spendable, but {cost:N0} are needed for 1 transaction."
             : _completedQuantity > 0
-                ? $"Purchased {_completedQuantity:N0}/{_request.Quantity:N0}x {_request.ItemName} from {_request.Vendor.Name}. Could not afford the remaining {remainingQuantity:N0}x with {availability.AvailableAmount:N0} {availability.CurrencyName} remaining (cost {_request.Cost:N0} each)."
-                : $"Not enough {availability.CurrencyName} to buy {_request.ItemName} from {_request.Vendor.Name}. Need {_request.Cost:N0} for 1x and only {availability.AvailableAmount:N0} are available.";
+                ? $"Purchased {_completedQuantity:N0}/{_request.Quantity:N0}x {_request.ItemName} from {_request.Vendor.Name}. Could not afford the remaining {remainingQuantity:N0}x with {availability.AvailableAmount:N0} {availability.CurrencyName} remaining (cost {cost:N0} per transaction)."
+                : $"Not enough {availability.CurrencyName} to buy {_request.ItemName} from {_request.Vendor.Name}. Need {cost:N0} for 1 transaction and only {availability.AvailableAmount:N0} are available.";
 
         if (_completedQuantity > 0)
         {
@@ -317,8 +440,8 @@ public sealed class VendorPurchaseManager : IDisposable
         Fail(message);
     }
 
-    private uint GetReservedScripAmount()
-        => _request?.CurrencyGroup == VendorCurrencyGroup.Scrips && _purchaseConstraints is { HasReservedScripAmount: true }
+    private uint GetReservedScripAmount(VendorCurrencyCost cost)
+        => cost.Group == VendorCurrencyGroup.Scrips && _purchaseConstraints is { HasReservedScripAmount: true }
             ? _purchaseConstraints.ReservedScripAmount
             : 0u;
 
@@ -352,13 +475,54 @@ public sealed class VendorPurchaseManager : IDisposable
         if (_request == null || _currentBatchQuantity == 0)
             return false;
 
-        var currentCount = CountItemOnCharacter(_request.ItemId);
-        var batchIncrease = currentCount - _ownedCountBeforePurchase;
+        var outputDeltas = GetOutputInventoryDeltas();
+        var batchIncrease = outputDeltas.GetValueOrDefault(_request.ItemId);
         if (batchIncrease <= 0)
             return false;
 
+        if (!ValidateOutputInventory(_request.ReceivedItems, outputDeltas, _currentBatchQuantity, out var outputFailure))
+        {
+            _statusText = $"Waiting for the complete {_request.ItemName} vendor output: {outputFailure}";
+            if ((DateTime.UtcNow - _stateStartTime) > PurchaseTimeout)
+                Fail($"Vendor purchase for {_request.ItemName} did not produce every expected output: {outputFailure}");
+            return true;
+        }
+
+        if (!_currencyBalancesBeforePurchase.HasValue)
+        {
+            Fail($"Vendor purchase for {_request.ItemName} could not verify the exact currency delta: "
+                + VendorCurrencyAvailabilityResolver.NonAuthoritativeBalanceReason);
+            return true;
+        }
+
+        if (!VendorCurrencyAvailabilityResolver.TryCaptureAuthoritative(
+                _request.CurrencyCosts,
+                out var currencyAfter,
+                out var currencyFailure))
+        {
+            Fail($"Vendor purchase for {_request.ItemName} could not verify the exact currency delta: {currencyFailure}");
+            return true;
+        }
+
+        if (!VendorCurrencyAvailabilityResolver.TryValidateExactSpend(
+                _request.CurrencyCosts,
+                _currentBatchQuantity,
+                _currencyBalancesBeforePurchase.Value,
+                currencyAfter,
+                out currencyFailure))
+        {
+            Fail($"Vendor purchase for {_request.ItemName} could not verify the exact currency delta: {currencyFailure}");
+            return true;
+        }
+
+        foreach (var output in outputDeltas)
+            _completedOutputQuantities[output.Key] = checked(
+                _completedOutputQuantities.GetValueOrDefault(output.Key) + output.Value);
+
         var purchasedThisBatch = (uint)batchIncrease;
-        purchasedThisBatch = Math.Min(purchasedThisBatch, Math.Min(_currentBatchQuantity, GetRemainingQuantity()));
+        // A transaction can return multiple copies. The inventory delta is the
+        // authoritative output; cap only at the requested output quantity.
+        purchasedThisBatch = Math.Min(purchasedThisBatch, GetRemainingQuantity());
         if (purchasedThisBatch == 0)
             return false;
 
@@ -373,6 +537,38 @@ public sealed class VendorPurchaseManager : IDisposable
         BeginNextBatch();
         return true;
     }
+
+    private void CaptureOutputInventory()
+    {
+        _ownedCountsBeforePurchase.Clear();
+        if (_request == null)
+            return;
+
+        foreach (var itemId in _request.ReceivedItems
+                     .Where(output => output.ItemId != 0 && output.Quantity != 0)
+                     .Select(output => output.ItemId)
+                     .Distinct())
+            _ownedCountsBeforePurchase[itemId] = CountItemOnCharacter(itemId);
+    }
+
+    private Dictionary<uint, int> GetOutputInventoryDeltas()
+    {
+        var deltas = new Dictionary<uint, int>();
+        if (_request == null)
+            return deltas;
+
+        foreach (var itemId in _ownedCountsBeforePurchase.Keys)
+        {
+            var delta = CountItemOnCharacter(itemId) - _ownedCountsBeforePurchase[itemId];
+            if (delta > 0)
+                deltas[itemId] = delta;
+        }
+
+        return deltas;
+    }
+
+    private IReadOnlyDictionary<uint, int> CompletedOutputs()
+        => new Dictionary<uint, int>(_completedOutputQuantities);
 
     private void UpdateWaitingForNavigation()
     {
@@ -542,7 +738,7 @@ public sealed class VendorPurchaseManager : IDisposable
         }
         if (!TryPrepareBatchQuantity(remainingQuantity))
             return;
-        _ownedCountBeforePurchase = CountItemOnCharacter(_request.ItemId);
+        CaptureOutputInventory();
         Callback.Fire(shop, true, 0, targetItem.Index, _currentBatchQuantity, 0);
 
         _state = State.ConfirmingPurchase;
@@ -706,7 +902,7 @@ public sealed class VendorPurchaseManager : IDisposable
         var remainingQuantity = GetRemainingQuantity();
         if (!TryPrepareBatchQuantity(remainingQuantity))
             return;
-        _ownedCountBeforePurchase = CountItemOnCharacter(_request.ItemId);
+        CaptureOutputInventory();
         if (!VendorInteractionHelper.TrySelectSpecialShopItem(_request.Vendor.ShopItemIndex, _request.ItemId, _currentBatchQuantity, out var itemError))
         {
             if (itemError != null)
@@ -795,7 +991,7 @@ public sealed class VendorPurchaseManager : IDisposable
         var remainingQuantity = GetRemainingQuantity();
         if (!TryPrepareBatchQuantity(remainingQuantity))
             return;
-        _ownedCountBeforePurchase = CountItemOnCharacter(_request.ItemId);
+        CaptureOutputInventory();
         if (!VendorInteractionHelper.TrySelectInclusionShopItem(_request.Vendor.ShopItemIndex, _request.ItemId, _currentBatchQuantity, out var itemError))
         {
             if (itemError != null)
@@ -883,14 +1079,13 @@ public sealed class VendorPurchaseManager : IDisposable
             }
         }
 
-        var currentGrandCompanyId = GetCurrentGrandCompanyId();
-        if (currentGrandCompanyId == 0)
+        if (!VendorShopResolver.TryGetCurrentGrandCompanyId(out var currentGrandCompanyId))
         {
             Fail("Could not determine the current Grand Company for the requested shop.");
             return;
         }
 
-        var currentSealCurrencyItemId = GetGrandCompanySealCurrencyItemId(currentGrandCompanyId);
+        var currentSealCurrencyItemId = VendorShopResolver.GetSealCurrencyItemIdForGameGrandCompany(currentGrandCompanyId);
         if (_request.CurrencyItemId != 0 && currentSealCurrencyItemId != 0 && _request.CurrencyItemId != currentSealCurrencyItemId)
         {
             Fail($"{_request.ItemName} is not sold by the current Grand Company.");
@@ -900,7 +1095,7 @@ public sealed class VendorPurchaseManager : IDisposable
         if (!TryPrepareBatchQuantity(remainingQuantity))
             return;
 
-        _ownedCountBeforePurchase = CountItemOnCharacter(_request.ItemId);
+        CaptureOutputInventory();
         if (!VendorInteractionHelper.TrySelectGrandCompanyItem(_request.ItemId, _currentBatchQuantity, GetCurrentGrandCompanyRank(currentGrandCompanyId),
                 out var selectedQuantity, out var opensCurrencyExchange, out var itemError))
         {
@@ -1013,7 +1208,10 @@ public sealed class VendorPurchaseManager : IDisposable
             _completedQuantity,
             _request.Vendor,
             message,
-            false);
+            false)
+        {
+            OutputQuantities = CompletedOutputs(),
+        };
         ResetState();
         PurchaseFinished?.Invoke(result);
     }
@@ -1040,7 +1238,10 @@ public sealed class VendorPurchaseManager : IDisposable
             _completedQuantity,
             _request.Vendor,
             message,
-            wasLimitedByScripReserve);
+            wasLimitedByScripReserve)
+        {
+            OutputQuantities = CompletedOutputs(),
+        };
         ResetState();
         PurchaseFinished?.Invoke(result);
     }
@@ -1059,7 +1260,10 @@ public sealed class VendorPurchaseManager : IDisposable
             _completedQuantity,
             _request.Vendor,
             message,
-            wasLimitedByScripReserve);
+            wasLimitedByScripReserve)
+        {
+            OutputQuantities = CompletedOutputs(),
+        };
         ResetState();
         PurchaseFinished?.Invoke(result);
     }
@@ -1079,7 +1283,10 @@ public sealed class VendorPurchaseManager : IDisposable
             _completedQuantity,
             _request.Vendor,
             message,
-            false);
+            false)
+        {
+            OutputQuantities = CompletedOutputs(),
+        };
         ResetState();
         PurchaseFinished?.Invoke(result);
     }
@@ -1097,6 +1304,9 @@ public sealed class VendorPurchaseManager : IDisposable
         _lastActionTime = DateTime.MinValue;
         _interactionAttempts = 0;
         _ownedCountBeforePurchase = 0;
+        _ownedCountsBeforePurchase.Clear();
+        _completedOutputQuantities.Clear();
+        _currencyBalancesBeforePurchase = null;
         _completedQuantity = 0;
         _currentBatchQuantity = 0;
         _inclusionPageSelected = false;
@@ -1125,31 +1335,13 @@ public sealed class VendorPurchaseManager : IDisposable
             _                              => "shop",
         };
 
-    private static unsafe byte GetCurrentGrandCompanyId()
-    {
-        var playerState = PlayerState.Instance();
-        return playerState == null ? (byte)0 : playerState->GrandCompany;
-    }
-
     private static unsafe uint GetCurrentGrandCompanyRank(byte grandCompanyId)
     {
-        if (grandCompanyId == 0)
-            return 0;
-
         var playerState = PlayerState.Instance();
         return playerState == null || playerState->GrandCompany != grandCompanyId
             ? 0u
             : playerState->GetGrandCompanyRank();
     }
-
-    private static uint GetGrandCompanySealCurrencyItemId(uint grandCompanyId)
-        => grandCompanyId switch
-        {
-            1 => 20u,
-            2 => 21u,
-            3 => 22u,
-            _ => 0u,
-        };
 
     private static int CountItemOnCharacter(uint itemId)
         => ItemHelper.GetInventoryAndArmoryItemCount(itemId);

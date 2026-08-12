@@ -14,8 +14,13 @@ using ElliLib;
 using ElliLib.Widgets;
 using ImRaii = ElliLib.Raii.ImRaii;
 using GatherBuddy.Crafting;
+using GatherBuddy.Crafting.Acquisition;
 using GatherBuddy.Plugin;
+using GatherBuddy.Marketboard;
 using GatherBuddy.Vulcan;
+using GatherBuddy.Vulcan.Vendors;
+using SearchTextNormalizer = GatherBuddy.Utility.SearchTextNormalizer;
+using FuzzySearch = GatherBuddy.Utility.FuzzySearch;
 
 namespace GatherBuddy.Gui;
 
@@ -43,6 +48,9 @@ public class CraftingListEditor
     private int _searchQuantity = 1;
     private Recipe? _selectedRecipe = null;
     private Dictionary<uint, string> _recipeLabels = new();
+    private Dictionary<uint, string> _recipeSearchLabels = new();
+    private string _cachedFuzzyFilter = string.Empty;
+    private List<Recipe> _cachedFuzzyRecipes = new();
     private bool _showMaterials = true;
     private ClippedSelectableCombo<Recipe>? _recipeCombo = null;
     private List<Recipe> _allRecipes = new();
@@ -79,6 +87,10 @@ public class CraftingListEditor
     private string _watchedInventoryHash = string.Empty;
     private bool _pendingQueueRefreshFromInventory;
     private bool _pendingMaterialsRefreshFromInventory;
+    private AcquisitionPlanningResult? _acquisitionPlanningResult;
+    private MarketplaceBuyListDefinition? _managedMarketplaceProjection;
+    private DateTime _lastAcquisitionRefresh = DateTime.MinValue;
+    private string _acquisitionStatus = string.Empty;
     private const double InventoryRefreshIntervalSeconds = 0.5;
     private const double RetainerSnapshotRetryIntervalSeconds = 1.0;
     private const double InventoryChangeDebounceSeconds = 0.2;
@@ -252,7 +264,13 @@ public class CraftingListEditor
         TriggerMaterialsRegeneration();
         if (!_editingDescActive)
             _editingDescription = _list.Description;
+        _acquisitionPlanningResult = null;
+        _managedMarketplaceProjection = null;
+        _acquisitionStatus = string.Empty;
     }
+
+    internal void PublishAcquisitionPlanningResult(AcquisitionPlanningResult result)
+        => _acquisitionPlanningResult = result;
 
     private void HandleEditorSettingsSaved()
     {
@@ -283,6 +301,7 @@ public class CraftingListEditor
     public void Draw()
     {
         ProcessPendingInventoryChanges();
+        RefreshAcquisitionEstimate();
         RefreshRaphaelAssessmentCaches();
         var availableWidth = ImGui.GetContentRegionAvail().X;
         var availableHeight = ImGui.GetContentRegionAvail().Y;
@@ -511,7 +530,7 @@ public class CraftingListEditor
             if (itemId > 0)
                 _watchedInventoryItemIds.Add(itemId);
 
-            var subRecipe = RecipeManager.GetRecipeForItem(itemId);
+            var subRecipe = GetPlanningList().ResolveRecipeForItem(itemId);
             if (subRecipe.HasValue)
                 CollectWatchedInventoryItems(subRecipe.Value, false, visitedRecipes);
         }
@@ -543,7 +562,8 @@ public class CraftingListEditor
         var lineH   = ImGui.GetTextLineHeightWithSpacing();
         var spacing = ImGui.GetStyle().ItemSpacing.Y;
         var frameH  = ImGui.GetFrameHeightWithSpacing();
-        var footerRows = 7 + (_list.QuickSynthAll ? 2 : 0) + (_list.SkipIfEnough ? 1 : 0);
+        var footerRows = 12 + (_list.QuickSynthAll ? 2 : 0) + (_list.SkipIfEnough ? 1 : 0)
+            + (_list.AutoPurchaseBlockedDependencies ? 8 : 0);
         var bottomH = frameH * footerRows + spacing * 2;
         var queueH  = Math.Max(ImGui.GetContentRegionAvail().Y - bottomH, lineH * 3);
 
@@ -583,6 +603,20 @@ public class CraftingListEditor
         ImGui.Spacing();
 
         ImGui.Checkbox("Show Precrafts##sp", ref _showPrecrafts);
+
+        var preferBestClass = _list.PreferBestClassForMultiRecipeItems;
+        if (ImGui.Checkbox("Always prefer best class for items with multiple recipes##bestclass", ref preferBestClass))
+        {
+            _list.PreferBestClassForMultiRecipeItems = preferBestClass;
+            GatherBuddy.CraftingListManager.SaveList(_list);
+            InvalidateQueueCache();
+            InvalidateMaterialCaches();
+            InvalidatePresentationCaches();
+            TriggerQueueRegeneration();
+            TriggerMaterialsRegeneration();
+        }
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("Overrides the recipe selected for an item when multiple crafting classes can produce it. Chooses the highest-level eligible class, then the saved gearset with the highest combined Craftsmanship and Control, then CP. Disabled by default.");
 
         var skipIfEnough = _list.SkipIfEnough;
         if (ImGui.Checkbox("Skip if Already Have Enough##sie", ref skipIfEnough))
@@ -682,6 +716,100 @@ public class CraftingListEditor
                 ? "Withdraw needed materials from retainers before generating the gather list. Respects HQ/NQ preferences."
                 : "Requires Allagan Tools to be installed and enabled.");
 
+        var returnHomeWorld = _list.ReturnToHomeWorldBeforeCrafting;
+        if (ImGui.Checkbox("Return to Home World before Crafting##returnHomeWorld", ref returnHomeWorld))
+        {
+            _list.ReturnToHomeWorldBeforeCrafting = returnHomeWorld;
+            SaveAcquisitionSettings();
+        }
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("After gathering and purchasing, return to the character's Home World before crafting.");
+
+        var autoPurchase = _list.AutoPurchaseBlockedDependencies;
+        if (ImGui.Checkbox("Purchase uncraftable/ungatherable dependencies automatically##autoPurchaseDependencies", ref autoPurchase))
+        {
+            _list.AutoPurchaseBlockedDependencies = autoPurchase;
+            SaveAcquisitionSettings();
+            if (!autoPurchase)
+                _acquisitionPlanningResult = null;
+        }
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("Purchase only missing precraft dependencies whose selected craft/gather path is unusable. Final list outputs are never purchased.");
+
+        if (_list.AutoPurchaseBlockedDependencies)
+        {
+            ImGui.Indent();
+
+            var preferMarketForSpecialCurrency = _list.PreferMarketForSpecialCurrency;
+            if (ImGui.Checkbox("Prefer market for special-currency purchases##acqPreferMarketCurrency", ref preferMarketForSpecialCurrency))
+            {
+                _list.PreferMarketForSpecialCurrency = preferMarketForSpecialCurrency;
+                SaveAcquisitionSettings();
+            }
+
+            var preferHq = _list.PreferHQ;
+            if (ImGui.Checkbox("Prefer HQ##acqPreferHq", ref preferHq))
+            {
+                _list.PreferHQ = preferHq;
+                SaveAcquisitionSettings();
+            }
+
+            var preferVendors = _list.PreferVendors;
+            if (ImGui.Checkbox("Prefer vendors##acqPreferVendors", ref preferVendors))
+            {
+                _list.PreferVendors = preferVendors;
+                SaveAcquisitionSettings();
+            }
+
+            var currentWorldOnly = _list.CurrentWorldOnly;
+            if (ImGui.Checkbox("Current world only##acqCurrentWorldOnly", ref currentWorldOnly))
+            {
+                _list.CurrentWorldOnly = currentWorldOnly;
+                SaveAcquisitionSettings();
+            }
+
+            if (ImGui.TreeNode("Estimates##acquisitionEstimates"))
+            {
+                DrawAcquisitionEstimates();
+                ImGui.TreePop();
+            }
+
+            var hasMaximumGilSpend = _list.MaximumGilSpend.HasValue;
+            var automaticEstimate = _acquisitionPlanningResult?.PreferredEstimate?.TotalGil
+                ?? _acquisitionPlanningResult?.MinimumGilEstimate?.TotalGil
+                ?? 0;
+            var minimumEstimate = _acquisitionPlanningResult?.MinimumGilEstimate?.TotalGil ?? 0;
+            if (ImGui.Checkbox("Set maximum Gil spend##acqSetMaxGil", ref hasMaximumGilSpend))
+            {
+                _list.MaximumGilSpend = hasMaximumGilSpend
+                    ? Math.Max(minimumEstimate, automaticEstimate)
+                    : null;
+                SaveAcquisitionSettings();
+            }
+
+            if (hasMaximumGilSpend)
+            {
+                var maximumGilSpend = (int)Math.Clamp(_list.MaximumGilSpend ?? Math.Max(minimumEstimate, automaticEstimate), 0, int.MaxValue);
+                var clampedMinimum = (int)Math.Clamp(minimumEstimate, 0, int.MaxValue);
+                if (minimumEstimate > 0 && maximumGilSpend < clampedMinimum)
+                {
+                    maximumGilSpend = clampedMinimum;
+                    _list.MaximumGilSpend = minimumEstimate;
+                    SaveAcquisitionSettings();
+                }
+                ImGui.SetNextItemWidth(VulcanUiScaling.Scaled(180f));
+                if (ImGui.InputInt("Maximum Gil##acqMaximumGil", ref maximumGilSpend))
+                {
+                    _list.MaximumGilSpend = Math.Max(minimumEstimate, maximumGilSpend);
+                    SaveAcquisitionSettings();
+                }
+                if (minimumEstimate > 0)
+                    ImGui.TextColored(ImGuiColors.DalamudGrey3, $"Minimum estimate: {minimumEstimate:N0} Gil");
+            }
+
+            ImGui.Unindent();
+        }
+
 
         ImGui.Spacing();
 
@@ -705,6 +833,9 @@ public class CraftingListEditor
                 else
                     OnStartCrafting?.Invoke(_list);
             }
+
+            if (!string.IsNullOrWhiteSpace(_acquisitionStatus))
+                ImGui.TextColored(ImGuiColors.DalamudOrange, $"Preview: {_acquisitionStatus}");
 
             if (hardFails > 0 || warnings > 0)
             {
@@ -752,6 +883,142 @@ public class CraftingListEditor
         }
 
         ImGui.EndChild();
+    }
+
+    private void SaveAcquisitionSettings()
+        => GatherBuddy.CraftingListManager.SaveList(_list);
+
+    private void RefreshAcquisitionEstimate()
+    {
+        if (!_list.AutoPurchaseBlockedDependencies)
+        {
+            _acquisitionPlanningResult = null;
+            _managedMarketplaceProjection = null;
+            _acquisitionStatus = string.Empty;
+            return;
+        }
+
+        if ((DateTime.UtcNow - _lastAcquisitionRefresh).TotalSeconds < 1)
+            return;
+        _lastAcquisitionRefresh = DateTime.UtcNow;
+
+        try
+        {
+            var evaluation = CraftingAcquisitionService.Evaluate(CraftingExecutionPlan.Create(_list));
+            _acquisitionStatus = evaluation.Status;
+            _acquisitionPlanningResult = evaluation.Planning;
+            _managedMarketplaceProjection = evaluation.Planning == null
+                ? null
+                : GatherBuddy.MarketplaceBuyListManager?.CreateManagedList(
+                    evaluation.Planning,
+                    new LiveAcquisitionOptions
+                    {
+                        CurrentWorldOnly = _list.CurrentWorldOnly,
+                        PreferHQ = _list.PreferHQ,
+                        PreferVendors = _list.PreferVendors,
+                        PreferMarketForSpecialCurrency = _list.PreferMarketForSpecialCurrency,
+                        MaximumGilSpend = _list.MaximumGilSpend,
+                    });
+        }
+        catch (Exception ex)
+        {
+            _acquisitionStatus = $"Acquisition estimate unavailable: {ex.Message}";
+            _acquisitionPlanningResult = null;
+            _managedMarketplaceProjection = null;
+            GatherBuddy.Log.Warning($"[CraftingListEditor] Acquisition estimate failed: {ex.Message}");
+        }
+    }
+
+    private void DrawAcquisitionEstimates()
+    {
+        var result = _acquisitionPlanningResult;
+        if (result == null)
+        {
+            ImGui.TextColored(ImGuiColors.DalamudGrey3, "Waiting for dependency and market estimates.");
+            return;
+        }
+
+        if (result.Blockers.Count > 0)
+        {
+            ImGui.TextColored(ImGuiColors.DalamudRed, result.Status switch
+            {
+                AcquisitionPlanStatus.BudgetExceeded => "No source plan fits the maximum Gil spend.",
+                AcquisitionPlanStatus.InsufficientCurrency => "No source plan fits current currency balances.",
+                AcquisitionPlanStatus.UnknownCurrencyBalance => "A required currency balance is unknown; no purchase was attempted.",
+                AcquisitionPlanStatus.UnknownCurrentWorld => "Current world is unknown; current-world-only purchasing is unavailable.",
+                AcquisitionPlanStatus.DeterministicLimitExceeded => "Estimate search exceeded its safe exact-search limit.",
+                _ => "Some dependencies cannot be purchased automatically.",
+            });
+            foreach (var blocker in result.Blockers)
+            {
+                var itemLabel = string.IsNullOrWhiteSpace(blocker.ItemName)
+                    ? $"Item {blocker.ItemId}"
+                    : blocker.ItemName;
+                ImGui.TextWrapped($"{itemLabel}: {blocker.Reason}");
+            }
+            return;
+        }
+
+        if (result.PreferredEstimate != null)
+        {
+            var maximum = _list.MaximumGilSpend;
+            var exceedsMaximum = maximum.HasValue && result.PreferredEstimate.TotalGil > maximum.Value;
+            ImGui.TextColored(
+                exceedsMaximum ? ImGuiColors.DalamudOrange : ImGuiColors.DalamudYellow,
+                exceedsMaximum
+                    ? $"Preferred estimate: {result.PreferredEstimate.TotalGil:N0} Gil (over max {maximum.Value:N0}; fallback will relax preferences)"
+                    : $"Preferred estimate: {result.PreferredEstimate.TotalGil:N0} Gil");
+        }
+        if (result.MinimumGilEstimate != null)
+            ImGui.TextColored(ImGuiColors.DalamudGrey3, $"Minimum-Gil estimate: {result.MinimumGilEstimate.TotalGil:N0} Gil");
+
+        var estimate = result.PreferredEstimate ?? result.MinimumGilEstimate;
+        if (estimate == null || estimate.Currencies.Count == 0)
+        {
+            DrawManagedMarketplaceProjection();
+            return;
+        }
+
+        foreach (var currency in estimate.Currencies)
+        {
+            var name = string.IsNullOrWhiteSpace(currency.CurrencyName)
+                ? $"Currency {currency.CurrencyId}"
+                : currency.CurrencyName;
+            var iconId = currency.IconId;
+            if (iconId == 0 && currency.CurrencyId == AcquisitionCurrency.GilId)
+                iconId = ResolveGilIconId();
+            if (iconId != 0)
+            {
+                CraftingRowIcons.DrawIconsRightAligned(new[]
+                {
+                    new CraftingRowIcons.RowIcon(iconId, name),
+                });
+                ImGui.SameLine();
+            }
+            ImGui.Text($"{name}: {currency.Required:N0}/{(currency.Available == long.MaxValue ? "?" : currency.Available.ToString("N0"))}");
+        }
+
+        DrawManagedMarketplaceProjection();
+    }
+
+    private void DrawManagedMarketplaceProjection()
+    {
+        var projection = _managedMarketplaceProjection;
+        if (projection == null || projection.Entries.Count == 0)
+            return;
+
+        ImGui.Separator();
+        ImGui.TextColored(ImGuiColors.DalamudGrey3, "Managed marketplace targets (read-only)");
+        foreach (var entry in projection.Entries)
+            ImGui.Text($"{entry.ItemName}: {entry.TargetQuantity:N0}");
+    }
+
+    private static uint ResolveGilIconId()
+    {
+        var itemSheet = Dalamud.GameData.GetExcelSheet<Item>();
+        return itemSheet != null && itemSheet.TryGetRow(VendorShopResolver.GilCurrencyItemId, out var item)
+            ? (uint)item.Icon
+            : 0;
     }
     
     private void DrawDetailsPane()
@@ -980,7 +1247,8 @@ public class CraftingListEditor
             ImGui.InputTextWithHint("##filterRecipes", "Type to filter...", ref _lastComboFilter, 256);
 
             var filterKeywords = _lastComboFilter.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries)
-                .Select(k => k.ToLowerInvariant())
+                .Select(SearchTextNormalizer.Normalize)
+                .Where(keyword => keyword.Length > 0)
                 .ToArray();
 
             var displayRecipes = _allRecipes;
@@ -988,9 +1256,27 @@ public class CraftingListEditor
             {
                 displayRecipes = _allRecipes.Where(r =>
                 {
-                    var label = _recipeLabels[r.RowId].ToLowerInvariant();
+                    var label = _recipeSearchLabels[r.RowId];
                     return filterKeywords.All(keyword => label.Contains(keyword));
                 }).ToList();
+
+                if (displayRecipes.Count == 0)
+                {
+                    var fuzzyFilter = string.Join('\0', filterKeywords);
+                    if (_cachedFuzzyFilter != fuzzyFilter)
+                    {
+                        _cachedFuzzyFilter = fuzzyFilter;
+                        _cachedFuzzyRecipes = _allRecipes
+                            .Select(recipe => (Recipe: recipe, Score: FuzzySearch.Score(_recipeSearchLabels[recipe.RowId], filterKeywords)))
+                            .Where(match => match.Score.HasValue)
+                            .OrderBy(match => match.Score)
+                            .ThenBy(match => _recipeLabels[match.Recipe.RowId], StringComparer.CurrentCultureIgnoreCase)
+                            .Take(20)
+                            .Select(match => match.Recipe)
+                            .ToList();
+                    }
+                    displayRecipes = _cachedFuzzyRecipes;
+                }
             }
 
             var height = ImGui.GetTextLineHeightWithSpacing();
@@ -1028,6 +1314,7 @@ public class CraftingListEditor
                 {
                     var jobName = GetCraftingJobName(recipe.CraftType.RowId);
                     _recipeLabels[recipe.RowId] = $"{recipeNameOriginal} ({jobName} {recipe.RecipeLevelTable.Value.ClassJobLevel})";
+                    _recipeSearchLabels[recipe.RowId] = SearchTextNormalizer.Normalize(_recipeLabels[recipe.RowId]);
                 }
 
                 _allRecipes.Add(recipe);
@@ -1643,6 +1930,7 @@ public class CraftingListEditor
         hashParts.Add($"SkipIfEnough:{planningList.SkipIfEnough}");
         hashParts.Add($"SkipFinalIfEnough:{planningList.SkipFinalIfEnough}");
         hashParts.Add($"RetainerRestock:{planningList.RetainerRestock}");
+        hashParts.Add($"PreferBestClass:{planningList.PreferBestClassForMultiRecipeItems}");
         foreach (var item in planningList.Recipes)
         {
             hashParts.Add($"{item.RecipeId}:{item.Quantity}:{item.Options.Skipping}");
@@ -1720,15 +2008,20 @@ public class CraftingListEditor
         var itemSheet = Dalamud.GameData.GetExcelSheet<Item>();
         var craftPanelMaterials = new Dictionary<uint, int>();
 
-        foreach (var (itemId, quantity) in plan.Precrafts)
+        foreach (var recipeItem in plan.Recipes.Where(item => !item.IsOriginalRecipe))
         {
+            var recipe = RecipeManager.GetRecipe(recipeItem.RecipeId);
+            if (!recipe.HasValue)
+                continue;
+            var itemId = recipe.Value.ItemResult.RowId;
+            var quantity = recipeItem.Quantity * (int)recipe.Value.AmountResult;
             if (quantity <= 0)
                 continue;
 
             if (itemSheet != null && itemSheet.TryGetRow(itemId, out var item) && IsEquippableCraftPanelItem(item))
                 continue;
 
-            craftPanelMaterials[itemId] = quantity;
+            craftPanelMaterials[itemId] = craftPanelMaterials.GetValueOrDefault(itemId) + quantity;
         }
 
         foreach (var originalRecipe in finalSourceRecipes ?? plan.OriginalRecipes)
@@ -2003,7 +2296,7 @@ public class CraftingListEditor
         return nqCount + hqCount;
     }
 
-    internal unsafe (int NQ, int HQ) GetInventorySplitCounts(uint itemId)
+    internal (int NQ, int HQ) GetInventorySplitCounts(uint itemId)
     {
         var now = DateTime.Now;
         
@@ -2016,13 +2309,7 @@ public class CraftingListEditor
         
         try
         {
-            var inventory = FFXIVClientStructs.FFXIV.Client.Game.InventoryManager.Instance();
-            if (inventory == null)
-                return (0, 0);
-            
-            var counts = (
-                (int)inventory->GetInventoryItemCount(itemId, false, false, false),
-                (int)inventory->GetInventoryItemCount(itemId, true, false, false));
+            var counts = CraftingInventoryCounter.GetInventorySplitCounts(itemId);
             _cachedInventorySplitCounts[itemId] = counts;
             _inventoryRefreshTimes[itemId] = now;
             return counts;
@@ -2147,15 +2434,15 @@ public class CraftingListEditor
         var ingredients = RecipeManager.GetIngredients(recipe.Value);
         foreach (var (itemId, _) in ingredients)
         {
-            var depRecipe = RecipeManager.GetRecipeForItem(itemId);
-            if (depRecipe.HasValue)
+            var depItem = allRecipes.FirstOrDefault(candidate =>
             {
-                var depItem = allRecipes.FirstOrDefault(r => r.RecipeId == depRecipe.Value.RowId && !r.IsOriginalRecipe);
-                if (depItem != null)
-                {
-                    ProcessPrecraftWithDependencies(depItem, allRecipes, processed, result);
-                }
-            }
+                if (candidate.IsOriginalRecipe)
+                    return false;
+                var candidateRecipe = RecipeManager.GetRecipe(candidate.RecipeId);
+                return candidateRecipe.HasValue && candidateRecipe.Value.ItemResult.RowId == itemId;
+            });
+            if (depItem != null)
+                ProcessPrecraftWithDependencies(depItem, allRecipes, processed, result);
         }
         
         processed.Add(recipeItem.RecipeId);

@@ -78,6 +78,8 @@ public class RaphaelSolveCoordinatorConfig
     public int RaphaelTimeoutMinutes { get; set; } = 5;
     public bool RaphaelBackloadProgress { get; set; } = false;
     public bool RaphaelAllowSpecialistActions { get; set; } = false;
+    public bool DonatelloMinimizeSteps { get; set; } = false;
+    public int DonatelloCacheMemoryMiB { get; set; } = 512;
     public bool AutoClearSolutionCache { get; set; } = true;
     public int SolutionCacheMaxAgeDays { get; set; } = 30;
     public VulcanSolverMode SolverMode { get; set; } = VulcanSolverMode.Donatello;

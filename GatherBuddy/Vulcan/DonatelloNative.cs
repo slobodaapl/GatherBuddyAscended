@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
@@ -10,7 +11,7 @@ namespace GatherBuddy.Vulcan;
 internal static class DonatelloNative
 {
     private const string LibraryName = "donatello_ffi.dll";
-    private const uint AbiVersion = 2;
+    private const uint AbiVersion = 3;
     private static readonly JsonSerializerOptions RequestSerializerOptions = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
@@ -37,6 +38,12 @@ internal static class DonatelloNative
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
     private static extern void donatello_string_free(IntPtr value);
 
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    private static extern void donatello_cache_set_budget_bytes(nuint bytes);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    private static extern void donatello_cache_clear();
+
     private sealed class NativeResponse
     {
         public bool Ok { get; set; }
@@ -46,6 +53,12 @@ internal static class DonatelloNative
 
     public static IntPtr CreateInterrupt()
         => donatello_interrupt_create();
+
+    public static void ConfigureCache(int memoryMiB)
+        => donatello_cache_set_budget_bytes((nuint)Math.Clamp(memoryMiB, 64, 1024) * 1024u * 1024u);
+
+    public static void ClearCache()
+        => donatello_cache_clear();
 
     public static void Interrupt(IntPtr interrupt)
     {
@@ -62,26 +75,31 @@ internal static class DonatelloNative
     public static unsafe IReadOnlyList<VulcanSkill> Solve(
         CraftState craft,
         StepState root,
-        IntPtr interrupt = default)
+        IntPtr interrupt = default,
+        IReadOnlyList<VulcanSkill>? incumbent = null)
         => Solve(
             craft,
             root,
             GatherBuddy.Config.RaphaelSolverConfig.RaphaelAllowSpecialistActions,
             GatherBuddy.Config.RaphaelSolverConfig.RaphaelBackloadProgress,
-            interrupt);
+            interrupt,
+            incumbent);
 
     internal static unsafe IReadOnlyList<VulcanSkill> Solve(
         CraftState craft,
         StepState root,
         bool allowSpecialistActions,
         bool backloadProgress,
-        IntPtr interrupt = default)
+        IntPtr interrupt = default,
+        IReadOnlyList<VulcanSkill>? incumbent = null)
     {
         if (donatello_abi_version() != AbiVersion)
             throw new InvalidOperationException("Unsupported Donatello native ABI version");
 
+        ConfigureCache(GatherBuddy.Config.RaphaelSolverConfig.DonatelloCacheMemoryMiB);
+
         var bytes = Encoding.UTF8.GetBytes(SerializeRequest(
-            craft, root, allowSpecialistActions, backloadProgress));
+            craft, root, allowSpecialistActions, backloadProgress, incumbent));
         IntPtr nativeResponse;
         fixed (byte* data = bytes)
             nativeResponse = interrupt == IntPtr.Zero
@@ -109,7 +127,8 @@ internal static class DonatelloNative
         CraftState craft,
         StepState root,
         bool allowSpecialistActions,
-        bool backloadProgress)
+        bool backloadProgress,
+        IReadOnlyList<VulcanSkill>? incumbent = null)
     {
         var request = new
         {
@@ -124,6 +143,8 @@ internal static class DonatelloNative
             Manipulation = craft.UnlockedManipulation,
             Specialist = craft.Specialist && allowSpecialistActions,
             BackloadProgress = backloadProgress,
+            MinimizeSteps = GatherBuddy.Config.RaphaelSolverConfig.DonatelloMinimizeSteps,
+            IncumbentActionIds = incumbent?.Select(action => (uint)action).ToArray() ?? [],
             Root = new
             {
                 Cp = root.RemainingCP,

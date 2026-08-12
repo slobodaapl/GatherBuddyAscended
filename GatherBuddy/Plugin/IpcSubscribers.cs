@@ -218,6 +218,8 @@ namespace GatherBuddy.Plugin
                 Debug.Assert(Abort != null);
                 Debug.Assert(AethernetTeleport != null);
                 Debug.Assert(ChangeCharacter != null);
+                Debug.Assert(CanVisitSameDC != null);
+                Debug.Assert(TPAndChangeWorld != null);
             }
 
         internal static bool Enabled
@@ -249,6 +251,12 @@ namespace GatherBuddy.Plugin
         
         [EzIPC("Lifestream.ChangeCharacter", applyPrefix: false)]
         internal static readonly Func<string, string, int> ChangeCharacter;
+
+        [EzIPC("Lifestream.CanVisitSameDC", applyPrefix: false)]
+        internal static readonly Func<string, bool>? CanVisitSameDC;
+
+        [EzIPC("Lifestream.TPAndChangeWorld", applyPrefix: false)]
+        internal static readonly Action<string, bool, string, bool, int?, bool?, bool?>? TPAndChangeWorld;
 
         internal static uint ActiveAetheryteId
             => GetActiveAetheryte?.Invoke() ?? 0;

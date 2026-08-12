@@ -27,13 +27,17 @@ namespace GatherBuddy.AutoGather.Lists
         private readonly AutoGather                              _autoGather;
         private readonly Dictionary<uint, int>                   _teleportationCosts = [];
         private readonly Dictionary<GatheringNode, TimeInterval> _visitedTimedNodes  = [];
+        private readonly HashSet<(uint ItemId, uint LocationId)> _permanentlyUnreachableLocations = [];
         private          TimeStamp                               _lastUpdateTime     = TimeStamp.MinValue;
+        private          TimeStamp                               _lastEndTime        = TimeStamp.MinValue;
         private          uint                                    _lastTerritoryId;
         private          int                                     _lastWeatherId;
         private          bool                                    _activeItemsChanged;
         private          bool                                    _consumedCloudedNode;
         private          bool                                    _forceUpdateUnconditionally;
         private          GatheringType                           _lastJob            = GatheringType.Unknown;
+        private          int                                     _lastTimedNodePrecog = -1;
+        private          int                                     _lastTimedNodeEarlyAbandonment = -1;
         private          GatherTarget                            _currentItem;
 
         internal ReadOnlyDictionary<GatheringNode, TimeInterval> DebugVisitedTimedLocations
@@ -53,6 +57,9 @@ namespace GatherBuddy.AutoGather.Lists
         /// True if there are items that need to be gathered; otherwise, false.
         /// </value>
         public bool HasItemsToGather
+            => _listsManager.ActiveItems.Any(NeedsGathering);
+
+        public bool HasReachableItemsToGather
             => _gatherableItems.Any(NeedsGathering);
 
         public bool IsCloudedNodeConsumed
@@ -89,7 +96,7 @@ namespace GatherBuddy.AutoGather.Lists
                 DoUpdate();
 
             return _currentItem = _gatherableItems
-                .FirstOrDefault(x => x.Time.InRange(_lastUpdateTime) && NeedsGathering(x));
+                .FirstOrDefault(x => IsAvailable(x.Time, _lastUpdateTime, _lastEndTime) && NeedsGathering(x));
         }
 
         /// <summary>
@@ -99,7 +106,7 @@ namespace GatherBuddy.AutoGather.Lists
         public GatherTarget PeekNextTimed()
         {
             return _gatherableItems
-                .FirstOrDefault(x => !x.Time.InRange(_lastUpdateTime) && x.Time != TimeInterval.Invalid);
+                .FirstOrDefault(x => !IsAvailable(x.Time, _lastUpdateTime, _lastEndTime) && x.Time != TimeInterval.Invalid);
         }
 
         /// <summary>
@@ -162,6 +169,9 @@ namespace GatherBuddy.AutoGather.Lists
 
         private readonly record struct FishWindowPriority(bool Applicable, long EffectiveDuration, TimeStamp WindowEnd, TimeStamp WindowStart);
 
+        private static bool IsAvailable(TimeInterval time, TimeStamp startTime, TimeStamp endTime)
+            => time.Start <= startTime && endTime < time.End;
+
         private sealed class FishWindowPriorityComparer : IComparer<FishWindowPriority>
         {
             public static readonly FishWindowPriorityComparer Instance = new();
@@ -183,24 +193,24 @@ namespace GatherBuddy.AutoGather.Lists
             }
         }
 
-        private static int GetAvailabilityPriority(GatherTarget target, TimeStamp now)
+        private static int GetAvailabilityPriority(GatherTarget target, TimeStamp startTime, TimeStamp endTime)
         {
             if (target.Time == TimeInterval.Invalid || target.Time == TimeInterval.Never)
                 return 3;
             if (target.Time == TimeInterval.Always)
                 return 1;
-            return target.Time.InRange(now) ? 0 : 2;
+            return IsAvailable(target.Time, startTime, endTime) ? 0 : 2;
         }
 
-        private static TimeStamp GetAvailabilityStart(GatherTarget target, TimeStamp now)
+        private static TimeStamp GetAvailabilityStart(GatherTarget target, TimeStamp startTime, TimeStamp endTime)
         {
             if (target.Time == TimeInterval.Invalid || target.Time == TimeInterval.Never)
                 return TimeStamp.MaxValue;
-            return target.Time.InRange(now) ? TimeStamp.MinValue : target.Time.Start;
+            return IsAvailable(target.Time, startTime, endTime) ? TimeStamp.MinValue : target.Time.Start;
         }
 
-        private static TimeStamp GetLegacyAvailabilityStart(GatherTarget target, TimeStamp now)
-            => target.Time.InRange(now) ? TimeStamp.MinValue : target.Time.Start;
+        private static TimeStamp GetLegacyAvailabilityStart(GatherTarget target, TimeStamp startTime, TimeStamp endTime)
+            => IsAvailable(target.Time, startTime, endTime) ? TimeStamp.MinValue : target.Time.Start;
 
         private static FishWindowPriority GetFishWindowPriority(GatherTarget target, TimeStamp now)
         {
@@ -211,26 +221,26 @@ namespace GatherBuddy.AutoGather.Lists
             return new FishWindowPriority(true, target.Time.End - effectiveStart, target.Time.End, target.Time.Start);
         }
 
-        private static string FormatFishTimingForDebug(in GatherTarget target, TimeStamp now)
+        private static string FormatFishTimingForDebug(in GatherTarget target, TimeStamp startTime, TimeStamp endTime)
         {
             if (target.Time == TimeInterval.Always)
                 return "always";
             if (target.Time == TimeInterval.Invalid || target.Time == TimeInterval.Never)
                 return "invalid";
 
-            var effectiveStart = target.Time.Start.Max(now);
+            var effectiveStart = target.Time.Start.Max(startTime);
             var window = TimeInterval.DurationString(effectiveStart, target.Time.End, true);
-            return target.Time.InRange(now)
+            return IsAvailable(target.Time, startTime, endTime)
                 ? $"active, remaining={window}"
-                : $"future, startsIn={TimeInterval.DurationString(target.Time.Start, now, true)}, window={window}";
+                : $"future, startsIn={TimeInterval.DurationString(target.Time.Start, startTime, true)}, window={window}";
         }
 
-        private void LogFishPriorityOrder(TimeStamp now)
+        private void LogFishPriorityOrder(TimeStamp startTime, TimeStamp endTime)
         {
             var prioritizedFish = _gatherableItems
                 .Where(x => x.Fish != null && x.Time != TimeInterval.Invalid && x.Time != TimeInterval.Never)
                 .Take(5)
-                .Select(x => $"{x.Item.Name[GatherBuddy.Language]} ({FormatFishTimingForDebug(x, now)})")
+                .Select(x => $"{x.Item.Name[GatherBuddy.Language]} ({FormatFishTimingForDebug(x, startTime, endTime)})")
                 .ToArray();
             if (prioritizedFish.Length == 0)
                 return;
@@ -238,29 +248,29 @@ namespace GatherBuddy.AutoGather.Lists
             GatherBuddy.Log.Debug($"[ActiveItemList] Fish priority order: {string.Join(" | ", prioritizedFish)}");
         }
 
-        private static int CompareLegacyTargetOrder(GatherTarget lhs, GatherTarget rhs, TimeStamp now)
+        private static int CompareLegacyTargetOrder(GatherTarget lhs, GatherTarget rhs, TimeStamp startTime, TimeStamp endTime)
         {
-            var timeComparison = GetLegacyAvailabilityStart(lhs, now).CompareTo(GetLegacyAvailabilityStart(rhs, now));
+            var timeComparison = GetLegacyAvailabilityStart(lhs, startTime, endTime).CompareTo(GetLegacyAvailabilityStart(rhs, startTime, endTime));
             if (timeComparison != 0)
                 return timeComparison;
 
             return (lhs.Time == TimeInterval.Always).CompareTo(rhs.Time == TimeInterval.Always);
         }
 
-        private static int CompareFishTargetOrder(GatherTarget lhs, GatherTarget rhs, TimeStamp now)
+        private static int CompareFishTargetOrder(GatherTarget lhs, GatherTarget rhs, TimeStamp startTime, TimeStamp endTime)
         {
-            var availabilityComparison = GetAvailabilityPriority(lhs, now).CompareTo(GetAvailabilityPriority(rhs, now));
+            var availabilityComparison = GetAvailabilityPriority(lhs, startTime, endTime).CompareTo(GetAvailabilityPriority(rhs, startTime, endTime));
             if (availabilityComparison != 0)
                 return availabilityComparison;
 
-            var windowComparison = FishWindowPriorityComparer.Instance.Compare(GetFishWindowPriority(lhs, now), GetFishWindowPriority(rhs, now));
+            var windowComparison = FishWindowPriorityComparer.Instance.Compare(GetFishWindowPriority(lhs, startTime), GetFishWindowPriority(rhs, startTime));
             if (windowComparison != 0)
                 return windowComparison;
 
-            return CompareLegacyTargetOrder(lhs, rhs, now);
+            return CompareLegacyTargetOrder(lhs, rhs, startTime, endTime);
         }
 
-        private static List<GatherTarget> ApplyFishPriorityOrdering(IEnumerable<GatherTarget> targets, TimeStamp now)
+        private static List<GatherTarget> ApplyFishPriorityOrdering(IEnumerable<GatherTarget> targets, TimeStamp startTime, TimeStamp endTime)
         {
             var orderedTargets = targets.ToList();
             var fishSlots = new List<int>(orderedTargets.Count);
@@ -277,7 +287,7 @@ namespace GatherBuddy.AutoGather.Lists
             if (fishTargets.Count < 2)
                 return orderedTargets;
 
-            fishTargets.Sort((lhs, rhs) => CompareFishTargetOrder(lhs, rhs, now));
+            fishTargets.Sort((lhs, rhs) => CompareFishTargetOrder(lhs, rhs, startTime, endTime));
             for (var i = 0; i < fishSlots.Count; ++i)
                 orderedTargets[fishSlots[i]] = fishTargets[i];
 
@@ -307,6 +317,16 @@ namespace GatherBuddy.AutoGather.Lists
             _forceUpdateUnconditionally = true;
         }
 
+        public void MarkPermanentlyUnreachable(GatherTarget target)
+        {
+            if (_permanentlyUnreachableLocations.Add((target.Item.ItemId, target.Location.Id)))
+            {
+                GatherBuddy.Log.Warning(
+                    $"[AutoGather] Marking {target.Item.Name[GatherBuddy.Language]} at {target.Location.Name} as unreachable for this run.");
+                _forceUpdateUnconditionally = true;
+            }
+        }
+
         /// <summary>
         /// Updates the list of items to gather based on the current territory and player levels.
         /// </summary>
@@ -316,6 +336,7 @@ namespace GatherBuddy.AutoGather.Lists
             var minerLevel = (DiscipleOfLand.MinerLevel + 5) / 5 * 5;
             var botanistLevel = (DiscipleOfLand.BotanistLevel + 5) / 5 * 5;
             var adjustedServerTime = _lastUpdateTime;
+            var adjustedEndTime = _lastEndTime;
             var territoryId = _lastTerritoryId;
             var weatherId = _lastWeatherId;
             DateTime? nextAllowance = null;
@@ -333,6 +354,8 @@ namespace GatherBuddy.AutoGather.Lists
                         FishingSpot spot => GatherBuddy.UptimeManager.NextUptime((x.Item as Fish)!, spot.Territory, adjustedServerTime),
                         _ => throw new InvalidOperationException()
                     }, x.Quantity, x.PreferredLocation)))
+                // Skip item/location pairs for which no usable route exists during this run.
+                .Where(x => !_permanentlyUnreachableLocations.Contains((x.Item.ItemId, x.Location.Id)))
                 // If treasure map, only gather if the allowance is up.
                 .Select(x => x.Item.IsTreasureMap && (nextAllowance ??= DiscipleOfLand.NextTreasureMapAllowance) > adjustedServerTime.DateTime ? x with { Time = TimeInterval.Invalid } : x)
                 // Remove nodes that require the player to be on the home world.
@@ -353,7 +376,7 @@ namespace GatherBuddy.AutoGather.Lists
                 // Group by item and select the best node.
                 .GroupBy(x => x.Item, x => x, (_, g) => g
                     // Prioritize active nodes
-                    .OrderBy(x => !x.Time.InRange(adjustedServerTime))
+                    .OrderBy(x => !IsAvailable(x.Time, adjustedServerTime, adjustedEndTime))
                     // Prioritize preferred location, then current job, then preferred job, then the rest.
                     .ThenBy(x =>
                         x.Location == x.PreferredLocation ? 0
@@ -386,7 +409,7 @@ namespace GatherBuddy.AutoGather.Lists
                 )
                 .Select(x => new GatherTarget(x.Item, x.Location, x.Time, x.Quantity))
                 // Put inactive timed nodes to the end, ordered by start time.
-                .OrderBy(x => x.Time.InRange(adjustedServerTime) ? TimeStamp.MinValue : x.Time.Start)
+                .OrderBy(x => IsAvailable(x.Time, adjustedServerTime, adjustedEndTime) ? TimeStamp.MinValue : x.Time.Start)
                 // Bring active timed nodes to the front.
                 .ThenBy(x => x.Time == TimeInterval.Always);
 
@@ -421,13 +444,13 @@ namespace GatherBuddy.AutoGather.Lists
                     .Select(x => (Target: x, Priority: GetDiademPriority(x, ref frontDiadem, ref frontUmbral)))
                     .OrderBy(x => x.Priority)
                     .Select(x => x.Target);
-                _gatherableItems.AddRange(ApplyFishPriorityOrdering(targetsDiadem, adjustedServerTime));
+                _gatherableItems.AddRange(ApplyFishPriorityOrdering(targetsDiadem, adjustedServerTime, adjustedEndTime));
             }
             else
             {
-                _gatherableItems.AddRange(ApplyFishPriorityOrdering(targets, adjustedServerTime));
+                _gatherableItems.AddRange(ApplyFishPriorityOrdering(targets, adjustedServerTime, adjustedEndTime));
             }
-            LogFishPriorityOrder(adjustedServerTime);
+            LogFishPriorityOrder(adjustedServerTime, adjustedEndTime);
 
             GatherBuddy.Log.Verbose($"Gatherable items: ({_gatherableItems.Count}): {string.Join(", ", _gatherableItems.Select(x => x.Item.Name))}.");
         }
@@ -627,7 +650,10 @@ namespace GatherBuddy.AutoGather.Lists
             
             if (_activeItemsChanged
                 || _forceUpdateUnconditionally
-                || _lastUpdateTime.TotalEorzeaHours() != AutoGather.AdjustedServerTime.TotalEorzeaHours()
+                || _lastUpdateTime.TotalEorzeaHours() != AutoGather.TimedNodeStartTime.TotalEorzeaHours()
+                || _lastEndTime.TotalEorzeaHours() != AutoGather.TimedNodeEndTime.TotalEorzeaHours()
+                || _lastTimedNodePrecog != GatherBuddy.Config.AutoGatherConfig.TimedNodePrecog
+                || _lastTimedNodeEarlyAbandonment != GatherBuddy.Config.AutoGatherConfig.TimedNodeEarlyAbandonment
                 || _lastTerritoryId != Dalamud.ClientState.TerritoryType
                 || Diadem.IsInside && _lastWeatherId != EnhancedCurrentWeather.GetCurrentWeatherId()
                 || _lastJob != currentJob)
@@ -643,7 +669,8 @@ namespace GatherBuddy.AutoGather.Lists
         {
             var territoryId        = Dalamud.ClientState.TerritoryType;
             var weatherId          = Diadem.IsInside ? EnhancedCurrentWeather.GetCurrentWeatherId() : 0;
-            var adjustedServerTime = AutoGather.AdjustedServerTime;
+            var adjustedServerTime = AutoGather.TimedNodeStartTime;
+            var adjustedEndTime    = AutoGather.TimedNodeEndTime;
             var eorzeaHour         = adjustedServerTime.TotalEorzeaHours();
             var lastTerritoryId    = _lastTerritoryId;
             var lastWeatherId      = _lastWeatherId;
@@ -659,6 +686,9 @@ namespace GatherBuddy.AutoGather.Lists
             _activeItemsChanged = false;
             _forceUpdateUnconditionally = false;
             _lastUpdateTime     = adjustedServerTime;
+            _lastEndTime        = adjustedEndTime;
+            _lastTimedNodePrecog = GatherBuddy.Config.AutoGatherConfig.TimedNodePrecog;
+            _lastTimedNodeEarlyAbandonment = GatherBuddy.Config.AutoGatherConfig.TimedNodeEarlyAbandonment;
             _lastTerritoryId    = territoryId;
             _lastWeatherId      = weatherId;
             _lastJob            = currentJob;
@@ -685,10 +715,14 @@ namespace GatherBuddy.AutoGather.Lists
             _lastTerritoryId = 0;
             _lastWeatherId = 0;
             _lastUpdateTime = TimeStamp.MinValue;
+            _lastEndTime = TimeStamp.MinValue;
+            _lastTimedNodePrecog = -1;
+            _lastTimedNodeEarlyAbandonment = -1;
             _gatherableItems.Clear();
             _gatherableItems.TrimExcess();
             _teleportationCosts.Clear();
             _teleportationCosts.TrimExcess();
+            _permanentlyUnreachableLocations.Clear();
         }
 
         private int GetDiademPriority(in GatherTarget target, ref bool frontDiadem, ref bool frontUmbral)

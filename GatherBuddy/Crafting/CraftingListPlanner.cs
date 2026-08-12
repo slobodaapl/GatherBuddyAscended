@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using FFXIVClientStructs.FFXIV.Client.Game;
 using GatherBuddy.Plugin;
 using Lumina.Excel.Sheets;
 
@@ -17,10 +16,42 @@ public sealed class CraftingListPlan
     public Dictionary<uint, int> RetainerConsumedCraftables { get; } = new();
 }
 
+/// <summary>
+/// Verified availability acquired for a blocked dependency during the current
+/// craft-list run. This is deliberately separate from ordinary inventory
+/// availability: a list that does not skip existing inventory must still
+/// consume only the items bought for its blocked dependencies.
+/// </summary>
+public readonly record struct AcquiredDependencyAvailability(int NQ, int HQ)
+{
+    public int Total
+        => Math.Max(0, NQ) + Math.Max(0, HQ);
+
+    public AcquiredDependencyAvailability Normalize()
+        => new(Math.Max(0, NQ), Math.Max(0, HQ));
+
+    public IngredientQualityDemand Consume(
+        IngredientQualityDemand demand,
+        out AcquiredDependencyAvailability remaining)
+    {
+        var normalized = Normalize();
+        var result = demand.ConsumeSplit(
+            normalized.NQ,
+            normalized.HQ,
+            out var consumedNQ,
+            out var consumedHQ);
+        remaining = new AcquiredDependencyAvailability(
+            normalized.NQ - consumedNQ,
+            normalized.HQ - consumedHQ);
+        return result;
+    }
+}
+
 public readonly record struct CraftingListPlannerOptions(
     bool UseRetainerCraftableAvailability = false,
     bool ConsumeIntermediateAvailability = true,
-    bool ConsumeFinalAvailability = true);
+    bool ConsumeFinalAvailability = true,
+    IReadOnlyDictionary<uint, AcquiredDependencyAvailability>? AcquiredAvailability = null);
 
 public static class CraftingListPlanner
 {
@@ -43,10 +74,10 @@ public static class CraftingListPlanner
             _useRetainers = options.UseRetainerCraftableAvailability;
             _consumeIntermediateAvailability = options.ConsumeIntermediateAvailability;
             _consumeFinalAvailability = options.ConsumeFinalAvailability;
-            _availability = new AvailabilityLedger(_useRetainers);
             _originalRecipeLookup = list.Recipes
                 .GroupBy(item => item.RecipeId)
                 .ToDictionary(group => group.Key, group => group.First());
+            _availability = new AvailabilityLedger(_useRetainers, options.AcquiredAvailability);
         }
 
         public CraftingListPlan Build()
@@ -95,7 +126,7 @@ public static class CraftingListPlanner
             {
                 foreach (var (itemId, _) in RecipeManager.GetIngredients(recipe.Value))
                 {
-                    var dependencyRecipe = RecipeManager.GetRecipeForItem(itemId);
+                    var dependencyRecipe = _list.ResolveRecipeForItem(itemId);
                     if (!dependencyRecipe.HasValue)
                         continue;
 
@@ -169,7 +200,11 @@ public static class CraftingListPlanner
         private void PlanPrecraftDemand(Recipe recipe, IngredientQualityDemand itemDemand)
         {
             var resultItemId = recipe.ItemResult.RowId;
-            var remainingDemand = _availability.ConsumePlanned(resultItemId, itemDemand);
+            // Acquired dependencies are consumed even when the list's normal
+            // SkipIfEnough option is disabled. Generated precraft output keeps
+            // the existing planned-availability behavior below.
+            var remainingDemand = _availability.ConsumeAcquired(resultItemId, itemDemand);
+            remainingDemand = _availability.ConsumePlanned(resultItemId, remainingDemand);
 
             if (_list.SkipIfEnough && _consumeIntermediateAvailability)
             {
@@ -200,13 +235,7 @@ public static class CraftingListPlanner
 
         private Recipe? ResolveSubRecipe(uint itemId)
         {
-            if (_list.PrecraftRecipeOverrides.TryGetValue(itemId, out var overrideRecipeId))
-            {
-                var overrideRecipe = RecipeManager.GetRecipe(overrideRecipeId);
-                if (overrideRecipe.HasValue)
-                    return overrideRecipe;
-            }
-            return RecipeManager.GetRecipeForItem(itemId);
+            return _list.ResolveRecipeForItem(itemId);
         }
 
         private CraftingQualityPolicy ResolveQualityPolicy(Recipe recipe, bool isOriginalRecipe)
@@ -263,12 +292,47 @@ public static class CraftingListPlanner
     {
         private readonly bool _useRetainers;
         private readonly Dictionary<uint, PlannedAvailability> _plannedAvailable = new();
+        private readonly Dictionary<uint, PlannedAvailability> _acquiredAvailable = new();
         private readonly Dictionary<uint, (int NQ, int HQ)> _inventoryAvailable = new();
         private readonly Dictionary<uint, (int NQ, int HQ)> _retainerAvailable = new();
 
-        public AvailabilityLedger(bool useRetainers)
+        public AvailabilityLedger(
+            bool useRetainers,
+            IReadOnlyDictionary<uint, AcquiredDependencyAvailability>? acquiredAvailability)
         {
             _useRetainers = useRetainers;
+            if (acquiredAvailability == null)
+                return;
+
+            foreach (var (itemId, availability) in acquiredAvailability)
+            {
+                var normalized = availability.Normalize();
+                if (itemId != 0 && normalized.Total > 0)
+                {
+                    _acquiredAvailable[itemId] = new PlannedAvailability(
+                        Unknown: 0,
+                        NQ: normalized.NQ,
+                        HQ: normalized.HQ);
+                }
+            }
+        }
+
+        public IngredientQualityDemand ConsumeAcquired(uint itemId, IngredientQualityDemand demand)
+        {
+            if (demand.Total <= 0)
+                return demand;
+
+            var available = _acquiredAvailable.GetValueOrDefault(itemId);
+            if (available.Total <= 0)
+                return demand;
+
+            var remaining = new AcquiredDependencyAvailability(available.NQ, available.HQ)
+                .Consume(demand, out var remainingAvailability);
+            _acquiredAvailable[itemId] = new PlannedAvailability(
+                Unknown: available.Unknown,
+                NQ: remainingAvailability.NQ,
+                HQ: remainingAvailability.HQ);
+            return remaining;
         }
 
         public int ConsumePlanned(uint itemId, int requested)
@@ -399,17 +463,11 @@ public static class CraftingListPlanner
             return remaining;
         }
 
-        private static unsafe (int NQ, int HQ) GetInventorySplitCounts(uint itemId)
+        private static (int NQ, int HQ) GetInventorySplitCounts(uint itemId)
         {
             try
             {
-                var inventory = InventoryManager.Instance();
-                if (inventory == null)
-                    return (0, 0);
-
-                return (
-                    (int)inventory->GetInventoryItemCount(itemId, false, false, false),
-                    (int)inventory->GetInventoryItemCount(itemId, true, false, false));
+                return CraftingInventoryCounter.GetInventorySplitCounts(itemId);
             }
             catch
             {

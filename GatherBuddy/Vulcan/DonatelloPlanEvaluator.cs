@@ -9,12 +9,14 @@ public sealed record DonatelloPlanEvaluation(
     int Duration,
     IReadOnlyList<StepState> Trajectory)
 {
-    public bool IsStrictlyBetterThan(DonatelloPlanEvaluation incumbent)
+    public bool IsStrictlyBetterThan(DonatelloPlanEvaluation incumbent, bool minimizeSteps = true)
     {
         if (Completes != incumbent.Completes)
             return Completes;
         if (Quality != incumbent.Quality)
             return Quality > incumbent.Quality;
+        if (!minimizeSteps)
+            return false;
         if (Steps != incumbent.Steps)
             return Steps < incumbent.Steps;
         return Duration < incumbent.Duration;

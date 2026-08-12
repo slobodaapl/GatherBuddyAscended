@@ -359,7 +359,7 @@ public class CraftingTreeWindow : Window
         {
             ImGui.TextColored(ColorVendor, "Vendors:");
             foreach (var opt in node.VendorOptions.Take(6))
-                ImGui.BulletText($"{opt.NpcName} — {opt.Cost} {opt.CurrencyName}");
+                ImGui.BulletText($"{opt.NpcName} — {opt.CostLabel}");
             if (node.VendorOptions.Count > 6)
                 ImGui.TextColored(ColorMuted, $"  + {node.VendorOptions.Count - 6} more");
         }
@@ -527,13 +527,7 @@ public class CraftingTreeWindow : Window
 
     private static Recipe? ResolveSubRecipe(CraftingListDefinition list, uint itemId)
     {
-        if (list.PrecraftRecipeOverrides.TryGetValue(itemId, out var overrideId))
-        {
-            var overrideRecipe = RecipeManager.GetRecipe(overrideId);
-            if (overrideRecipe.HasValue)
-                return overrideRecipe;
-        }
-        return RecipeManager.GetRecipeForItem(itemId);
+        return list.ResolveRecipeForItem(itemId);
     }
 
     private static string ResolveCrafterName(Recipe recipe)
@@ -609,13 +603,18 @@ public class CraftingTreeWindow : Window
 
     private static void AddVendorEntry(List<VendorOption> options, VendorShopEntry entry)
     {
+        var costLabel = !VendorOfferMath.HasValidCurrencyCosts(entry.CurrencyCosts)
+                      || !VendorOfferMath.HasValidReceivedItems(entry.ReceivedItems, entry.ItemId)
+            ? "Unknown offer"
+            : string.Join(" + ", entry.CurrencyCosts.Select(cost =>
+                $"{cost.Amount:N0} {(string.IsNullOrWhiteSpace(cost.CurrencyName) ? $"Currency {cost.CurrencyItemId}" : cost.CurrencyName)}"));
         if (entry.Npcs == null || entry.Npcs.Count == 0)
         {
-            options.Add(new VendorOption("(Unknown vendor)", entry.Cost, entry.CurrencyName));
+            options.Add(new VendorOption("(Unknown vendor)", costLabel));
             return;
         }
         foreach (var npc in entry.Npcs)
-            options.Add(new VendorOption(npc.Name, entry.Cost, entry.CurrencyName));
+            options.Add(new VendorOption(npc.Name, costLabel));
     }
 
     private sealed class TreeNode
@@ -637,5 +636,5 @@ public class CraftingTreeWindow : Window
         public List<TreeNode> Children { get; } = new();
     }
 
-    private readonly record struct VendorOption(string NpcName, uint Cost, string CurrencyName);
+    private readonly record struct VendorOption(string NpcName, string CostLabel);
 }

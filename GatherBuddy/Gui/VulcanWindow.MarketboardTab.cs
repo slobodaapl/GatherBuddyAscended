@@ -27,6 +27,9 @@ public partial class VulcanWindow
     private List<string> _mbScopeOptions      = new();
     private List<bool>   _mbScopeIsDc         = new();
     private DateTime     _mbScopeRefresh      = DateTime.MinValue;
+    private bool         _mbCurrentWorldOnly  = false;
+    private string       _mbSearchResultsQuery = string.Empty;
+    private List<MarketSearchResult> _mbSearchResults = new();
 
     private void DrawMarketboardTab()
     {
@@ -78,6 +81,8 @@ public partial class VulcanWindow
             if ((DateTime.UtcNow - _mbScopeRefresh).TotalMinutes > 5 || _mbScopeOptions.Count == 0)
                 RefreshScopeOptions(svc);
 
+            QueueSelectedHistoryLookup(svc);
+
             if (ImGui.SmallButton("Clear All##mbclear"))
             {
                 svc.Clear();
@@ -89,7 +94,10 @@ public partial class VulcanWindow
             }
             ImGui.SameLine(0, VulcanUiScaling.Scaled(6f));
             if (ImGui.SmallButton("Refresh All##mbrefreshall"))
-                svc.RefreshAll();
+                svc.RefreshAll(_mbCurrentWorldOnly ? svc.GetCurrentWorld() : svc.GetDataCenter());
+            ImGui.SameLine(0, VulcanUiScaling.Scaled(6f));
+            if (ImGui.SmallButton("Open Marketplace Buy List##mbopenbuylist"))
+                GatherBuddy.MarketplaceBuyListWindow?.Open();
 
             ImGui.Separator();
             ImGui.Spacing();
@@ -149,11 +157,56 @@ public partial class VulcanWindow
 
     private void DrawMarketboardHistoryList(MarketboardService svc)
     {
+        if (ImGui.Checkbox("Current world only##mbcurrentworld", ref _mbCurrentWorldOnly))
+        {
+            _mbFilterDirty = true;
+            QueueSelectedHistoryLookup(svc);
+        }
         ImGui.SetNextItemWidth(-1);
         if (ImGui.InputTextWithHint("##mbsearch", "Search...", ref _mbSearch, 128))
+        {
             _mbFilterDirty = true;
+            _mbSearchResultsQuery = string.Empty;
+        }
 
         ImGui.Spacing();
+
+        if (!string.IsNullOrWhiteSpace(_mbSearch))
+        {
+            if (_mbSearchResultsQuery != _mbSearch)
+            {
+                _mbSearchResults = svc.SearchItems(_mbSearch);
+                _mbSearchResultsQuery = _mbSearch;
+            }
+
+            if (_mbSearchResults.Count == 0)
+            {
+                ImGui.TextColored(ImGuiColors.DalamudGrey, "No marketable items match your search.");
+                return;
+            }
+
+            foreach (var result in _mbSearchResults)
+            {
+                ImGui.PushID($"mbsearchresult_{result.ItemId}");
+                if (ImGui.Selectable(result.Name, false))
+                {
+                    _mbSelectedItemId = result.ItemId;
+                    var scope = _mbCurrentWorldOnly ? svc.GetCurrentWorld() : svc.GetDataCenter();
+                    var scopeIndex = _mbScopeOptions.IndexOf(scope);
+                    if (scopeIndex >= 0)
+                        _mbDetailScopeIndex = scopeIndex;
+                    svc.QueueLookup(result.ItemId, result.Name, result.IconId, scope);
+                }
+                if (ImGui.BeginPopupContextItem("##resultContext"))
+                {
+                    if (ImGui.Selectable("Add to Marketplace Buy List"))
+                        AddToActiveMarketplaceList(result.ItemId, result.Name, result.IconId);
+                    ImGui.EndPopup();
+                }
+                ImGui.PopID();
+            }
+            return;
+        }
 
         if (_mbHistorySnapshot.Count == 0)
         {
@@ -174,7 +227,9 @@ public partial class VulcanWindow
         var iconSize   = VulcanUiScaling.Scaled(28f, 28f);
         var itemHeight = iconSize.Y + ImGui.GetStyle().ItemSpacing.Y;
         var maxX       = ImGui.GetContentRegionMax().X;
-        var dcScope    = _mbScopeOptions.Count > 0 ? _mbScopeOptions[0] : svc.GetDataCenter();
+        var dcScope    = _mbCurrentWorldOnly
+            ? svc.GetCurrentWorld()
+            : (_mbScopeOptions.Count > 0 ? _mbScopeOptions[0] : svc.GetDataCenter());
         var spacing    = ImGui.GetStyle().ItemSpacing.X;
 
         ImGuiClip.ClippedDraw(_mbFilteredSnapshot, itemId =>
@@ -207,14 +262,24 @@ public partial class VulcanWindow
 
             string statusLabel;
             Vector4 statusColor;
-            if (pending)
+            if (pending && data == null)
             {
                 statusLabel = " [...]";
                 statusColor = ImGuiColors.DalamudOrange;
             }
-            else if (hasErr || data == null)
+            else if (hasErr && data == null)
             {
                 statusLabel = " [N/A]";
+                statusColor = ImGuiColors.DalamudGrey;
+            }
+            else if (pending)
+            {
+                statusLabel = $"  {data!.MinPrice:N0}g [...]";
+                statusColor = ImGuiColors.DalamudOrange;
+            }
+            else if (data == null)
+            {
+                statusLabel = " [Not fetched]";
                 statusColor = ImGuiColors.DalamudGrey;
             }
             else
@@ -226,7 +291,7 @@ public partial class VulcanWindow
             var statusW = ImGui.CalcTextSize(statusLabel).X + spacing;
             if (ImGui.Selectable($"{name}##mb_{itemId}", isSelected, ImGuiSelectableFlags.None,
                     new Vector2(maxX - ImGui.GetCursorPosX() - statusW, 0)))
-                _mbSelectedItemId = itemId;
+                SelectHistoryItem(svc, itemId, dcScope);
 
             var isCtxOpen = GatherBuddy.ControllerSupport != null
                 ? GatherBuddy.ControllerSupport.ContextMenu.BeginPopupContextItemWithGamepad($"##mbctx_{itemId}", Dalamud.GamepadState)
@@ -268,14 +333,21 @@ public partial class VulcanWindow
             _mbDetailScopeIndex = 0;
         }
 
-        var scope     = _mbScopeOptions.Count > _mbDetailScopeIndex ? _mbScopeOptions[_mbDetailScopeIndex] : svc.GetDataCenter();
-        var isDcScope = _mbDetailScopeIndex < _mbScopeIsDc.Count && _mbScopeIsDc[_mbDetailScopeIndex];
+        var scope     = _mbCurrentWorldOnly
+            ? svc.GetCurrentWorld()
+            : (_mbScopeOptions.Count > _mbDetailScopeIndex ? _mbScopeOptions[_mbDetailScopeIndex] : svc.GetDataCenter());
+        var isDcScope = !_mbCurrentWorldOnly
+            && _mbDetailScopeIndex < _mbScopeIsDc.Count
+            && _mbScopeIsDc[_mbDetailScopeIndex];
 
         var name    = svc.GetItemName(itemId);
         var iconId  = svc.GetItemIcon(itemId);
         var pending = svc.IsPending(itemId, scope);
         var hasErr  = svc.HasError(itemId, scope);
         var data    = svc.GetCached(itemId, scope);
+
+        if (data == null && !pending && !hasErr)
+            svc.QueueLookup(itemId, name, iconId, scope);
 
         var largeIcon = VulcanUiScaling.Scaled(48f, 48f);
 
@@ -294,6 +366,9 @@ public partial class VulcanWindow
         var lineH = ImGui.GetTextLineHeightWithSpacing();
         ImGui.SetCursorPosY(ImGui.GetCursorPosY() + (largeIcon.Y - lineH * 2f) / 2f);
         ImGui.TextColored(ImGuiColors.ParsedGold, name);
+
+        if (ImGui.SmallButton("Add to Marketplace Buy List##mbaddtolist"))
+            AddToActiveMarketplaceList(itemId, name, iconId);
 
         var currentScopeLabel = (isDcScope ? $"DC: " : string.Empty) + scope;
         ImGui.SetNextItemWidth(VulcanUiScaling.Scaled(160f));
@@ -327,13 +402,13 @@ public partial class VulcanWindow
         ImGui.Separator();
         ImGui.Spacing();
 
-        if (pending)
+        if (pending && data == null)
         {
             ImGui.TextColored(ImGuiColors.DalamudOrange, "Fetching market data...");
             return;
         }
 
-        if (hasErr || data == null)
+        if (data == null)
         {
             ImGui.TextColored(ImGuiColors.DalamudGrey, "No market data available.");
             ImGui.TextColored(ImGuiColors.DalamudGrey3, "Item may not be tradeable,");
@@ -342,6 +417,10 @@ public partial class VulcanWindow
         else
         {
             DrawListingTable(data.Listings, isDcScope);
+            if (pending)
+                ImGui.TextColored(ImGuiColors.DalamudOrange, "Refreshing; showing cached data.");
+            else if (hasErr)
+                ImGui.TextColored(ImGuiColors.DalamudOrange, "Refresh failed; showing cached data.");
 
             ImGui.Spacing();
             ImGui.Separator();
@@ -354,6 +433,42 @@ public partial class VulcanWindow
                 : $"{(int)age.TotalHours}h ago";
 
             ImGui.TextColored(ImGuiColors.DalamudGrey3, $"Updated: {ageText}");
+        }
+    }
+
+    private static void AddToActiveMarketplaceList(uint itemId, string name, uint iconId)
+    {
+        var manager = GatherBuddy.MarketplaceBuyListManager;
+        var active = manager?.ActiveList;
+        if (manager == null || active == null)
+            return;
+        manager.AddItem(active.Id, itemId, name, iconId, 1);
+    }
+
+    private void SelectHistoryItem(MarketboardService svc, uint itemId, string scope)
+    {
+        _mbSelectedItemId = itemId;
+        _mbDetailLastItemId = 0;
+        svc.QueueLookup(itemId, svc.GetItemName(itemId), svc.GetItemIcon(itemId), scope);
+    }
+
+    private void QueueSelectedHistoryLookup(MarketboardService svc)
+    {
+        if (_mbSelectedItemId == 0 || !_mbHistorySnapshot.Contains(_mbSelectedItemId))
+            return;
+
+        var scope = _mbCurrentWorldOnly
+            ? svc.GetCurrentWorld()
+            : (_mbScopeOptions.Count > 0 ? _mbScopeOptions[0] : svc.GetDataCenter());
+        if (svc.GetCached(_mbSelectedItemId, scope) == null
+            && !svc.IsPending(_mbSelectedItemId, scope)
+            && !svc.HasError(_mbSelectedItemId, scope))
+        {
+            svc.QueueLookup(
+                _mbSelectedItemId,
+                svc.GetItemName(_mbSelectedItemId),
+                svc.GetItemIcon(_mbSelectedItemId),
+                scope);
         }
     }
 

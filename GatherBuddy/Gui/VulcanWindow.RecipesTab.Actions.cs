@@ -220,7 +220,10 @@ public partial class VulcanWindow
             ID = -1,
             Name = recipe.ItemResult.Value.Name.ExtractText(),
             SkipIfEnough = true,
-            SkipFinalIfEnough = false,
+            SkipFinalIfEnough = _browserSkipFinalIfEnough,
+            QuickSynthAll = _browserQuickSynthAll,
+            QuickSynthAllPreferNQ = _browserQuickSynthAllPreferNQ,
+            QuickSynthAllPrecraftsOnly = _browserQuickSynthAllPrecraftsOnly,
             RetainerRestock = retainerRestock,
         };
 
@@ -236,7 +239,7 @@ public partial class VulcanWindow
 
         var executionPlan = CraftingExecutionPlan.Create(list);
         GatherBuddy.Log.Debug(
-            $"[VulcanWindow] Browser execution plan for recipe {recipe.RowId}: quantity={quantity}, nqOnly={nqOnly}, queue={executionPlan.QueueView.Count}, materials={executionPlan.MaterialsView.Count}, precrafts={executionPlan.PrecraftsView.Count}, skipIfEnough={executionPlan.SkipIfEnough}, skipFinalIfEnough={executionPlan.SkipFinalIfEnough}");
+            $"[VulcanWindow] Browser execution plan for recipe {recipe.RowId}: quantity={quantity}, nqOnly={nqOnly}, queue={executionPlan.QueueView.Count}, materials={executionPlan.MaterialsView.Count}, precrafts={executionPlan.PrecraftsView.Count}, skipIfEnough={executionPlan.SkipIfEnough}, skipFinalIfEnough={executionPlan.SkipFinalIfEnough}, quickSynthAll={_browserQuickSynthAll}, quickSynthPrecraftsOnly={_browserQuickSynthAllPrecraftsOnly}, quickSynthPreferNQ={_browserQuickSynthAllPreferNQ}");
         return executionPlan;
     }
 

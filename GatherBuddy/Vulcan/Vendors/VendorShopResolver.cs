@@ -539,6 +539,7 @@ public static class VendorShopResolver
         Dictionary<uint, string> npcNames)
     {
         var resultByNpcId = new Dictionary<uint, VendorNpc>();
+        var inclusionShopSheet = Dalamud.GameData.GetExcelSheet<InclusionShop>();
 
         if (directSpecialMap.TryGetValue(shopId, out var directNpcIds))
         {
@@ -547,7 +548,11 @@ public static class VendorShopResolver
                 if (!npcNames.TryGetValue(npcId, out var name))
                     continue;
 
-                AddSpecialShopVendor(resultByNpcId, new VendorNpc(npcId, name, shopId, VendorMenuShopType.SpecialShop));
+                AddSpecialShopVendor(resultByNpcId, new VendorNpc(
+                    npcId,
+                    name,
+                    shopId,
+                    VendorMenuShopType.SpecialShop));
             }
         }
 
@@ -563,13 +568,22 @@ public static class VendorShopResolver
                     if (!npcNames.TryGetValue(npcId, out var name))
                         continue;
 
+                    var unlockQuestId = inclusionShopSheet != null && inclusionShopSheet.TryGetRow(route.InclusionShopId, out var inclusionShop)
+                        ? inclusionShop.UnlockQuest.RowId
+                        : 0;
+                    // AllaganTools' shop-route DataShare identifies the route,
+                    // but does not expose the allied-society requirement. An
+                    // InclusionShop is therefore fail-closed until a verified
+                    // requirement relation is available.
                     AddSpecialShopVendor(resultByNpcId, new VendorNpc(
                         npcId,
                         name,
                         route.InclusionShopId,
                         VendorMenuShopType.InclusionShop,
                         route.PageIndex,
-                        route.SubPageIndex));
+                        route.SubPageIndex,
+                        UnlockQuestId: unlockQuestId,
+                        AlliedRequirementKnown: false));
                 }
             }
         }
@@ -581,7 +595,12 @@ public static class VendorShopResolver
                 if (!npcNames.TryGetValue(npcId, out var name))
                     continue;
 
-                AddSpecialShopVendor(resultByNpcId, new VendorNpc(npcId, name, shopId, VendorMenuShopType.SpecialShop));
+                AddSpecialShopVendor(resultByNpcId, new VendorNpc(
+                    npcId,
+                    name,
+                    shopId,
+                    VendorMenuShopType.SpecialShop,
+                    AlliedRequirementKnown: false));
             }
         }
 
@@ -608,9 +627,9 @@ public static class VendorShopResolver
 
     private static List<VendorShopEntry> DeduplicateEntries(List<VendorShopEntry> entries)
     {
-        var indexByKey = new Dictionary<(VendorShopType ShopType, uint ItemId, uint Cost, uint CurrencyItemId), int>();
+        var indexByKey = new Dictionary<(VendorShopType ShopType, uint ItemId, uint Cost, uint CurrencyItemId, string Quests, uint Achievement, uint Content, bool ContentComplete, uint AlliedSociety, uint AlliedRank, string OfferSignature), int>();
         var result     = new List<VendorShopEntry>();
-        var npcIdSets  = new List<HashSet<(uint NpcId, VendorMenuShopType MenuShopType, uint ShopId, int InclusionPageIndex, int InclusionSubPageIndex, uint SourceShopId, int ShopItemIndex, int GcRankIndex, int GcCategoryIndex)>>();
+        var npcIdSets  = new List<HashSet<(uint NpcId, VendorMenuShopType MenuShopType, uint ShopId, int InclusionPageIndex, int InclusionSubPageIndex, uint SourceShopId, int ShopItemIndex, int GcRankIndex, int GcCategoryIndex, uint UnlockQuestId, uint RequiredGcRank, uint RequiredAlliedSocietyId, uint RequiredAlliedSocietyRank, bool AlliedRequirementKnown)>>();
 
         foreach (var entry in entries)
         {
@@ -618,19 +637,26 @@ public static class VendorShopResolver
                 entry.ShopType,
                 entry.ItemId,
                 entry.Cost,
-                entry.CurrencyItemId);
+                entry.CurrencyItemId,
+                string.Join(',', (entry.RequiredQuestIds ?? []).Order()),
+                entry.RequiredAchievementId,
+                entry.RequiredContentId,
+                entry.RequiredContentMustBeComplete,
+                entry.RequiredAlliedSocietyId,
+                entry.RequiredAlliedSocietyRank,
+                entry.OfferSignature);
             if (!indexByKey.TryGetValue(key, out var idx))
             {
                 idx = result.Count;
                 indexByKey[key] = idx;
                 result.Add(entry);
-                npcIdSets.Add(new HashSet<(uint NpcId, VendorMenuShopType MenuShopType, uint ShopId, int InclusionPageIndex, int InclusionSubPageIndex, uint SourceShopId, int ShopItemIndex, int GcRankIndex, int GcCategoryIndex)>(
-                    entry.Npcs.Select(n => (n.NpcId, n.MenuShopType, n.ShopId, n.InclusionPageIndex, n.InclusionSubPageIndex, n.SourceShopId, n.ShopItemIndex, n.GcRankIndex, n.GcCategoryIndex))));
+                npcIdSets.Add(new HashSet<(uint NpcId, VendorMenuShopType MenuShopType, uint ShopId, int InclusionPageIndex, int InclusionSubPageIndex, uint SourceShopId, int ShopItemIndex, int GcRankIndex, int GcCategoryIndex, uint UnlockQuestId, uint RequiredGcRank, uint RequiredAlliedSocietyId, uint RequiredAlliedSocietyRank, bool AlliedRequirementKnown)>(
+                    entry.Npcs.Select(n => (n.NpcId, n.MenuShopType, n.ShopId, n.InclusionPageIndex, n.InclusionSubPageIndex, n.SourceShopId, n.ShopItemIndex, n.GcRankIndex, n.GcCategoryIndex, n.UnlockQuestId, n.RequiredGrandCompanyRank, n.RequiredAlliedSocietyId, n.RequiredAlliedSocietyRank, n.AlliedRequirementKnown))));
             }
             else
             {
                 foreach (var npc in entry.Npcs)
-                    if (npcIdSets[idx].Add((npc.NpcId, npc.MenuShopType, npc.ShopId, npc.InclusionPageIndex, npc.InclusionSubPageIndex, npc.SourceShopId, npc.ShopItemIndex, npc.GcRankIndex, npc.GcCategoryIndex)))
+                    if (npcIdSets[idx].Add((npc.NpcId, npc.MenuShopType, npc.ShopId, npc.InclusionPageIndex, npc.InclusionSubPageIndex, npc.SourceShopId, npc.ShopItemIndex, npc.GcRankIndex, npc.GcCategoryIndex, npc.UnlockQuestId, npc.RequiredGrandCompanyRank, npc.RequiredAlliedSocietyId, npc.RequiredAlliedSocietyRank, npc.AlliedRequirementKnown)))
                         result[idx].Npcs.Add(npc);
             }
         }
@@ -664,12 +690,14 @@ public static class VendorShopResolver
             {
                 if (!tomestoneEntriesByCost.TryGetValue(otherEntry.Cost, out var tomestoneEntry))
                     continue;
+                if (!HaveEquivalentRequirements(otherEntry, tomestoneEntry))
+                    continue;
 
-                var npcSet = new HashSet<(uint NpcId, VendorMenuShopType MenuShopType, uint ShopId, int InclusionPageIndex, int InclusionSubPageIndex, uint SourceShopId, int ShopItemIndex, int GcRankIndex, int GcCategoryIndex)>(
-                    tomestoneEntry.Npcs.Select(npc => (npc.NpcId, npc.MenuShopType, npc.ShopId, npc.InclusionPageIndex, npc.InclusionSubPageIndex, npc.SourceShopId, npc.ShopItemIndex, npc.GcRankIndex, npc.GcCategoryIndex)));
+                var npcSet = new HashSet<(uint NpcId, VendorMenuShopType MenuShopType, uint ShopId, int InclusionPageIndex, int InclusionSubPageIndex, uint SourceShopId, int ShopItemIndex, int GcRankIndex, int GcCategoryIndex, uint UnlockQuestId, uint RequiredGcRank, uint RequiredAlliedSocietyId, uint RequiredAlliedSocietyRank, bool AlliedRequirementKnown)>(
+                    tomestoneEntry.Npcs.Select(npc => (npc.NpcId, npc.MenuShopType, npc.ShopId, npc.InclusionPageIndex, npc.InclusionSubPageIndex, npc.SourceShopId, npc.ShopItemIndex, npc.GcRankIndex, npc.GcCategoryIndex, npc.UnlockQuestId, npc.RequiredGrandCompanyRank, npc.RequiredAlliedSocietyId, npc.RequiredAlliedSocietyRank, npc.AlliedRequirementKnown)));
                 foreach (var npc in otherEntry.Npcs)
                 {
-                    if (!npcSet.Add((npc.NpcId, npc.MenuShopType, npc.ShopId, npc.InclusionPageIndex, npc.InclusionSubPageIndex, npc.SourceShopId, npc.ShopItemIndex, npc.GcRankIndex, npc.GcCategoryIndex)))
+                    if (!npcSet.Add((npc.NpcId, npc.MenuShopType, npc.ShopId, npc.InclusionPageIndex, npc.InclusionSubPageIndex, npc.SourceShopId, npc.ShopItemIndex, npc.GcRankIndex, npc.GcCategoryIndex, npc.UnlockQuestId, npc.RequiredGrandCompanyRank, npc.RequiredAlliedSocietyId, npc.RequiredAlliedSocietyRank, npc.AlliedRequirementKnown)))
                         continue;
 
                     tomestoneEntry.Npcs.Add(npc);
@@ -688,6 +716,15 @@ public static class VendorShopResolver
 
         return mergedEntries;
     }
+
+    private static bool HaveEquivalentRequirements(VendorShopEntry left, VendorShopEntry right)
+        => (left.RequiredQuestIds ?? []).Order().SequenceEqual((right.RequiredQuestIds ?? []).Order())
+        && left.RequiredAchievementId == right.RequiredAchievementId
+        && left.RequiredContentId == right.RequiredContentId
+        && left.RequiredContentMustBeComplete == right.RequiredContentMustBeComplete
+        && left.RequiredAlliedSocietyId == right.RequiredAlliedSocietyId
+        && left.RequiredAlliedSocietyRank == right.RequiredAlliedSocietyRank
+        && VendorOfferMath.HasSameOffer(left, right);
 
     private static bool IsLegacyTomestoneCurrency(uint currencyItemId, IReadOnlySet<uint> tomestoneItemIds)
         => currencyItemId != 0
@@ -726,62 +763,49 @@ public static class VendorShopResolver
     private static int GetSpecialShopCostSelectionPriority(VendorCurrencyGroup group)
         => group == VendorCurrencyGroup.Other ? 1 : 0;
 
-    private static bool TryResolvePreferredSpecialShopCost(
+    private static bool TryResolveSpecialShopCosts(
         uint shopId,
         SpecialShop.ItemStruct entry,
         ushort useCurrencyType,
         ExcelSheet<Item> itemSheet,
         Dictionary<uint, uint> tomestoneLookup,
         IReadOnlySet<uint> tomestoneItemIds,
-        out ResolvedSpecialShopCost selectedCost,
-        out int resolvedCostCount,
-        out bool hasAdditionalDistinctCosts)
+        out List<ResolvedSpecialShopCost> resolvedCosts)
     {
-        var resolvedCosts = new List<ResolvedSpecialShopCost>();
+        resolvedCosts = new List<ResolvedSpecialShopCost>();
         var originalIndex = 0;
         foreach (var cost in entry.ItemCosts)
         {
-            if (cost.ItemCost.RowId == 0 || cost.CurrencyCost == 0)
+            var rawCurrencyItemId = cost.ItemCost.RowId;
+            var rawAmount = cost.CurrencyCost;
+            if (rawCurrencyItemId == 0 && rawAmount == 0)
             {
                 originalIndex++;
                 continue;
             }
+            if (rawCurrencyItemId == 0 || rawAmount == 0)
+                return false;
 
-            var resolvedCurrencyItemId = ConvertCurrencyId(shopId, cost.ItemCost.RowId, useCurrencyType, tomestoneLookup);
+            var resolvedCurrencyItemId = ConvertCurrencyId(shopId, rawCurrencyItemId, useCurrencyType, tomestoneLookup);
             if (resolvedCurrencyItemId == 0)
-            {
-                originalIndex++;
-                continue;
-            }
+                return false;
 
-            var currencyName = itemSheet.TryGetRow(resolvedCurrencyItemId, out var currencyItem)
-                ? currencyItem.Name.ExtractText()
-                : string.Empty;
+            if (!itemSheet.TryGetRow(resolvedCurrencyItemId, out var currencyItem))
+                return false;
+
+            var currencyName = currencyItem.Name.ExtractText();
             var currencyItemId = NormalizeCurrencyItemIdForVendorGrouping(resolvedCurrencyItemId, tomestoneItemIds);
             resolvedCosts.Add(new ResolvedSpecialShopCost(
                 currencyItemId,
-                (uint)cost.CurrencyCost,
+                (uint)rawAmount,
                 currencyName,
                 ClassifyCurrency(currencyItemId, tomestoneItemIds),
                 originalIndex));
             originalIndex++;
         }
 
-        resolvedCostCount = resolvedCosts.Count;
-        hasAdditionalDistinctCosts = false;
         if (resolvedCosts.Count == 0)
-        {
-            selectedCost = default;
             return false;
-        }
-
-        selectedCost = resolvedCosts
-            .OrderBy(cost => GetSpecialShopCostSelectionPriority(cost.Group))
-            .ThenByDescending(cost => cost.Amount)
-            .ThenBy(cost => cost.OriginalIndex)
-            .First();
-        var selectedCurrencyItemId = selectedCost.CurrencyItemId;
-        hasAdditionalDistinctCosts = resolvedCosts.Any(cost => cost.CurrencyItemId != selectedCurrencyItemId);
         return true;
     }
 
@@ -790,12 +814,16 @@ public static class VendorShopResolver
     {
         var entries  = new List<VendorShopEntry>();
         var gilSheet = Dalamud.GameData.GetSubrowExcelSheet<GilShopItem>();
+        var shopSheet = Dalamud.GameData.GetExcelSheet<GilShop>();
         var itemSheet = Dalamud.GameData.GetExcelSheet<Item>();
         if (gilSheet == null || itemSheet == null) return entries;
 
         foreach (var shopRow in gilSheet)
         {
             var npcs = ResolveNpcs(shopRow.RowId, npcMap, npcNames);
+            var shopQuestId = shopSheet != null && shopSheet.TryGetRow(shopRow.RowId, out var shop)
+                ? shop.Quest.RowId
+                : 0;
             foreach (var row in shopRow)
             {
                 var itemId = row.Item.RowId;
@@ -804,9 +832,16 @@ public static class VendorShopResolver
                 var price = item.PriceMid;
                 if (price == 0) continue;
 
+                var requiredQuestIds = row.QuestRequired
+                    .Select(quest => quest.RowId)
+                    .Append(shopQuestId)
+                    .Where(id => id != 0)
+                    .Distinct()
+                    .ToArray();
                 entries.Add(new VendorShopEntry(
                     itemId, item.Name.ExtractText(), (ushort)item.Icon,
-                    price, GilCurrencyItemId, "Gil", new List<VendorNpc>(npcs), VendorShopType.GilShop, VendorCurrencyGroup.Gil));
+                    price, GilCurrencyItemId, "Gil", new List<VendorNpc>(npcs), VendorShopType.GilShop, VendorCurrencyGroup.Gil,
+                    requiredQuestIds, row.AchievementRequired.RowId));
             }
         }
 
@@ -826,11 +861,11 @@ public static class VendorShopResolver
         var entries              = new List<VendorShopEntry>();
         var multiCostListings    = 0;
         var reprioritizedListings = 0;
-        var skippedExchangeListings = 0;
         var specialSheet         = Dalamud.GameData.GetExcelSheet<SpecialShop>();
         var itemSheet            = Dalamud.GameData.GetExcelSheet<Item>();
         if (specialSheet == null || itemSheet == null) return entries;
         var tomestoneItemIds     = BuildTomestoneItemIdSet(tomestoneLookup);
+        var alliedSocietyByCurrency = BuildUniqueAlliedSocietyCurrencyMapFromSheet();
 
         foreach (var shop in specialSheet)
         {
@@ -840,38 +875,68 @@ public static class VendorShopResolver
 
             foreach (var entry in shop.Item)
             {
-                if (!TryResolvePreferredSpecialShopCost(shop.RowId, entry, useCurrencyType, itemSheet, tomestoneLookup, tomestoneItemIds, out var selectedCost, out var resolvedCostCount, out var hasAdditionalDistinctCosts))
+                var receiveRows = entry.ReceiveItems
+                    .Where(received => received.Item.RowId != 0 || received.ReceiveCount != 0)
+                    .ToList();
+                if (receiveRows.Count == 0
+                 || receiveRows.Any(received => received.Item.RowId == 0 || received.ReceiveCount == 0)
+                 || receiveRows.Any(received => !itemSheet.TryGetRow(received.Item.RowId, out _)))
                     continue;
-                if (resolvedCostCount > 1)
+
+                var requiredQuestIds = new[] { shop.Quest.RowId, entry.Quest.RowId }
+                    .Where(id => id != 0)
+                    .Distinct()
+                    .ToArray();
+                if (!TryResolveSpecialShopCosts(shop.RowId, entry, useCurrencyType, itemSheet, tomestoneLookup, tomestoneItemIds, out var resolvedCosts))
+                    continue;
+                var selectedCost = resolvedCosts
+                    .OrderBy(cost => GetSpecialShopCostSelectionPriority(cost.Group))
+                    .ThenByDescending(cost => cost.Amount)
+                    .ThenBy(cost => cost.OriginalIndex)
+                    .First();
+                if (resolvedCosts.Count > 1)
                 {
                     multiCostListings++;
                     if (selectedCost.OriginalIndex != 0)
                         reprioritizedListings++;
-                    if (hasAdditionalDistinctCosts)
-                    {
-                        skippedExchangeListings++;
-                        continue;
-                    }
                 }
+                var currencyCosts = resolvedCosts
+                    .Select(cost => new VendorCurrencyCost(cost.CurrencyItemId, cost.Amount, cost.CurrencyName, cost.Group))
+                    .ToArray();
+                var alliedSocietyId = ResolveAlliedSocietyForCurrencyCosts(
+                    currencyCosts.Select(cost => cost.CurrencyItemId),
+                    alliedSocietyByCurrency);
                 var addedListing = false;
 
-                foreach (var received in entry.ReceiveItems)
+                foreach (var received in receiveRows)
                 {
                     var itemId = received.Item.RowId;
-                    if (itemId == 0) continue;
-                    if (!itemSheet.TryGetRow(itemId, out var item)) continue;
+                    if (!itemSheet.TryGetRow(itemId, out var item))
+                        continue;
                     var routedNpcs = npcs
                         .Select(npc => npc with
                         {
                             ShopItemIndex = shopItemIndex,
                             SourceShopId  = shop.RowId,
+                            AlliedRequirementKnown = npc.AlliedRequirementKnown || alliedSocietyId != 0,
                         })
                         .ToList();
+                    var receivedOutputs = receiveRows
+                        .GroupBy(output => output.Item.RowId)
+                        .Select(output => new VendorReceivedItem(
+                            output.Key,
+                            checked((uint)output.Aggregate(0UL, (total, received) => checked(total + received.ReceiveCount)))))
+                        .ToArray();
+                    if (receivedOutputs.Length == 0)
+                        continue;
 
                     entries.Add(new VendorShopEntry(
                         itemId, item.Name.ExtractText(), (ushort)item.Icon,
                         selectedCost.Amount, selectedCost.CurrencyItemId, selectedCost.CurrencyName, routedNpcs,
-                        VendorShopType.SpecialCurrency, selectedCost.Group));
+                        VendorShopType.SpecialCurrency, selectedCost.Group, requiredQuestIds, entry.AchievementUnlock.RowId,
+                        shop.RequiredContentFinderCondition.RowId, shop.RequiredContentFinderConditionComplete,
+                        currencyCosts, receivedOutputs,
+                        RequiredAlliedSocietyId: alliedSocietyId));
                     addedListing = true;
                 }
 
@@ -889,14 +954,86 @@ public static class VendorShopResolver
         return deduped;
     }
 
+    public static Dictionary<uint, uint> BuildUniqueAlliedSocietyCurrencyMap(
+        IEnumerable<(uint SocietyId, uint CurrencyItemId)> relations)
+    {
+        var result = new Dictionary<uint, uint>();
+        var ambiguousCurrencies = new HashSet<uint>();
+        foreach (var (societyId, currencyItemId) in relations)
+        {
+            if (societyId == 0 || currencyItemId == 0 || ambiguousCurrencies.Contains(currencyItemId))
+                continue;
 
-    public static unsafe byte GetCurrentGrandCompanyId()
+            if (!result.TryGetValue(currencyItemId, out var existingSocietyId))
+            {
+                result[currencyItemId] = societyId;
+                continue;
+            }
+
+            if (existingSocietyId == societyId)
+                continue;
+
+            result.Remove(currencyItemId);
+            ambiguousCurrencies.Add(currencyItemId);
+        }
+
+        return result;
+    }
+
+    public static uint ResolveAlliedSocietyForCurrencyCosts(
+        IEnumerable<uint> currencyItemIds,
+        IReadOnlyDictionary<uint, uint> societyByCurrency)
+    {
+        var resolvedSocietyId = 0u;
+        foreach (var currencyItemId in currencyItemIds)
+        {
+            if (!societyByCurrency.TryGetValue(currencyItemId, out var societyId))
+                return 0;
+
+            if (resolvedSocietyId != 0 && resolvedSocietyId != societyId)
+                return 0;
+            resolvedSocietyId = societyId;
+        }
+
+        return resolvedSocietyId;
+    }
+
+    private static Dictionary<uint, uint> BuildUniqueAlliedSocietyCurrencyMapFromSheet()
+    {
+        var beastTribeSheet = Dalamud.GameData.GetExcelSheet<BeastTribe>();
+        if (beastTribeSheet == null)
+            return new Dictionary<uint, uint>();
+
+        // BeastTribe.CurrencyItem is the authoritative society association.
+        // The available sheets do not provide a corresponding vendor rank;
+        // the association is known, but rank-gated automation must fail closed
+        // until authoritative rank metadata is available.
+        return BuildUniqueAlliedSocietyCurrencyMap(
+            beastTribeSheet.Select(tribe => (tribe.RowId, tribe.CurrencyItem.RowId)));
+    }
+
+
+    public static unsafe bool TryGetCurrentGrandCompanyId(out byte gameGrandCompanyId)
     {
         var playerState = PlayerState.Instance();
-        return playerState == null ? (byte)0 : playerState->GrandCompany;
+        if (playerState == null || playerState->GrandCompany > 2)
+        {
+            gameGrandCompanyId = 0;
+            return false;
+        }
+
+        gameGrandCompanyId = playerState->GrandCompany;
+        return true;
     }
-    public static uint GetGrandCompanySealCurrencyItemId(uint grandCompanyId)
-        => grandCompanyId switch
+
+    public static unsafe byte GetCurrentGrandCompanyId()
+        => TryGetCurrentGrandCompanyId(out var gameGrandCompanyId) ? gameGrandCompanyId : (byte)0;
+
+    // Lumina GrandCompany.RowId is one-based (1=Maelstrom, 2=Twin Adder,
+    // 3=Immortal Flames). Keep this separate from PlayerState.GrandCompany,
+    // which is zero-based (0, 1, 2).
+    public static uint GetSealCurrencyItemIdForSheetGrandCompany(uint sheetGrandCompanyId)
+        => sheetGrandCompanyId switch
         {
             1 => 20u,
             2 => 21u,
@@ -904,41 +1041,82 @@ public static class VendorShopResolver
             _ => 0u,
         };
 
-    public static bool TryGetGrandCompanyIdFromSealCurrencyItemId(uint currencyItemId, out byte grandCompanyId)
+    // PlayerState.GrandCompany: 0=Maelstrom, 1=Twin Adder, 2=Immortal Flames.
+    public static uint GetSealCurrencyItemIdForGameGrandCompany(byte gameGrandCompanyId)
+        => gameGrandCompanyId switch
+        {
+            0 => 20u,
+            1 => 21u,
+            2 => 22u,
+            _ => 0u,
+        };
+
+    public static bool TryGetGameGrandCompanyIdFromSealCurrencyItemId(uint currencyItemId, out byte gameGrandCompanyId)
     {
-        if (currencyItemId == GetGrandCompanySealCurrencyItemId(1))
+        if (currencyItemId == 20u)
         {
-            grandCompanyId = 1;
+            gameGrandCompanyId = 0;
             return true;
         }
 
-        if (currencyItemId == GetGrandCompanySealCurrencyItemId(2))
+        if (currencyItemId == 21u)
         {
-            grandCompanyId = 2;
+            gameGrandCompanyId = 1;
             return true;
         }
 
-        if (currencyItemId == GetGrandCompanySealCurrencyItemId(3))
+        if (currencyItemId == 22u)
         {
-            grandCompanyId = 3;
+            gameGrandCompanyId = 2;
             return true;
         }
 
-        grandCompanyId = 0;
+        gameGrandCompanyId = 0;
         return false;
     }
 
+    // Compatibility name for callers that already use the canonical game-ID
+    // direction. New code should use the explicit method above.
+    public static bool TryGetGrandCompanyIdFromSealCurrencyItemId(uint currencyItemId, out byte gameGrandCompanyId)
+        => TryGetGameGrandCompanyIdFromSealCurrencyItemId(currencyItemId, out gameGrandCompanyId);
+
+    // Compatibility for existing callers that pass the Lumina sheet row ID.
+    public static uint GetGrandCompanySealCurrencyItemId(uint sheetGrandCompanyId)
+        => GetSealCurrencyItemIdForSheetGrandCompany(sheetGrandCompanyId);
+
     public static uint GetCurrentGrandCompanySealCurrencyItemId()
-        => GetGrandCompanySealCurrencyItemId(GetCurrentGrandCompanyId());
+        => TryGetCurrentGrandCompanyId(out var gameGrandCompanyId)
+            ? GetSealCurrencyItemIdForGameGrandCompany(gameGrandCompanyId)
+            : 0u;
 
     public static bool MatchesCurrentGrandCompany(VendorShopEntry entry)
-        => entry.ShopType != VendorShopType.GrandCompanySeals
-        || GetCurrentGrandCompanySealCurrencyItemId() == 0
-        || entry.CurrencyItemId == GetCurrentGrandCompanySealCurrencyItemId();
+    {
+        if (entry.ShopType != VendorShopType.GrandCompanySeals
+            || !TryGetCurrentGrandCompanyId(out var gameGrandCompanyId))
+            return entry.ShopType != VendorShopType.GrandCompanySeals;
+
+        if (GetSealCurrencyItemIdForGameGrandCompany(gameGrandCompanyId) == 0
+            || entry.CurrencyCosts.Count == 0)
+            return false;
+
+        byte? offerGrandCompanyId = null;
+        foreach (var cost in entry.CurrencyCosts)
+        {
+            if (cost is null
+                || !TryGetGameGrandCompanyIdFromSealCurrencyItemId(cost.CurrencyItemId, out var candidate))
+                continue;
+
+            if (offerGrandCompanyId.HasValue && offerGrandCompanyId.Value != candidate)
+                return false;
+            offerGrandCompanyId = candidate;
+        }
+
+        return offerGrandCompanyId == gameGrandCompanyId;
+    }
 
     private static string GetGrandCompanySealCurrencyName(ExcelSheet<Item> itemSheet, uint grandCompanyId)
     {
-        var currencyItemId = GetGrandCompanySealCurrencyItemId(grandCompanyId);
+        var currencyItemId = GetSealCurrencyItemIdForSheetGrandCompany(grandCompanyId);
         return currencyItemId != 0 && itemSheet.TryGetRow(currencyItemId, out var currencyItem)
             ? currencyItem.Name.ExtractText()
             : "GC Seals";
@@ -990,7 +1168,7 @@ public static class VendorShopResolver
             if (!grandCompanyToGcShop.TryGetValue(grandCompanyId, out var gcShopId))
                 continue;
 
-            var currencyItemId = GetGrandCompanySealCurrencyItemId(grandCompanyId);
+            var currencyItemId = GetSealCurrencyItemIdForSheetGrandCompany(grandCompanyId);
             var currencyName = GetGrandCompanySealCurrencyName(itemSheet, grandCompanyId);
             var gcCategoryIndex = GetGrandCompanyCategoryTabIndex(category.SubCategory);
             if (gcCategoryIndex < 0)
@@ -1012,6 +1190,7 @@ public static class VendorShopResolver
                         MenuShopType = VendorMenuShopType.GrandCompanyShop,
                         GcRankIndex = gcRankIndex,
                         GcCategoryIndex = gcCategoryIndex,
+                        RequiredGrandCompanyRank = row.RequiredGrandCompanyRank.RowId,
                     })
                     .ToList();
 

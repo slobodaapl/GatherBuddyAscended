@@ -48,11 +48,14 @@ public sealed partial class VendorBuyListManager
 
         var resolvedEntries = new List<(VendorShopEntry Entry, VendorNpc Vendor, uint TargetQuantity)>();
         var unresolvedItems = new List<string>();
+        var unavailableReasons = new List<string>();
         foreach (var line in parsedLines)
         {
-            if (!TryResolveTeamCraftImportEntry(line.ItemName, out var entry, out var vendor))
+            if (!TryResolveTeamCraftImportEntry(line.ItemName, out var entry, out var vendor, out var unavailableReason))
             {
                 unresolvedItems.Add(line.ItemName);
+                if (!string.IsNullOrWhiteSpace(unavailableReason))
+                    unavailableReasons.Add($"{line.ItemName}: {unavailableReason}");
                 GatherBuddy.Log.Debug($"[VendorBuyListManager] TeamCraft vendor import could not resolve '{line.ItemName}' to a supported vendor route.");
                 continue;
             }
@@ -65,9 +68,11 @@ public sealed partial class VendorBuyListManager
 
         if (resolvedEntries.Count == 0)
         {
-            var errorMessage = unresolvedItems.Count == 1
-                ? $"Could not resolve '{unresolvedItems[0]}' in the vendor data."
-                : $"Could not resolve any of the {unresolvedItems.Count:N0} pasted items in the vendor data.";
+            var errorMessage = unavailableReasons.Count > 0
+                ? $"Could not import vendor items: {string.Join(" | ", unavailableReasons.Take(3))}"
+                : unresolvedItems.Count == 1
+                    ? $"Could not resolve '{unresolvedItems[0]}' in the vendor data."
+                    : $"Could not resolve any of the {unresolvedItems.Count:N0} pasted items in the vendor data.";
             GatherBuddy.Log.Debug($"[VendorBuyListManager] TeamCraft vendor import failed: {errorMessage}");
             return new TeamCraftImportResult(null, errorMessage, null);
         }
@@ -111,7 +116,7 @@ public sealed partial class VendorBuyListManager
         GatherBuddy.Config.ActiveVendorBuyListId = list.Id;
         GatherBuddy.Config.Save();
 
-        var warning = BuildTeamCraftImportWarning(unresolvedItems);
+        var warning = BuildTeamCraftImportWarning(unresolvedItems, unavailableReasons);
         _statusText = warning == null
             ? $"Imported {importedEntryCount:N0} TeamCraft vendor item(s) into '{list.Name}'."
             : $"Imported {importedEntryCount:N0} TeamCraft vendor item(s) into '{list.Name}'. {warning}";
@@ -188,20 +193,42 @@ public sealed partial class VendorBuyListManager
         return itemName.Length > 0;
     }
 
-    private static bool TryResolveTeamCraftImportEntry(string itemName, out VendorShopEntry entry, out VendorNpc vendor)
+    private static bool TryResolveTeamCraftImportEntry(
+        string itemName,
+        out VendorShopEntry entry,
+        out VendorNpc vendor,
+        out string? unavailableReason)
     {
+        unavailableReason = null;
         foreach (var candidate in GetTeamCraftImportCandidates(itemName))
         {
+            if (!VendorCurrencyAvailabilityResolver.TryCaptureAuthoritative(candidate.CurrencyCosts, out _, out var currencyFailure))
+            {
+                unavailableReason ??= currencyFailure;
+                continue;
+            }
+
             var supportedVendors = VendorDevExclusions.GetSelectableNpcs(
                 candidate.Npcs
                     .Where(npc => VendorPurchaseManager.IsPurchaseSupported(candidate, npc))
                     .ToList(),
                 "resolving a TeamCraft vendor import item",
                 itemName);
-            if (supportedVendors.Count == 0)
+            if (!VendorAvailabilityResolver.TrySelectAvailableVendor(
+                    candidate,
+                    supportedVendors,
+                    out _,
+                    out var availabilityFailure))
+            {
+                if (!string.IsNullOrWhiteSpace(availabilityFailure.Reason))
+                    unavailableReason ??= availabilityFailure.Reason;
                 continue;
+            }
+            var availableVendors = supportedVendors
+                .Where(npc => VendorAvailabilityResolver.Resolve(candidate, npc).IsAvailable)
+                .ToList();
 
-            var preferredVendor = VendorPreferenceHelper.ResolvePreferredNpc(candidate, supportedVendors);
+            var preferredVendor = VendorPreferenceHelper.ResolvePreferredNpc(candidate, availableVendors);
             if (preferredVendor == null)
                 continue;
 
@@ -237,9 +264,11 @@ public sealed partial class VendorBuyListManager
             _                                => 3,
         };
 
-    private static string? BuildTeamCraftImportWarning(IReadOnlyList<string> unresolvedItems)
+    private static string? BuildTeamCraftImportWarning(
+        IReadOnlyList<string> unresolvedItems,
+        IReadOnlyList<string> unavailableReasons)
     {
-        if (unresolvedItems.Count == 0)
+        if (unresolvedItems.Count == 0 && unavailableReasons.Count == 0)
             return null;
 
         var displayedItems = unresolvedItems
@@ -251,8 +280,11 @@ public sealed partial class VendorBuyListManager
             .Skip(displayedItems.Count)
             .Count();
         var itemPreview = string.Join(", ", displayedItems);
-        return remainingCount > 0
+        var warning = remainingCount > 0
             ? $"Skipped {unresolvedItems.Count:N0} item(s): {itemPreview}, and {remainingCount:N0} more."
             : $"Skipped {unresolvedItems.Count:N0} item(s): {itemPreview}.";
+        if (unavailableReasons.Count > 0)
+            warning += $" Reasons: {string.Join(" | ", unavailableReasons.Take(3))}";
+        return warning;
     }
 }

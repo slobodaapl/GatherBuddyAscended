@@ -10,6 +10,7 @@ using Dalamud.Game.Text;
 using GatherBuddy.Alarms;
 using GatherBuddy.AutoGather;
 using GatherBuddy.Crafting;
+using GatherBuddy.Marketboard;
 using Newtonsoft.Json;
 using GatherBuddy.Enums;
 using ElliLib.Classes;
@@ -19,7 +20,7 @@ namespace GatherBuddy.Config;
 
 public partial class Configuration : IPluginConfiguration
 {
-    public int Version { get; set; } = 17;
+    public int Version { get; set; } = 19;
 
     // Set Names
     public string BotanistSetName { get; set; } = "Botanist";
@@ -93,6 +94,7 @@ public partial class Configuration : IPluginConfiguration
     public string UserMacros             { get; set; } = string.Empty;
     public bool   SkipMacroStepIfUnable { get; set; } = true;
     public bool   MacroFallbackEnabled  { get; set; } = true;
+    public bool GoToInnBeforeCrafting { get; set; } = false;
     public Dictionary<string, uint> VendorNpcPreferences { get; set; } = new();
     public Dictionary<string, string> VendorRoutePreferences { get; set; } = new();
     [JsonProperty("VendorBuyListEntries", NullValueHandling = NullValueHandling.Ignore)]
@@ -100,6 +102,8 @@ public partial class Configuration : IPluginConfiguration
     public List<VendorBuyListDefinition> VendorBuyLists { get; set; } = new();
     public Guid ActiveVendorBuyListId { get; set; } = Guid.Empty;
     public bool   VendorNpcLocationsDataShareFirst { get; set; } = true;
+    public List<MarketplaceBuyListDefinition> MarketplaceBuyLists { get; set; } = new();
+    public Guid ActiveMarketplaceBuyListId { get; set; } = Guid.Empty;
 
     // Weather tab
     public bool ShowWeatherNames { get; set; } = true;
@@ -224,6 +228,8 @@ public partial class Configuration : IPluginConfiguration
                 config.Migrate14To15();
                 config.Migrate15To16();
                 config.Migrate16To17();
+                config.Migrate17To18();
+                config.Migrate18To19();
                 changed |= config.HiddenGatherableLevelFilters == null;
                 config.HiddenGatherableLevelFilters ??= [];
                 changed |= config.HiddenGatherableFolkloreFilters == null;
@@ -234,9 +240,13 @@ public partial class Configuration : IPluginConfiguration
                 config.VendorRoutePreferences ??= new();
                 changed |= config.VendorBuyLists == null;
                 config.VendorBuyLists ??= new();
+                changed |= config.MarketplaceBuyLists == null;
+                config.MarketplaceBuyLists ??= new();
                 changed |= config.CraftingFolders == null;
                 config.CraftingFolders ??= [];
                 if (config.EnsureVendorBuyListState())
+                    changed = true;
+                if (config.EnsureMarketplaceBuyListState())
                     changed = true;
                 if (changed)
                     config.Save();
@@ -264,6 +274,7 @@ public partial class Configuration : IPluginConfiguration
 
         var newConfig = new Configuration();
         newConfig.EnsureVendorBuyListState();
+        newConfig.EnsureMarketplaceBuyListState();
         newConfig.Save();
         return newConfig;
     }
@@ -413,6 +424,29 @@ public partial class Configuration : IPluginConfiguration
         Save();
     }
 
+    public void Migrate17To18()
+    {
+        if (Version >= 18)
+            return;
+
+        MarketplaceBuyLists ??= new();
+        EnsureMarketplaceBuyListState();
+        Version = 18;
+        Save();
+    }
+
+    public void Migrate18To19()
+    {
+        if (Version >= 19)
+            return;
+
+        // New navigation is opt-in. Existing crafting/gathering behavior is
+        // unchanged for migrated configurations.
+        GoToInnBeforeCrafting = false;
+        Version = 19;
+        Save();
+    }
+
 
     public bool EnsureVendorBuyListState()
     {
@@ -441,6 +475,50 @@ public partial class Configuration : IPluginConfiguration
         if (VendorBuyLists.Count > 0 && (ActiveVendorBuyListId == Guid.Empty || VendorBuyLists.All(list => list.Id != ActiveVendorBuyListId)))
         {
             ActiveVendorBuyListId = VendorBuyLists[0].Id;
+            changed = true;
+        }
+
+        return changed;
+    }
+
+    public bool EnsureMarketplaceBuyListState()
+    {
+        MarketplaceBuyLists ??= new();
+        var changed = false;
+        if (MarketplaceBuyLists.Count == 0)
+        {
+            MarketplaceBuyLists.Add(new MarketplaceBuyListDefinition { Name = "Default" });
+            changed = true;
+        }
+
+        if (MarketplaceBuyLists.Any(list => list.Id == Guid.Empty))
+        {
+            foreach (var list in MarketplaceBuyLists)
+                if (list.Id == Guid.Empty)
+                    list.Id = Guid.NewGuid();
+            changed = true;
+        }
+
+        foreach (var list in MarketplaceBuyLists)
+        {
+            if (list.Entries == null)
+            {
+                list.Entries = new();
+                changed = true;
+            }
+            var before = list.Entries.Count;
+            list.Entries.RemoveAll(entry => entry == null || entry.ItemId == 0 || entry.TargetQuantity <= 0);
+            changed |= before != list.Entries.Count;
+            if (string.IsNullOrWhiteSpace(list.Name))
+            {
+                list.Name = "Marketplace List";
+                changed = true;
+            }
+        }
+
+        if (ActiveMarketplaceBuyListId == Guid.Empty || MarketplaceBuyLists.All(list => list.Id != ActiveMarketplaceBuyListId))
+        {
+            ActiveMarketplaceBuyListId = MarketplaceBuyLists[0].Id;
             changed = true;
         }
 

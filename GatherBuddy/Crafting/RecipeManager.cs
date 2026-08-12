@@ -53,6 +53,56 @@ public static class RecipeManager
         return recipesByItemId.GetValueOrDefault(itemId) ?? (IReadOnlyList<Recipe>)Array.Empty<Recipe>();
     }
 
+    public static unsafe Dictionary<uint, uint> GetBestClassRecipes()
+    {
+        var result = new Dictionary<uint, uint>();
+        if (!Dalamud.Framework.IsInFrameworkUpdateThread)
+        {
+            GatherBuddy.Log.Warning("[RecipeManager] Best-class recipe selection requested outside the framework thread.");
+            return result;
+        }
+
+        var playerState = FFXIVClientStructs.FFXIV.Client.Game.UI.PlayerState.Instance();
+        if (playerState == null)
+            return result;
+
+        var jobScores = new Dictionary<uint, (int Level, int CombinedStats, int CP)>();
+        for (uint jobId = 8; jobId <= 15; jobId++)
+        {
+            var stats = GearsetStatsReader.ReadGearsetStatsForJob(jobId);
+            if (stats == null)
+                continue;
+            jobScores[jobId] = (playerState->ClassJobLevels[(int)jobId], stats.Craftsmanship + stats.Control, stats.CP);
+        }
+
+        foreach (var (itemId, recipes) in _recipesByItemId.Value)
+        {
+            if (recipes.Count < 2)
+                continue;
+
+            Recipe? bestRecipe = null;
+            (int Level, int CombinedStats, int CP) bestScore = default;
+            foreach (var recipe in recipes)
+            {
+                var jobId = recipe.CraftType.RowId + 8;
+                if (!jobScores.TryGetValue(jobId, out var score)
+                 || score.Level < recipe.RecipeLevelTable.Value.ClassJobLevel)
+                    continue;
+
+                if (!bestRecipe.HasValue || score.CompareTo(bestScore) > 0)
+                {
+                    bestRecipe = recipe;
+                    bestScore = score;
+                }
+            }
+
+            if (bestRecipe.HasValue)
+                result[itemId] = bestRecipe.Value.RowId;
+        }
+
+        return result;
+    }
+
     private static Dictionary<uint, List<Recipe>> BuildRecipeIndex()
     {
         GatherBuddy.Log.Debug("[RecipeManager] Building recipe index");
