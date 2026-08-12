@@ -537,6 +537,19 @@ namespace GatherBuddy.Gui
                                 preset.ChooseBestActionsAutomatically,
                                 x => preset.ChooseBestActionsAutomatically = x))
                             selector.Save();
+
+                        if (preset.ItemType.Collectables && preset.ChooseBestActionsAutomatically)
+                        {
+                            var collectableSolver = (int)preset.CollectableSolver;
+                            string[] collectableSolverNames = ["Expected scrip", "Legacy"];
+                            if (ImGui.Combo("Collectable solver", ref collectableSolver, collectableSolverNames,
+                                    collectableSolverNames.Length))
+                            {
+                                preset.CollectableSolver = (Vulcan.CollectableSolverMode)collectableSolver;
+                                selector.Save();
+                            }
+                            ImGuiUtil.HoverTooltip("Expected scrip evaluates exact action outcome probabilities and reward tiers. Legacy retains the previous highest-tier rotation.");
+                        }
                     }
 
                     if (!preset.ItemType.Fish && preset.ChooseBestActionsAutomatically && preset.NodeType.Regular)
@@ -900,5 +913,4 @@ namespace GatherBuddy.Gui
         }
     }
 }
-
 

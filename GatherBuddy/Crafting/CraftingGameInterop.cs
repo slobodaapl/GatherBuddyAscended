@@ -76,6 +76,7 @@ public static class CraftingGameInterop
     private static Dictionary<uint, bool> _equipmentItemCache = new();
     private static Vulcan.UserMacroLibrary? _userMacroLibrary = null;
     private static string? _currentSelectedMacroId = null;
+    private static DonatelloExecutionOptions? _currentDonatelloOptions;
     private static DateTime _taskManagerIdleSince = DateTime.MinValue;
     private static DateTime _nextActionAllowedAt = DateTime.MinValue;
     private static CraftPreparationFailure? _lastPreparationFailure = null;
@@ -221,6 +222,7 @@ public static class CraftingGameInterop
         ResetReconciliationTracking();
         _currentQualityPolicy = null;
         _currentSelectedMacroId = null;
+        _currentDonatelloOptions = null;
         _lastPreparationFailure = null;
         _automationFaultReported = false;
         StateChanged = null;
@@ -255,6 +257,9 @@ public static class CraftingGameInterop
     {
         return _currentSelectedMacroId;
     }
+
+    public static void SetDonatelloOptions(DonatelloExecutionOptions? options)
+        => _currentDonatelloOptions = options;
 
     public static bool TryConsumePreparationFailure(out CraftPreparationFailure failure)
     {
@@ -307,15 +312,11 @@ public static class CraftingGameInterop
     {
         try
         {
-            var recipeNote = FFXIVClientStructs.FFXIV.Client.Game.UI.RecipeNote.Instance();
-            if (recipeNote != null && recipeNote->RecipeList != null)
+            var selectedRecipe = RecipeNoteExt.GetSelectedRecipeEntry();
+            if (selectedRecipe != null && selectedRecipe->RecipeId == recipeId)
             {
-                var selectedRecipe = recipeNote->RecipeList->SelectedRecipe;
-                if (selectedRecipe != null && selectedRecipe->RecipeId == recipeId)
-                {
-                    GatherBuddy.Log.Debug($"[Crafting] Recipe {recipeId} already selected, skipping OpenRecipe");
-                    return true;
-                }
+                GatherBuddy.Log.Debug($"[Crafting] Recipe {recipeId} already selected, skipping OpenRecipe");
+                return true;
             }
             
             var agent = AgentRecipeNote.Instance();
@@ -337,12 +338,13 @@ public static class CraftingGameInterop
     {
         try
         {
-            var addon = Dalamud.GameGui.GetAddonByName("RecipeNote");
+            var cosmic = _currentRecipe is { } recipe && recipe.Number == 0;
+            var addon = Dalamud.GameGui.GetAddonByName(cosmic ? "WKSRecipeNotebook" : "RecipeNote");
             if (addon != null && addon.Address != nint.Zero)
             {
                 var atkUnit = (AtkUnitBase*)addon.Address;
                 if (atkUnit != null && atkUnit->IsVisible)
-                    return true;
+                    return !cosmic || SelectCosmicRecipe(atkUnit);
             }
         }
         catch { }
@@ -354,10 +356,13 @@ public static class CraftingGameInterop
     {
         try
         {
-            var addon = Dalamud.GameGui.GetAddonByName("RecipeNote");
+            var addonName = _currentRecipe is { } recipe && recipe.Number == 0
+                ? "WKSRecipeNotebook"
+                : "RecipeNote";
+            var addon = Dalamud.GameGui.GetAddonByName(addonName);
             if (addon == null || addon.Address == nint.Zero)
             {
-                GatherBuddy.Log.Debug("[Crafting] WaitForIngredientsAssigned: RecipeNote not found, re-opening");
+                GatherBuddy.Log.Debug($"[Crafting] WaitForIngredientsAssigned: {addonName} not found, re-opening");
                 if (_currentRecipeId.HasValue)
                     OpenRecipe(_currentRecipeId.Value);
                 return false;
@@ -366,7 +371,7 @@ public static class CraftingGameInterop
             var atkUnit = (AtkUnitBase*)addon.Address;
             if (atkUnit == null || !atkUnit->IsVisible)
             {
-                GatherBuddy.Log.Debug("[Crafting] WaitForIngredientsAssigned: RecipeNote not visible, re-opening");
+                GatherBuddy.Log.Debug($"[Crafting] WaitForIngredientsAssigned: {addonName} not visible, re-opening");
                 if (_currentRecipeId.HasValue)
                     OpenRecipe(_currentRecipeId.Value);
                 return false;
@@ -389,7 +394,8 @@ public static class CraftingGameInterop
     {
         try
         {
-            var addon = Dalamud.GameGui.GetAddonByName("RecipeNote");
+            var cosmic = _currentRecipe is { } currentRecipe && currentRecipe.Number == 0;
+            var addon = Dalamud.GameGui.GetAddonByName(cosmic ? "WKSRecipeNotebook" : "RecipeNote");
             if (addon == null || addon.Address == nint.Zero)
             {
                 GatherBuddy.Log.Debug($"[Crafting] RecipeNote addon not found");
@@ -397,15 +403,7 @@ public static class CraftingGameInterop
             }
 
             var atkUnit = (AtkUnitBase*)addon.Address;
-            var recipeNote = FFXIVClientStructs.FFXIV.Client.Game.UI.RecipeNote.Instance();
-            if (recipeNote == null || recipeNote->RecipeList == null)
-            {
-                GatherBuddy.Log.Debug($"[Crafting] RecipeNote or RecipeList is null");
-                return IngredientAssignmentResult.Retry;
-            }
-
-            var recipeData = recipeNote->RecipeList;
-            var selectedRecipe = recipeData->SelectedRecipe;
+            var selectedRecipe = RecipeNoteExt.GetSelectedRecipeEntry();
             if (selectedRecipe == null)
             {
                 GatherBuddy.Log.Debug($"[Crafting] SelectedRecipe is null");
@@ -416,6 +414,17 @@ public static class CraftingGameInterop
             {
                 GatherBuddy.Log.Debug("[Crafting] Quality policy unavailable during ingredient assignment");
                 return IngredientAssignmentResult.Retry;
+            }
+
+            if (cosmic)
+            {
+                var (firstButton, secondButton) = CosmicIngredientButtonOrder(_currentDonatelloOptions);
+                if (!ClickCosmicIngredientButton(atkUnit, firstButton)
+                    || !ClickCosmicIngredientButton(atkUnit, secondButton))
+                    return IngredientAssignmentResult.Retry;
+                return AreIngredientsAssigned()
+                    ? IngredientAssignmentResult.Success
+                    : IngredientAssignmentResult.Retry;
             }
 
             var ingredients = RecipeNoteExt.GetIngredientsSpan(selectedRecipe);
@@ -774,7 +783,8 @@ public static class CraftingGameInterop
     {
         try
         {
-            var addon = Dalamud.GameGui.GetAddonByName("RecipeNote");
+            var cosmic = _currentRecipe is { } recipe && recipe.Number == 0;
+            var addon = Dalamud.GameGui.GetAddonByName(cosmic ? "WKSRecipeNotebook" : "RecipeNote");
             if (addon == null || addon.Address == nint.Zero)
                 return false;
 
@@ -782,7 +792,7 @@ public static class CraftingGameInterop
             if (atkUnit == null || !atkUnit->IsVisible)
                 return false;
 
-            Callback.Fire(atkUnit, true, 8);
+            Callback.Fire(atkUnit, true, cosmic ? 6 : 8);
             GatherBuddy.Log.Information($"[Crafting] Craft started");
             return true;
         }
@@ -1108,11 +1118,11 @@ public static class CraftingGameInterop
 
     private static unsafe bool AreIngredientsAssigned()
     {
-        var recipeNote = FFXIVClientStructs.FFXIV.Client.Game.UI.RecipeNote.Instance();
-        if (recipeNote == null || recipeNote->RecipeList == null || recipeNote->RecipeList->SelectedRecipe == null)
+        var selectedRecipe = RecipeNoteExt.GetSelectedRecipeEntry();
+        if (selectedRecipe == null)
             return false;
 
-        var ingredients = RecipeNoteExt.GetIngredientsSpan(recipeNote->RecipeList->SelectedRecipe);
+        var ingredients = RecipeNoteExt.GetIngredientsSpan(selectedRecipe);
         for (int i = 0; i < ingredients.Length; i++)
         {
             var ingredient = ingredients[i];
@@ -1131,6 +1141,50 @@ public static class CraftingGameInterop
 
         return true;
     }
+
+    private static unsafe bool SelectCosmicRecipe(AtkUnitBase* addon)
+    {
+        if (!_currentRecipeId.HasValue)
+            return false;
+        var selected = RecipeNoteExt.GetSelectedRecipeEntry();
+        if (selected != null && selected->RecipeId == _currentRecipeId.Value)
+            return true;
+
+        var data = RecipeNoteExt.GetRecipeData();
+        if (data == null || data->Recipes == null)
+            return false;
+        for (var index = 0; index < data->RecipesCount; index++)
+        {
+            Callback.Fire(addon, false, 0, index);
+            selected = RecipeNoteExt.GetSelectedRecipeEntry();
+            if (selected != null && selected->RecipeId == _currentRecipeId.Value)
+                return true;
+        }
+        return false;
+    }
+
+    private static unsafe bool ClickCosmicIngredientButton(AtkUnitBase* addon, uint nodeId)
+    {
+        var node = addon->GetNodeById(nodeId);
+        if (node == null)
+            return false;
+        var button = node->GetAsAtkComponentButton();
+        if (button == null || button->AtkComponentBase.OwnerNode == null)
+            return false;
+        var buttonNode = button->AtkComponentBase.OwnerNode;
+        var eventData = buttonNode->AtkResNode.AtkEventManager.Event;
+        if (eventData == null)
+            return false;
+        var atkEvent = (AtkEvent*)eventData;
+        addon->ReceiveEvent(atkEvent->State.EventType, (int)atkEvent->Param, eventData);
+        return true;
+    }
+
+    internal static (uint First, uint Second) CosmicIngredientButtonOrder(
+        DonatelloExecutionOptions? options)
+        => options?.Objective == DonatelloSolveObjective.MaximizeQuality
+            ? (40u, 39u)
+            : (39u, 40u);
 
     private static unsafe (int NQ, int HQ) GetInventoryAvailableCounts(uint itemId)
     {
@@ -1282,6 +1336,7 @@ public static class CraftingGameInterop
             _currentIngredientPreferences = null;
             _currentUseAllNQ = false;
             _currentSelectedMacroId = null;
+            _currentDonatelloOptions = null;
             _currentRecipe = null;
             _currentRecipeId = null;
             CraftFinished?.Invoke(finishedRecipe, false);
@@ -1333,6 +1388,16 @@ public static class CraftingGameInterop
                     atkUnit->Close(true);
                 }
             }
+            var cosmicAddon = Dalamud.GameGui.GetAddonByName("WKSRecipeNotebook");
+            if (cosmicAddon != null && cosmicAddon.Address != nint.Zero)
+            {
+                var atkUnit = (AtkUnitBase*)cosmicAddon.Address;
+                if (atkUnit != null && atkUnit->IsVisible)
+                {
+                    GatherBuddy.Log.Information("[Crafting] Closing WKSRecipeNotebook window on exit from IdleBetween");
+                    Callback.Fire(atkUnit, true, -1);
+                }
+            }
         }
         catch (Exception ex)
         {
@@ -1361,6 +1426,7 @@ public static class CraftingGameInterop
         var actualRecipe = recipe.Value;
         GatherBuddy.Log.Debug($"[Crafting] Building craft state for recipe {_currentRecipeId}");
         _vulcanCraftState = CraftingStateBuilder.BuildCraftState(actualRecipe);
+        _vulcanCraftState.DonatelloOptions = _currentDonatelloOptions;
         var qualityPolicy = GetActiveQualityPolicy();
         if (qualityPolicy != null)
         {
@@ -1561,6 +1627,7 @@ public static class CraftingGameInterop
         }
         
         _currentSelectedMacroId = null;
+        _currentDonatelloOptions = null;
         _currentQualityPolicy = null;
 
         _currentRecipe = null;
@@ -1603,22 +1670,6 @@ public static class CraftingGameInterop
         _vulcanPreActionStepState = null;
         _vulcanPendingAction = VulcanSkill.None;
         ResetUnreconciledObservation();
-    }
-
-    private static uint? GetRecipeIdFromUI()
-    {
-        try
-        {
-            var addon = Dalamud.GameGui.GetAddonByName("Synthesis");
-            if (addon == null)
-                return null;
-
-            return null;
-        }
-        catch
-        {
-            return null;
-        }
     }
 
     private static bool TryGetRecipe(uint recipeId, out Recipe? recipe)

@@ -2,6 +2,19 @@ using System.Text;
 
 namespace GatherBuddy.Vulcan;
 
+public enum DonatelloSolveObjective
+{
+    MaximizeQuality,
+    ProgressOnly,
+}
+
+public sealed record DonatelloExecutionOptions(
+    DonatelloSolveObjective Objective = DonatelloSolveObjective.MaximizeQuality,
+    bool MinimizeSteps = false,
+    uint MaxStellarSteadyHandUses = 0,
+    uint MaxMaterialMiracleUses = 0,
+    uint MinimumStepsBeforeMaterialMiracle = 0);
+
 public record class CraftState
     {
         // player stats
@@ -37,6 +50,10 @@ public record class CraftState
         public bool IsCosmic;
         public ConditionFlags ConditionFlags;
         public bool MissionHasMaterialMiracle;
+        public uint CurrentMaterialMiracleCharges;
+        public bool MissionHasStellarSteadyHand;
+        public uint CurrentStellarSteadyHandCharges;
+        public DonatelloExecutionOptions? DonatelloOptions;
         public int InitialQuality;
 
         public uint ItemId;
@@ -77,6 +94,10 @@ public record class CraftState
         public VulcanSkill PrevComboAction;
         public uint MaterialMiracleCharges;
         public bool MaterialMiracleActive;
+        public uint MaterialMiraclesUsed;
+        public uint StellarSteadyHandCharges;
+        public int StellarSteadyHandLeft;
+        public uint StellarSteadyHandsUsed;
         public int ObserveCounter;
 
         public override string ToString() => $"#{Index} {Condition}: {Progress}/{Quality}/{Durability}/{RemainingCP}; {BuffsString()}; Prev={PrevComboAction}{(PrevActionFailed ? " (failed)" : "")}";
@@ -101,6 +122,7 @@ public record class CraftState
             sb.Append($", CO={CarefulObservationLeft}, Delineations={CrafterDelineationsLeft}, HS={(HeartAndSoulActive ? "active" : HeartAndSoulAvailable ? "avail" : "none")}");
             sb.Append($", QuickInno:{QuickInnoAvailable}/{QuickInnoLeft}/{InnovationLeft}");
             sb.Append($", MaterialMiracleActive:{MaterialMiracleActive} / {MaterialMiracleCharges}");
+            sb.Append($", StellarSteadyHand:{StellarSteadyHandLeft} / {StellarSteadyHandCharges}");
             return sb.ToString();
         }
     }

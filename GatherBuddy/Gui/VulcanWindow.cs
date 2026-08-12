@@ -345,7 +345,11 @@ public partial class VulcanWindow : Window, IDisposable
         var artisanInstalled = artisanToggleState.IsInstalled;
         var artisanLoaded = artisanToggleState.IsLoaded;
         var artisanToggleInProgress = UpdatePendingArtisanToggle(artisanInstalled, artisanLoaded);
-        var artisanToggleBlocked = artisanInstalled && !artisanToggleState.CanToggle && !artisanToggleInProgress;
+        var artisanShimActive = GatherBuddy.ArtisanShim?.IsActive == true;
+        var artisanShimBusy = GatherBuddy.ArtisanShim?.IsBusy == true;
+        var artisanToggleBlocked = artisanInstalled
+            && (!artisanToggleState.CanToggle || (!artisanLoaded && artisanShimBusy))
+            && !artisanToggleInProgress;
 
         ImGui.AlignTextToFramePadding();
         ImGui.Text("Crafting System");
@@ -359,11 +363,23 @@ public partial class VulcanWindow : Window, IDisposable
                 ? artisanLoaded
                     ? "Disable Artisan"
                     : "Enable Artisan"
-                : "Artisan Missing";
+                : artisanShimActive
+                    ? "Artisan Shim Active"
+                    : "Artisan Missing";
         using (ImRaii.Disabled(!artisanInstalled || artisanToggleInProgress || artisanToggleBlocked))
         {
             if (ImGui.SmallButton($"{buttonLabel}##toggleArtisan"))
                 TryToggleArtisan(!artisanLoaded);
+        }
+        if (ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
+        {
+            var tooltip = artisanShimBusy && !artisanLoaded
+                ? "Finish or stop the compatibility-shim craft before enabling Artisan."
+                : artisanShimActive
+                    ? "GatherBuddy currently provides Artisan.* IPC compatibility for ICE and forces Donatello."
+                    : artisanToggleState.BlockedReason;
+            if (!string.IsNullOrWhiteSpace(tooltip))
+                ImGui.SetTooltip(tooltip);
         }
 
         ImGui.SameLine();
@@ -404,6 +420,8 @@ public partial class VulcanWindow : Window, IDisposable
         if (!artisanInstalled)
         {
             GatherBuddy.Log.Warning("[VulcanWindow] Artisan toggle was pending, but Artisan is no longer installed.");
+            if (_pendingArtisanEnabledState == true)
+                GatherBuddy.ArtisanShim?.RestoreAfterFailedArtisanEnable();
             ClearPendingArtisanToggle();
             return false;
         }
@@ -415,6 +433,8 @@ public partial class VulcanWindow : Window, IDisposable
             if (exception != null)
                 GatherBuddy.Log.Debug($"[VulcanWindow] Artisan toggle exception: {exception}");
             Communicator.PrintError($"Failed to {(_pendingArtisanEnabledState.Value ? "enable" : "disable")} Artisan.");
+            if (_pendingArtisanEnabledState == true)
+                GatherBuddy.ArtisanShim?.RestoreAfterFailedArtisanEnable();
             ClearPendingArtisanToggle();
             return false;
         }
@@ -423,6 +443,8 @@ public partial class VulcanWindow : Window, IDisposable
         {
             GatherBuddy.Log.Warning($"[VulcanWindow] Artisan toggle was cancelled while trying to {(_pendingArtisanEnabledState.Value ? "enable" : "disable")} Artisan.");
             Communicator.PrintError($"Failed to {(_pendingArtisanEnabledState.Value ? "enable" : "disable")} Artisan.");
+            if (_pendingArtisanEnabledState == true)
+                GatherBuddy.ArtisanShim?.RestoreAfterFailedArtisanEnable();
             ClearPendingArtisanToggle();
             return false;
         }
@@ -430,6 +452,7 @@ public partial class VulcanWindow : Window, IDisposable
         if (artisanLoaded == _pendingArtisanEnabledState.Value)
         {
             GatherBuddy.Log.Debug($"[VulcanWindow] Artisan {(artisanLoaded ? "enabled" : "disabled")} successfully.");
+            GatherBuddy.ArtisanShim?.ReconcileProviderState();
             ClearPendingArtisanToggle();
             return false;
         }
@@ -439,14 +462,26 @@ public partial class VulcanWindow : Window, IDisposable
 
         GatherBuddy.Log.Warning($"[VulcanWindow] Timed out waiting for Artisan to {(_pendingArtisanEnabledState.Value ? "enable" : "disable")}.");
         Communicator.PrintError($"Timed out trying to {(_pendingArtisanEnabledState.Value ? "enable" : "disable")} Artisan.");
+        if (_pendingArtisanEnabledState == true)
+            GatherBuddy.ArtisanShim?.RestoreAfterFailedArtisanEnable();
         ClearPendingArtisanToggle();
         return false;
     }
 
     private void TryToggleArtisan(bool enable)
     {
+        if (GatherBuddy.ArtisanShim != null
+            && !GatherBuddy.ArtisanShim.TryPrepareArtisanToggle(enable, out var blockedReason))
+        {
+            GatherBuddy.Log.Warning($"[VulcanWindow] Refusing Artisan toggle: {blockedReason}");
+            Communicator.PrintError(blockedReason ?? "Artisan cannot be toggled right now.");
+            return;
+        }
+
         if (!DalamudPluginToggleHelper.TrySetPluginEnabled(ArtisanPluginName, enable, out var toggleTask, out var failureReason))
         {
+            if (enable)
+                GatherBuddy.ArtisanShim?.RestoreAfterFailedArtisanEnable();
             GatherBuddy.Log.Warning($"[VulcanWindow] Failed to invoke reflected Artisan toggle for state {(enable ? "enabled" : "disabled")}: {failureReason ?? "unknown reason"}.");
             Communicator.PrintError(failureReason ?? $"Failed to {(enable ? "enable" : "disable")} Artisan.");
             return;
@@ -471,4 +506,3 @@ public partial class VulcanWindow : Window, IDisposable
         DisposeListEditor();
     }
 }
-

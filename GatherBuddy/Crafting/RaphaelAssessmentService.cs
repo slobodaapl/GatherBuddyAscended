@@ -512,11 +512,21 @@ public static class RaphaelAssessmentService
             request.Level,
             request.Manipulation,
             request.Specialist,
-            false,
+            request.SplendorCosmic,
             request.CrafterDelineations);
 
-        craft = GameStateBuilder.BuildCraftState(CraftingStateBuilder.BuildRecipeInfo(recipe), stats);
+        craft = GameStateBuilder.BuildCraftState(
+            CraftingStateBuilder.BuildRecipeInfo(recipe, stats.Level, readDutyActionCharges: false),
+            stats);
         craft.InitialQuality = request.InitialQuality;
+        craft.CurrentStellarSteadyHandCharges = request.StellarSteadyHandCharges;
+        craft.MissionHasStellarSteadyHand |= request.StellarSteadyHandCharges > 0;
+        craft.DonatelloOptions = new DonatelloExecutionOptions(
+            request.Objective,
+            request.MinimizeSteps,
+            request.StellarSteadyHandCharges,
+            request.MaxMaterialMiracleUses,
+            request.MinimumStepsBeforeMaterialMiracle);
         return true;
     }
 

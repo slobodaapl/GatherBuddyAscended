@@ -55,12 +55,10 @@ public sealed class DonatelloSolverDefinition : ISolverDefinition
 
     private static string UnsupportedReason(CraftState craft)
     {
-        if (craft.IsCosmic || craft.SplendorCosmic || craft.MissionHasMaterialMiracle)
-            return "Donatello does not yet model Cosmic/Material Miracle mechanics";
         var supported = ConditionFlags.Normal | ConditionFlags.Good | ConditionFlags.Excellent
             | ConditionFlags.Poor | ConditionFlags.Centered | ConditionFlags.Sturdy
             | ConditionFlags.Pliant | ConditionFlags.Malleable | ConditionFlags.Primed
-            | ConditionFlags.GoodOmen;
+            | ConditionFlags.GoodOmen | ConditionFlags.Robust;
         return (craft.ConditionFlags & ~supported) != 0
             ? "Recipe exposes unsupported crafting conditions"
             : string.Empty;
@@ -95,6 +93,17 @@ public sealed class DonatelloSolver : Solver
     {
         if (_progressFallback)
             return _progressOnlySolver.Solve(craft, step) with { Comment = "Donatello completion fallback" };
+
+        if (_pendingSolve == null && ShouldUseMaterialMiracle(_craft, step))
+        {
+            var (miracleResult, miracleExpected) = Simulator.Execute(_craft, step, VulcanSkill.MaterialMiracle, 0, 1);
+            if (miracleResult != Simulator.ExecuteResult.CantUse)
+            {
+                _expectedState = miracleExpected;
+                _handledRoot = null;
+                return new(VulcanSkill.MaterialMiracle, "Donatello Material Miracle policy");
+            }
+        }
 
         if (_pendingSolve != null)
         {
@@ -210,7 +219,8 @@ public sealed class DonatelloSolver : Solver
             var candidate = _pendingSolve!.GetAwaiter().GetResult().ToList();
             var incumbentScore = DonatelloPlanEvaluator.Evaluate(_craft, root, incumbent);
             var candidateScore = DonatelloPlanEvaluator.Evaluate(_craft, root, candidate);
-            var minimizeSteps = GatherBuddy.Config.RaphaelSolverConfig.DonatelloMinimizeSteps;
+            var minimizeSteps = _craft.DonatelloOptions?.MinimizeSteps
+                ?? GatherBuddy.Config.RaphaelSolverConfig.DonatelloMinimizeSteps;
             if (candidateScore.Completes && candidateScore.IsStrictlyBetterThan(incumbentScore, minimizeSteps))
             {
                 _plan = candidate;
@@ -256,18 +266,23 @@ public sealed class DonatelloSolver : Solver
 
     private static bool CanRepresentLiveRoot(StepState step, out string reason)
     {
-        if (step.Condition < Condition.Normal || step.Condition > Condition.GoodOmen)
+        if (step.Condition < Condition.Normal || step.Condition > Condition.Robust)
         {
             reason = "unknown crafting condition";
             return false;
         }
-        if (step.MaterialMiracleActive || step.MaterialMiracleCharges > 0)
-        {
-            reason = "Material Miracle state is not represented by the native solver";
-            return false;
-        }
         reason = string.Empty;
         return true;
+    }
+
+    internal static bool ShouldUseMaterialMiracle(CraftState craft, StepState step)
+    {
+        var options = craft.DonatelloOptions;
+        return options is { MaxMaterialMiracleUses: > 0 }
+            && step.MaterialMiraclesUsed < options.MaxMaterialMiracleUses
+            && step.Index >= options.MinimumStepsBeforeMaterialMiracle
+            && !step.MaterialMiracleActive
+            && Simulator.CanUseAction(craft, step, VulcanSkill.MaterialMiracle);
     }
 
     private static bool Equivalent(StepState expected, StepState actual, bool ignoreQualityAndCondition)
@@ -296,7 +311,11 @@ public sealed class DonatelloSolver : Solver
             && expected.TrainedPerfectionActive == actual.TrainedPerfectionActive
             && expected.PrevComboAction == actual.PrevComboAction
             && expected.MaterialMiracleCharges == actual.MaterialMiracleCharges
-            && expected.MaterialMiracleActive == actual.MaterialMiracleActive;
+            && expected.MaterialMiracleActive == actual.MaterialMiracleActive
+            && expected.MaterialMiraclesUsed == actual.MaterialMiraclesUsed
+            && expected.StellarSteadyHandCharges == actual.StellarSteadyHandCharges
+            && expected.StellarSteadyHandLeft == actual.StellarSteadyHandLeft
+            && expected.StellarSteadyHandsUsed == actual.StellarSteadyHandsUsed;
 
     internal static bool RequiresReplan(CraftState craft, StepState? expected, StepState actual)
     {
@@ -313,7 +332,8 @@ public sealed class DonatelloSolver : Solver
             + $"{step.CarefulObservationLeft}/{step.CrafterDelineationsLeft}/{(int)step.PrevComboAction}/{step.HeartAndSoulActive}/"
             + $"{step.HeartAndSoulAvailable}/{step.ExpedienceLeft}/{step.QuickInnoLeft}/"
             + $"{step.QuickInnoAvailable}/{step.TrainedPerfectionActive}/{step.TrainedPerfectionAvailable}/"
-            + $"{step.MaterialMiracleCharges}/{step.MaterialMiracleActive}";
+            + $"{step.MaterialMiracleCharges}/{step.MaterialMiracleActive}/{step.MaterialMiraclesUsed}/"
+            + $"{step.StellarSteadyHandCharges}/{step.StellarSteadyHandLeft}/{step.StellarSteadyHandsUsed}";
 
     public override Solver Clone()
         => new DonatelloSolver(

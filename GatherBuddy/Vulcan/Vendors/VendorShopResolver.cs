@@ -165,6 +165,11 @@ public static class VendorShopResolver
                 GatherBuddy.Log.Debug($"[VendorShopResolver] Using Lumina fallback for missing shop maps ({dataShareAvailability})");
             }
 
+            gilMap       ??= [];
+            specialMap   ??= [];
+            gcMap        ??= [];
+            inclusionMap ??= [];
+
             var directSpecialMap = CloneNpcMap(specialMap);
             var inclusionRoutes  = BuildSpecialShopInclusionRoutes();
             AugmentSpecialMapFromInclusion(specialMap, inclusionMap);

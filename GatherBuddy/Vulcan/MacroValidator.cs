@@ -91,7 +91,7 @@ public static class MacroValidator
         if (stats == null)
             return new MacroValidationResult { IsValid = false, Failure = MacroValidationFailure.NoStats };
 
-        var recipeInfo = CraftingStateBuilder.BuildRecipeInfo(recipe);
+        var recipeInfo = CraftingStateBuilder.BuildRecipeInfo(recipe, stats.Level);
         var craft      = GameStateBuilder.BuildCraftState(recipeInfo, stats);
         var step       = GameStateBuilder.BuildInitialStepState(craft, startingQuality);
 

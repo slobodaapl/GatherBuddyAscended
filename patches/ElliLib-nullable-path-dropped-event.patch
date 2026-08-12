@@ -1,0 +1,13 @@
+diff --git a/ElliLib/Filesystem/Selector/FileSystemSelector.DragDrop.cs b/ElliLib/Filesystem/Selector/FileSystemSelector.DragDrop.cs
+--- a/ElliLib/Filesystem/Selector/FileSystemSelector.DragDrop.cs
++++ b/ElliLib/Filesystem/Selector/FileSystemSelector.DragDrop.cs
+@@ -10,5 +10,5 @@ public partial class FileSystemSelector<T, TStateStorage>
+ 
+     public delegate void PathDroppedDelegate(List<KeyValuePair<string, FileSystem<T>.IPath>> movedPaths, FileSystem<T>.IPath targetPath);
+-    public event PathDroppedDelegate PathDropped;
++    public event PathDroppedDelegate? PathDropped;
+ 
+     // The currently moved object.
+ 
+     // The currently moved object.
+     private readonly Dictionary<string, FileSystem<T>.IPath>          _movedPathsDragDropCache = new();

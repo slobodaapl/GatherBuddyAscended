@@ -14,11 +14,22 @@ public record RaphaelSolveRequest(
     bool Specialist,
     int InitialQuality = 0,
     string? ValidationContext = null,
-    int CrafterDelineations = 0
+    int CrafterDelineations = 0,
+    bool SplendorCosmic = false,
+    DonatelloSolveObjective Objective = DonatelloSolveObjective.MaximizeQuality,
+    bool MinimizeSteps = false,
+    uint StellarSteadyHandCharges = 0,
+    uint MaxMaterialMiracleUses = 0,
+    uint MinimumStepsBeforeMaterialMiracle = 0
 )
 {
     public static RaphaelSolveRequest FromCraftState(CraftState craft, bool allowSpecialistActions, string? validationContext = null)
-        => new(
+    {
+        var options = craft.DonatelloOptions;
+        var stellarCharges = options == null
+            ? 0u
+            : Math.Min(craft.CurrentStellarSteadyHandCharges, options.MaxStellarSteadyHandUses);
+        return new(
             RecipeId: craft.RecipeId,
             Level: craft.StatLevel,
             Craftsmanship: craft.StatCraftsmanship,
@@ -28,12 +39,19 @@ public record RaphaelSolveRequest(
             Specialist: allowSpecialistActions && craft.Specialist,
             InitialQuality: craft.InitialQuality,
             ValidationContext: validationContext,
-            CrafterDelineations: allowSpecialistActions && craft.Specialist ? craft.CrafterDelineations : 0
+            CrafterDelineations: allowSpecialistActions && craft.Specialist ? craft.CrafterDelineations : 0,
+            SplendorCosmic: craft.SplendorCosmic,
+            Objective: options?.Objective ?? DonatelloSolveObjective.MaximizeQuality,
+            MinimizeSteps: options?.MinimizeSteps ?? GatherBuddy.Config.RaphaelSolverConfig.DonatelloMinimizeSteps,
+            StellarSteadyHandCharges: stellarCharges,
+            MaxMaterialMiracleUses: options?.MaxMaterialMiracleUses ?? 0,
+            MinimumStepsBeforeMaterialMiracle: options?.MinimumStepsBeforeMaterialMiracle ?? 0
         );
+    }
 
     public string GetKey()
     {
-        var key = $"{RecipeId}/{Level}/{Craftsmanship}/{Control}/{CP}/{(Manipulation ? "1" : "0")}/{(Specialist ? "1" : "0")}/{InitialQuality}/{CrafterDelineations}";
+        var key = $"{RecipeId}/{Level}/{Craftsmanship}/{Control}/{CP}/{(Manipulation ? "1" : "0")}/{(Specialist ? "1" : "0")}/{InitialQuality}/{CrafterDelineations}/{(SplendorCosmic ? "1" : "0")}/{(int)Objective}/{(MinimizeSteps ? "1" : "0")}/{StellarSteadyHandCharges}/{MaxMaterialMiracleUses}/{MinimumStepsBeforeMaterialMiracle}";
         return string.IsNullOrEmpty(ValidationContext) ? key : $"{key}/{ValidationContext}";
     }
 }

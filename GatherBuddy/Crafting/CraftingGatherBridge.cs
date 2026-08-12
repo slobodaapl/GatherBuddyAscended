@@ -77,6 +77,17 @@ public static class CraftingGatherBridge
     
     public static uint RecipeToCraft => _recipeIdToCraft;
     public static bool WaitingForGatherComplete => _waitingForGatherComplete;
+    public static bool HasActiveQueue
+        => _queueProcessor != null
+            || _pendingQueueStart != null
+            || !_queueProcessorDrain.IsCompleted;
+    public static bool IsQueuePaused => _queueProcessor?.Paused == true;
+
+    public static void PauseQueue(string? reason = null)
+        => _queueProcessor?.Pause(reason);
+
+    public static void ResumeQueue()
+        => _queueProcessor?.Resume();
     
     public static AutoGatherList? GetTemporaryGatherList() => _gatherList;
     public static CraftingExecutionPlan? GetActiveExecutionPlan()
@@ -1109,6 +1120,7 @@ public static class CraftingGatherBridge
 
     private static void RestoreQueueOwnedState()
     {
+        CraftingGameInterop.SetDonatelloOptions(null);
         try
         {
             DeleteTemporaryGatherList();

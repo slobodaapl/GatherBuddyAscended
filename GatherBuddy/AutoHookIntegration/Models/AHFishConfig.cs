@@ -90,7 +90,7 @@ public class AHFishConfig
     public AHAutoSurfaceSlap SurfaceSlap { get; set; } = new();
 
     [JsonProperty("Mooch")]
-    public AHAutoMooch Mooch { get; set; } = new();
+    public AHAutoMooch? Mooch { get; set; } = new();
     
     [JsonProperty("NeverMooch")]
     public bool NeverMooch { get; set; } = false;

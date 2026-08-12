@@ -119,6 +119,8 @@ public partial class AutoGather
         public static readonly BaseAction BountifulII   = new(273, 272, 1286, type: EffectType.Yield);
         public static readonly BaseAction GivingLand    = new(4590, 4589, 1802, type: EffectType.CrystalsYield);
         public static readonly BaseAction Wise          = new(26522, 26521, type: EffectType.Integrity);
+        public static readonly BaseAction CollectorsFocus = new(21206, 21205, 2668);
+        public static readonly BaseAction PrimingTouch    = new(34872, 34871, 3910);
         public static readonly BaseAction Gift1         = new(21178, 21177, 2666, type: EffectType.BoonChance);
         public static readonly BaseAction Gift2         = new(25590, 25589, 759, type: EffectType.BoonChance);
         public static readonly BaseAction Tidings       = new(21204, 21203, 2667, type: EffectType.BoonYield);

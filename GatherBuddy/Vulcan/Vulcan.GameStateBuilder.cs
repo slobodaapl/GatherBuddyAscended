@@ -6,7 +6,29 @@ public static class GameStateBuilder
 {
     public record PlayerStats(int Craftsmanship, int Control, int CP, int Level, bool Manipulation, bool Specialist, bool SplendorCosmic, int CrafterDelineations = 0);
 
-    public record RecipeInfo(uint RecipeId, int Level, int Difficulty, int QualityMax, int Durability, int ProgressDivider, int ProgressModifier, int QualityDivider, int QualityModifier, bool CanHQ, bool IsExpert, bool IsCollectible, int QualityMin1, int QualityMin2, int QualityMin3, ConditionFlags ConditionFlags, bool HasMaterialMiracle);
+    public record RecipeInfo(
+        uint RecipeId,
+        int Level,
+        int Difficulty,
+        int QualityMax,
+        int Durability,
+        int ProgressDivider,
+        int ProgressModifier,
+        int QualityDivider,
+        int QualityModifier,
+        bool CanHQ,
+        bool IsExpert,
+        bool IsCollectible,
+        int QualityMin1,
+        int QualityMin2,
+        int QualityMin3,
+        ConditionFlags ConditionFlags,
+        bool HasMaterialMiracle,
+        uint CurrentMaterialMiracleCharges,
+        bool HasStellarSteadyHand,
+        uint CurrentStellarSteadyHandCharges,
+        byte CollectableMetadataKey,
+        bool IsCosmic);
 
     public static CraftState BuildCraftState(RecipeInfo recipe, PlayerStats playerStats)
     {
@@ -24,7 +46,7 @@ public static class GameStateBuilder
             ItemId = recipe.RecipeId,
             RecipeId = recipe.RecipeId,
 
-            CraftExpert = recipe.IsExpert,
+            CraftExpert = recipe.IsExpert && (ushort)recipe.ConditionFlags != 15,
             CraftHQ = recipe.CanHQ,
             CraftCollectible = recipe.IsCollectible,
             CraftLevel = recipe.Level,
@@ -47,10 +69,14 @@ public static class GameStateBuilder
 
             ConditionFlags = recipe.ConditionFlags,
             MissionHasMaterialMiracle = recipe.HasMaterialMiracle,
+            CurrentMaterialMiracleCharges = recipe.CurrentMaterialMiracleCharges,
+            MissionHasStellarSteadyHand = recipe.HasStellarSteadyHand,
+            CurrentStellarSteadyHandCharges = recipe.CurrentStellarSteadyHandCharges,
             InitialQuality = 0,
 
             CraftConditionProbabilities = GetConditionProbabilities(recipe.ConditionFlags),
-            IsCosmic = false
+            CollectableMetadataKey = recipe.CollectableMetadataKey,
+            IsCosmic = recipe.IsCosmic
         };
     }
 
@@ -85,10 +111,14 @@ public static class GameStateBuilder
             TrainedPerfectionAvailable = craft.StatLevel >= Simulator.MinLevel(VulcanSkill.TrainedPerfection),
             TrainedPerfectionActive = false,
             MaterialMiracleActive = false,
+            MaterialMiracleCharges = craft.CurrentMaterialMiracleCharges,
+            MaterialMiraclesUsed = 0,
+            StellarSteadyHandCharges = craft.CurrentStellarSteadyHandCharges,
+            StellarSteadyHandLeft = 0,
+            StellarSteadyHandsUsed = 0,
 
             PrevActionFailed = false,
             PrevComboAction = VulcanSkill.None,
-            MaterialMiracleCharges = craft.MissionHasMaterialMiracle ? 1u : 0u,
             ObserveCounter = 0
         };
     }
@@ -120,7 +150,11 @@ public static class GameStateBuilder
             TrainedPerfectionAvailable = gameState.TrainedPerfectionAvailable,
             TrainedPerfectionActive = gameState.TrainedPerfectionActive,
             MaterialMiracleCharges = gameState.MaterialMiracleCharges,
-            MaterialMiracleActive = gameState.MaterialMiracleActive
+            MaterialMiracleActive = gameState.MaterialMiracleActive,
+            MaterialMiraclesUsed = gameState.MaterialMiraclesUsed,
+            StellarSteadyHandCharges = gameState.StellarSteadyHandCharges,
+            StellarSteadyHandLeft = gameState.StellarSteadyHandLeft,
+            StellarSteadyHandsUsed = gameState.StellarSteadyHandsUsed
         };
 
         return updated;
@@ -140,7 +174,11 @@ public static class GameStateBuilder
         bool TrainedPerfectionAvailable,
         bool TrainedPerfectionActive,
         uint MaterialMiracleCharges,
-        bool MaterialMiracleActive
+        bool MaterialMiracleActive,
+        uint MaterialMiraclesUsed,
+        uint StellarSteadyHandCharges,
+        int StellarSteadyHandLeft,
+        uint StellarSteadyHandsUsed
     );
 
     private static float[] GetConditionProbabilities(ConditionFlags flags)
@@ -148,7 +186,7 @@ public static class GameStateBuilder
         if ((flags & ConditionFlags.Normal) == 0)
             return new[] { 1f };
 
-        var probs = new float[10];
+        var probs = new float[11];
         probs[0] = 1f;
 
         if ((flags & ConditionFlags.Good) != 0) probs[1] = 0.2f;
@@ -160,6 +198,7 @@ public static class GameStateBuilder
         if ((flags & ConditionFlags.Malleable) != 0) probs[7] = 0.1f;
         if ((flags & ConditionFlags.Primed) != 0) probs[8] = 0.05f;
         if ((flags & ConditionFlags.GoodOmen) != 0) probs[9] = 0.05f;
+        if ((flags & ConditionFlags.Robust) != 0) probs[10] = 0.1f;
 
         return probs;
     }

@@ -28,28 +28,41 @@ namespace GatherBuddy.AutoGather
             if (targetSystem == null)
                 return;
 
+            var nodeObjectId = gameObject.GameObjectId;
+            var nodePosition = gameObject.Position;
+
             // Delay interaction by one frame after stopping movement to avoid the "Unable to execute command while in flight" error.
             TaskManager.Enqueue(() =>
             {
+                var liveNode = Dalamud.Objects.FirstOrDefault(o => o.GameObjectId == nodeObjectId && o.IsTargetable);
+                if (liveNode == null)
+                {
+                    FarNodesSeenSoFar.Add(nodePosition);
+                    Dalamud.ToastGui.ErrorToast -= HandleNodeInteractionErrorToast;
+                    GatherBuddy.Log.Warning($"[AutoGather] Node {nodeObjectId} disappeared before interaction; selecting another node.");
+                    return null;
+                }
+
                 _lastNodeInteractionTime = Environment.TickCount64;
-                targetSystem->OpenObjectInteraction((FFXIVClientStructs.FFXIV.Client.Game.Object.GameObject*)gameObject.Address);
+                targetSystem->OpenObjectInteraction((FFXIVClientStructs.FFXIV.Client.Game.Object.GameObject*)liveNode.Address);
                 GatherBuddy.Log.Debug($"Interacting with node, "
-                    + $"distanceXZ: {Vector2.Distance(gameObject.Position.ToVector2(), Player.Position.ToVector2())}, "
-                    + $"distanceY: {Player.Position.Y - gameObject.Position.Y}, "
+                    + $"distanceXZ: {Vector2.Distance(liveNode.Position.ToVector2(), Player.Position.ToVector2())}, "
+                    + $"distanceY: {Player.Position.Y - liveNode.Position.Y}, "
                     + $"Conditions: {string.Join(' ', Dalamud.Conditions.AsReadOnlySet())}.");
+                return true;
             });
 
             // If flying, it takes up to 600 ms for the Mounted condition to fade and up to 500 ms more for the Gathering condition to appear.
 
             TaskManager.Enqueue(() =>
             {
-                if (Dalamud.Conditions[ConditionFlag.Gathering])
+                if (GatheringAddon != null || MasterpieceAddon != null)
                 {
                     GatherBuddy.Log.Debug($"Opening node took {Environment.TickCount64 - _lastNodeInteractionTime} ms.");
                     return true;
                 }
                 return false;
-            }, 1100, "Node interaction");
+            }, 2500, "Wait for gathering window after node interaction");
 
             TaskManager.Enqueue(() =>
             {
@@ -140,7 +153,8 @@ namespace GatherBuddy.AutoGather
             {
                 // Since it's possible that we are not gathering the top item in the list,
                 // we need to remember what we are going to gather inside MasterpieceAddon
-                CurrentCollectableRotation = new CollectableRotation(MatchConfigPreset(slot.Item), slot.Item, _activeItemList.FirstOrDefault(x => x.Item == slot.Item).Quantity);
+                CurrentCollectableRotation = new CollectableRotation(MatchConfigPreset(slot.Item), slot.Item,
+                    _activeItemList.FirstOrDefault(x => x.Item == slot.Item).Quantity, slot.GatherChance);
             }
 
             EnqueueActionWithDelay(slot.Gather);

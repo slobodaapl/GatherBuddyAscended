@@ -100,11 +100,17 @@ public class RepairNPCNavigator
         if (Dalamud.Conditions[ConditionFlag.BetweenAreas] || Dalamud.Conditions[ConditionFlag.BetweenAreas51])
             return;
 
+        if (_targetNPC == null)
+        {
+            _state = NavigationState.Failed;
+            return;
+        }
+
         if (!_teleportAttempted)
         {
             var aetheryteId = _targetAetheryteId != 0
                 ? _targetAetheryteId
-                : RepairNPCHelper.FindCheapestAttunedAetheryte(_targetNPC!.TerritoryType, out _);
+                : RepairNPCHelper.FindCheapestAttunedAetheryte(_targetNPC.TerritoryType, out _);
             if (aetheryteId == 0)
             {
                 GatherBuddy.Log.Error($"[RepairNPCNavigator] Could not find aetheryte for territory {_targetNPC.TerritoryType}");
@@ -172,9 +178,15 @@ public class RepairNPCNavigator
 
     private void StartVNavmeshNavigation()
     {
+        if (_targetNPC == null)
+        {
+            _state = NavigationState.Failed;
+            return;
+        }
+
         try
         {
-            GatherBuddy.Log.Information($"[RepairNPCNavigator] Starting VNavmesh navigation to {_targetNPC!.Position}");
+            GatherBuddy.Log.Information($"[RepairNPCNavigator] Starting VNavmesh navigation to {_targetNPC.Position}");
             VNavmesh.SimpleMove.PathfindAndMoveTo(_targetNPC.Position, false);
             _state = NavigationState.Navigating;
             _stateStartTime = DateTime.UtcNow;

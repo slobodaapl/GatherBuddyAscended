@@ -8,10 +8,10 @@ using Newtonsoft.Json;
 
 namespace GatherBuddy.Vulcan;
 
-internal static class DonatelloNative
+internal static partial class DonatelloNative
 {
     private const string LibraryName = "donatello_ffi.dll";
-    private const uint AbiVersion = 3;
+    internal const uint AbiVersion = 5;
     private static readonly JsonSerializerOptions RequestSerializerOptions = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
@@ -97,9 +97,10 @@ internal static class DonatelloNative
             throw new InvalidOperationException("Unsupported Donatello native ABI version");
 
         ConfigureCache(GatherBuddy.Config.RaphaelSolverConfig.DonatelloCacheMemoryMiB);
+        var fallbackMinimizeSteps = GatherBuddy.Config.RaphaelSolverConfig.DonatelloMinimizeSteps;
 
         var bytes = Encoding.UTF8.GetBytes(SerializeRequest(
-            craft, root, allowSpecialistActions, backloadProgress, incumbent));
+            craft, root, allowSpecialistActions, backloadProgress, incumbent, fallbackMinimizeSteps));
         IntPtr nativeResponse;
         fixed (byte* data = bytes)
             nativeResponse = interrupt == IntPtr.Zero
@@ -128,29 +129,43 @@ internal static class DonatelloNative
         StepState root,
         bool allowSpecialistActions,
         bool backloadProgress,
-        IReadOnlyList<VulcanSkill>? incumbent = null)
+        IReadOnlyList<VulcanSkill>? incumbent = null,
+        bool fallbackMinimizeSteps = false)
     {
+        var maxStellarSteadyHandUses = craft.DonatelloOptions?.MaxStellarSteadyHandUses ?? 0;
+        var remainingStellarSteadyHandUses = maxStellarSteadyHandUses > root.StellarSteadyHandsUsed
+            ? maxStellarSteadyHandUses - root.StellarSteadyHandsUsed
+            : 0;
+        var stellarSteadyHandCharges = Math.Min(
+            root.StellarSteadyHandCharges,
+            remainingStellarSteadyHandUses);
         var request = new
         {
             AbiVersion,
             MaxCp = craft.StatCP,
             MaxDurability = craft.CraftDurability,
             MaxProgress = craft.CraftProgress,
-            MaxQuality = craft.CraftQualityMax,
+            MaxQuality = craft.DonatelloOptions?.Objective == DonatelloSolveObjective.ProgressOnly
+                ? 0
+                : craft.CraftQualityMax,
             BaseProgress = Simulator.BaseProgress(craft),
             BaseQuality = Simulator.BaseQuality(craft),
             JobLevel = craft.StatLevel,
             Manipulation = craft.UnlockedManipulation,
             Specialist = craft.Specialist && allowSpecialistActions,
             BackloadProgress = backloadProgress,
-            MinimizeSteps = GatherBuddy.Config.RaphaelSolverConfig.DonatelloMinimizeSteps,
+            Objective = craft.DonatelloOptions?.Objective ?? DonatelloSolveObjective.MaximizeQuality,
+            MinimizeSteps = craft.DonatelloOptions?.MinimizeSteps ?? fallbackMinimizeSteps,
+            StellarSteadyHandCharges = stellarSteadyHandCharges,
             IncumbentActionIds = incumbent?.Select(action => (uint)action).ToArray() ?? [],
             Root = new
             {
                 Cp = root.RemainingCP,
                 root.Durability,
                 root.Progress,
-                root.Quality,
+                Quality = craft.DonatelloOptions?.Objective == DonatelloSolveObjective.ProgressOnly
+                    ? 0
+                    : root.Quality,
                 InnerQuiet = root.IQStacks,
                 WasteNot = root.WasteNotLeft,
                 Manipulation = root.ManipulationLeft,
@@ -166,6 +181,9 @@ internal static class DonatelloNative
                 QuickInnovationAvailable = root.QuickInnoAvailable,
                 root.TrainedPerfectionActive,
                 root.TrainedPerfectionAvailable,
+                StellarSteadyHandCharges = stellarSteadyHandCharges,
+                StellarSteadyHand = root.StellarSteadyHandLeft,
+                craft.SplendorCosmic,
                 Expedience = root.ExpedienceLeft > 0,
                 Condition = (int)root.Condition,
                 CrafterDelineations = root.CrafterDelineationsLeft,

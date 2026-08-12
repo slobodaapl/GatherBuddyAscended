@@ -104,6 +104,7 @@ namespace GatherBuddy.AutoGather
 
         // Track the current gather target for robust node handling
         private GatherTarget? _currentGatherTarget;
+        private bool _currentNodeSessionConfirmed;
         private bool _waitingForFishingToFinishAfterTargetChange = false;
         private volatile bool _fishDetectedPlayer = false;
         private volatile bool _fishWaryDetected = false;
@@ -377,6 +378,9 @@ namespace GatherBuddy.AutoGather
         private class NoCollectableActionsException : Exception
         { }
 
+        private class CollectableSolverException(string message, Exception innerException) : Exception(message, innerException)
+        { }
+
         private bool _diademQueuingInProgress = false;
         private bool _homeWorldWarning        = false;
         private bool _autoRetainerMultiModeEnabled = false;
@@ -430,7 +434,7 @@ namespace GatherBuddy.AutoGather
                 var gatherTarget = _currentGatherTarget.Value;
                 // Mark the node as visited if possible
                 var targetNode = Dalamud.Targets.Target ?? Dalamud.Targets.PreviousTarget;
-                if (targetNode != null && targetNode.ObjectKind is ObjectKind.GatheringPoint)
+                if (_currentNodeSessionConfirmed && targetNode != null && targetNode.ObjectKind is ObjectKind.GatheringPoint)
                 {
                     _activeItemList.MarkVisited(targetNode);
                     var gatherable = gatherTarget.Gatherable;
@@ -462,10 +466,11 @@ namespace GatherBuddy.AutoGather
                             VisitedNodes.Add(targetNode.BaseId);
                     }
                 }
-                if (gatherTarget.Item != null)
+                if (_currentNodeSessionConfirmed && gatherTarget.Item != null)
                     _plugin.AutoGatherListsManager.RemoveCompletedItemFromLists(gatherTarget.Item);
                 // Unset the current gather target when leaving the node
                 _currentGatherTarget = null;
+                _currentNodeSessionConfirmed = false;
                 ResetPendingFishingTargetChange();
             }
 
@@ -585,6 +590,9 @@ namespace GatherBuddy.AutoGather
                     _currentGatherTarget = _activeItemList.CurrentOrDefault;
                 }
 
+                if (GatheringWindowReader != null || MasterpieceReader?.IsValid == true)
+                    _currentNodeSessionConfirmed = true;
+
                 if (!GatherBuddy.Config.AutoGatherConfig.DoGathering)
                     return;
 
@@ -666,6 +674,12 @@ namespace GatherBuddy.AutoGather
                     Communicator.PrintError(
                         "Unable to pick a collectability increasing action to use. Make sure that at least one of the collectable actions is enabled.");
                     AbortAutoGather();
+                }
+                catch (CollectableSolverException exception)
+                {
+                    GatherBuddy.Log.Error($"[AutoGather] Native collectable solver failed: {exception}");
+                    Communicator.PrintError("The native collectable solver failed. Auto-Gather stopped before issuing an unsafe action. See logs for details.");
+                    AbortAutoGather("Collectable solver unavailable");
                 }
 
 
@@ -1685,8 +1699,6 @@ namespace GatherBuddy.AutoGather
                     
                     Vector3 newPos;
                     Angle newRotation = fishingSpotData.Rotation;
-                    bool foundPos = false;
-
                     var forwardDirection = new Vector3(
                         (float)Math.Sin(Player.Rotation),
                         0,
@@ -1699,7 +1711,6 @@ namespace GatherBuddy.AutoGather
                     if (meshPoint.HasValue)
                     {
                         newPos = meshPoint.Value;
-                        foundPos = true;
                         GatherBuddy.Log.Information($"[AutoGather] Moving {stepSize:F1}y forward in facing direction");
                     }
                     else
@@ -1930,6 +1941,7 @@ namespace GatherBuddy.AutoGather
 
             if (closestTargetableNode != null)
             {
+                _farNodeRetryAfter = DateTime.MinValue;
                 AutoStatus = "Moving to node...";
                 
                 if (next.Gatherable != null)
@@ -1944,6 +1956,16 @@ namespace GatherBuddy.AutoGather
             }
 
             AutoStatus = "Moving to far node...";
+
+            if (CurrentDestination != default
+             && !IsPathing
+             && !IsPathGenerating
+             && CurrentDestination.DistanceToPlayer() < NodeVisibilityDistance)
+            {
+                GatherBuddy.Log.Debug($"[AutoGather] Reached expected node position {CurrentDestination}, but no targetable node appeared.");
+                FarNodesSeenSoFar.Add(CurrentDestination);
+                StopNavigation();
+            }
 
             if (CurrentDestination != default && IsPathing)
             {
@@ -2003,7 +2025,17 @@ namespace GatherBuddy.AutoGather
 
                 if (selectedFarNode.Position == default)
                 {
+                    if (_farNodeRetryAfter == DateTime.MinValue)
+                        _farNodeRetryAfter = DateTime.UtcNow.AddSeconds(5);
+                    if (DateTime.UtcNow < _farNodeRetryAfter)
+                    {
+                        StopNavigation();
+                        AutoStatus = "Waiting for a gathering node to appear...";
+                        return;
+                    }
+
                     FarNodesSeenSoFar.Clear();
+                    _farNodeRetryAfter = DateTime.MinValue;
                     GatherBuddy.Log.Verbose($"Selected node was null and far node filters have been cleared");
                     return;
                 }

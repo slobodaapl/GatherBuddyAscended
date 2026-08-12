@@ -162,7 +162,7 @@ public partial class FishRecorder
                     var list = MessagePackSerializer.Deserialize<List<FishRecord>>(span.ToArray());
                     return list;
                 }
-                catch (Exception e)
+                catch (Exception)
                 {
                     GatherBuddy.Log.Error($"{name} was unable to be deserialized using V2 logic.");
                     return new List<FishRecord>();

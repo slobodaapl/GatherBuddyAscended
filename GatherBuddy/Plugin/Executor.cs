@@ -137,7 +137,8 @@ public class Executor
 
     private void FindClosestLocation()
     {
-        FindClosestLocation(_item);
+        if (_item != null)
+            FindClosestLocation(_item);
     }
 
     public ILocation? FindClosestLocation(IGatherable item)

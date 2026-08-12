@@ -1271,7 +1271,7 @@ public partial class VulcanWindow
                 return;
             }
         }
-        var canPurchaseHere  = VendorPurchaseManager.IsPurchaseSupported(entry, selectedNpc.Npc);
+        var canPurchaseHere  = VendorPurchaseManager.IsPurchaseSupported(entry, selectedNpc!.Npc!);
         if (canPurchaseHere && !VendorAutomationRequirements.IsAvailable)
         {
             DrawVendorIconButton($"vendor_go_disabled_{row.IdSuffix}", FontAwesomeIcon.ShoppingCart,

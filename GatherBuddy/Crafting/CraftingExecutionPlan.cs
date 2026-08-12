@@ -9,6 +9,7 @@ public sealed class CraftingExecutionPlan
 {
     private readonly CraftingListDefinition _planningSnapshot;
     private readonly bool _useRetainerCraftableAvailability;
+    private readonly bool _directCraft;
     private readonly Dictionary<uint, int> _acquiredDependencyCaps;
     private readonly HashSet<uint> _finalOutputItemIds;
     private readonly Dictionary<uint, AcquiredDependencyAvailability> _acquiredAvailability = new();
@@ -26,7 +27,8 @@ public sealed class CraftingExecutionPlan
     public bool CurrentWorldOnly { get; }
     public long? MaximumGilSpend { get; }
     public bool ReturnToHomeWorldBeforeCrafting { get; }
-    public CraftingListPlan ResolvedPlan { get; private set; }
+    public bool AllowMaterialAcquisition => !_directCraft;
+    public CraftingListPlan ResolvedPlan { get; private set; } = null!;
 
     internal List<CraftingListItem> Queue { get; private set; } = [];
     internal List<CraftingListItem> OriginalRecipes { get; private set; } = [];
@@ -47,10 +49,12 @@ public sealed class CraftingExecutionPlan
     private CraftingExecutionPlan(
         CraftingListDefinition planningSnapshot,
         bool useRetainerCraftableAvailability,
-        CraftingListPlan resolvedPlan)
+        CraftingListPlan resolvedPlan,
+        bool directCraft = false)
     {
         _planningSnapshot = planningSnapshot;
         _useRetainerCraftableAvailability = useRetainerCraftableAvailability;
+        _directCraft = directCraft;
         _acquiredDependencyCaps = new Dictionary<uint, int>(resolvedPlan.Precrafts);
         _finalOutputItemIds = resolvedPlan.OriginalRecipes
             .Select(item => RecipeManager.GetRecipe(item.RecipeId)?.ItemResult.RowId ?? 0u)
@@ -81,6 +85,16 @@ public sealed class CraftingExecutionPlan
         return new CraftingExecutionPlan(planningSnapshot, useRetainerCraftableAvailability, resolvedPlan);
     }
 
+    public static CraftingExecutionPlan CreateDirect(CraftingListDefinition list)
+    {
+        var planningSnapshot = list.CreateRetainerPlanningSnapshot();
+        return new CraftingExecutionPlan(
+            planningSnapshot,
+            useRetainerCraftableAvailability: false,
+            CraftingListPlanner.BuildDirect(planningSnapshot),
+            directCraft: true);
+    }
+
     public bool MatchesList(int listId)
         => ListId == listId;
 
@@ -93,7 +107,9 @@ public sealed class CraftingExecutionPlan
     }
 
     public void RefreshFromCurrentInventory()
-        => ApplyResolvedPlan(_planningSnapshot.CreatePlan(false, _acquiredAvailability));
+        => ApplyResolvedPlan(_directCraft
+            ? CraftingListPlanner.BuildDirect(_planningSnapshot)
+            : _planningSnapshot.CreatePlan(false, _acquiredAvailability));
 
     /// <summary>
     /// Registers verified quantities purchased for blocked precraft

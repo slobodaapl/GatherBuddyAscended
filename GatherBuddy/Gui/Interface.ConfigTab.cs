@@ -104,6 +104,12 @@ public partial class Interface
               + "or if the node didn't have any needed items on the first place.",
                 GatherBuddy.Config.AutoGatherConfig.AbandonNodes, b => GatherBuddy.Config.AutoGatherConfig.AbandonNodes = b);
 
+        public static void DrawAlwaysExhaustTimedCollectableNodesBox()
+            => DrawCheckbox("Always use all gathering attempts on timed collectables",
+                "Keep gathering a timed collectable until the node is exhausted, even after the requested quantity is reached.",
+                GatherBuddy.Config.AutoGatherConfig.AlwaysExhaustTimedCollectableNodes,
+                b => GatherBuddy.Config.AutoGatherConfig.AlwaysExhaustTimedCollectableNodes = b);
+
         public static void DrawCheckRetainersBox()
         {
             DrawCheckbox("Check Retainer Inventories", "Use Allagan Tools to check retainer inventories when doing inventory calculations",
@@ -1503,6 +1509,7 @@ public partial class Interface
             new("Gather any crystals when The Giving Land is off cooldown", ConfigFunctions.DrawUseGivingLandOnCooldown),
             new("Use skills for fallback items",                  ConfigFunctions.DrawUseSkillsForFallabckBox),
             new("Abandon nodes without needed items",             ConfigFunctions.DrawAbandonNodesBox),
+            new("Always use all gathering attempts on timed collectables", ConfigFunctions.DrawAlwaysExhaustTimedCollectableNodesBox),
             new("Always gather maps when available",              ConfigFunctions.DrawAlwaysMapsBox),
         ]),
         new("Auto-Gather", "Fishing",

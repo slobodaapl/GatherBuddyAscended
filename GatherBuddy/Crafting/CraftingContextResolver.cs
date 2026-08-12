@@ -25,7 +25,8 @@ public sealed record CraftingExecutionContext(
     bool ForceProgressOnlyUnlockCraft,
     bool HasCraftedBefore,
     bool UseQuickSynthesis,
-    string? SelectedMacroId
+    string? SelectedMacroId,
+    DonatelloExecutionOptions? DonatelloOptions
 );
 
 public sealed record CraftingSimulationContext(
@@ -66,7 +67,8 @@ public static class CraftingContextResolver
             forceProgressOnlyUnlockCraft,
             hasCraftedBefore,
             useQuickSynthesis,
-            selectedMacroId);
+            selectedMacroId,
+            item.CraftSettings?.DonatelloOptions);
     }
 
     public static bool UsesSelectedMacro(CraftingExecutionContext executionContext)
@@ -192,7 +194,11 @@ public static class CraftingContextResolver
             return false;
 
         var initialQuality = executionContext.QualityPolicy.CalculateGuaranteedInitialQuality(recipe);
-        var craft = GameStateBuilder.BuildCraftState(CraftingStateBuilder.BuildRecipeInfo(recipe), stats) with { InitialQuality = initialQuality };
+        var craft = GameStateBuilder.BuildCraftState(CraftingStateBuilder.BuildRecipeInfo(recipe, stats.Level), stats) with
+        {
+            InitialQuality = initialQuality,
+            DonatelloOptions = executionContext.DonatelloOptions,
+        };
         var validationContext = intent == CraftingSimulationIntent.ValidatorPreview
             ? BuildValidatorPreviewContext(executionContext.ConsumableSettings)
             : null;

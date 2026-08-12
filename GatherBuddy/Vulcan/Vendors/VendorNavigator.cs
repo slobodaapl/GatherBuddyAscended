@@ -1886,7 +1886,6 @@ public class VendorNavigator
     private static bool IsAethernetSource(IGameObject obj)
         => obj.IsTargetable
         && (obj.ObjectKind == ObjectKind.Aetheryte
-         || IsKnownAethernetShardDataId(obj.DataId)
          || IsKnownAethernetShardDataId(obj.BaseId));
 
     private static bool IsKnownAethernetShardDataId(uint dataId)
@@ -2767,4 +2766,3 @@ public class VendorNavigator
         return true;
     }
 }
-

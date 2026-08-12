@@ -58,6 +58,49 @@ public static class CraftingListPlanner
     public static CraftingListPlan Build(CraftingListDefinition list, CraftingListPlannerOptions options = default)
         => new Planner(list, options).Build();
 
+    /// <summary>
+    /// Builds an exact-count queue for an external orchestrator. Immediate
+    /// ingredients remain leaf materials even when GatherBuddy knows recipes
+    /// for them; no inventory or dependency expansion may alter craft count.
+    /// </summary>
+    public static CraftingListPlan BuildDirect(CraftingListDefinition list)
+    {
+        ArgumentNullException.ThrowIfNull(list);
+        var plan = new CraftingListPlan();
+        foreach (var item in list.Recipes)
+        {
+            if (item.Options.Skipping || item.Quantity <= 0)
+                continue;
+
+            var recipe = RecipeManager.GetRecipe(item.RecipeId);
+            if (!recipe.HasValue)
+                continue;
+
+            AddDirectRecipe(plan.OriginalRecipes, item.RecipeId, item.Quantity);
+            AddDirectRecipe(plan.Recipes, item.RecipeId, item.Quantity);
+            var effectiveSettings = CraftingQualityPolicyResolver.BuildEffectiveSettings(
+                recipe.Value,
+                item.CraftSettings,
+                list.UseAllHQ);
+            var qualityPolicy = CraftingQualityPolicyResolver.Resolve(recipe.Value, effectiveSettings);
+            foreach (var (itemId, _) in RecipeManager.GetIngredients(recipe.Value))
+            {
+                var demand = qualityPolicy.GetDemand(itemId).Scale(item.Quantity);
+                if (demand.Total <= 0)
+                    continue;
+                plan.Materials[itemId] = plan.Materials.GetValueOrDefault(itemId) + demand.Total;
+                plan.IngredientDemands[itemId] = plan.IngredientDemands.TryGetValue(itemId, out var existing)
+                    ? existing.Add(demand)
+                    : demand;
+            }
+        }
+
+        return plan;
+    }
+
+    private static void AddDirectRecipe(List<CraftingListItem> target, uint recipeId, int quantity)
+        => target.Add(new CraftingListItem(recipeId, quantity) { IsOriginalRecipe = true });
+
     private sealed class Planner
     {
         private readonly CraftingListDefinition _list;

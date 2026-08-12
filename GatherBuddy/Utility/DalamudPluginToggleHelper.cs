@@ -26,7 +26,7 @@ internal static class DalamudPluginToggleHelper
     {
         try
         {
-            if (!ReflectionHelpers.TryGetInstalledPluginEntry(internalName, out var localPlugin, false))
+            if (!ReflectionHelpers.TryGetInstalledPluginEntry(internalName, out var localPlugin, false) || localPlugin == null)
                 return new PluginToggleState(false, false, false, $"{internalName} is not installed.");
 
             var isLoaded = localPlugin.GetFoP("IsLoaded") is bool loaded && loaded;
@@ -49,7 +49,7 @@ internal static class DalamudPluginToggleHelper
 
         try
         {
-            if (!ReflectionHelpers.TryGetInstalledPluginEntry(internalName, out var localPlugin, true))
+            if (!ReflectionHelpers.TryGetInstalledPluginEntry(internalName, out var localPlugin, true) || localPlugin == null)
             {
                 failureReason = $"{internalName} is not installed.";
                 return false;
@@ -244,7 +244,8 @@ internal static class DalamudPluginToggleHelper
 
     private static async Task InvokeProfileAddOrUpdateAsync(object profile, Guid workingPluginId, string internalName, bool state)
     {
-        if (!TryInvokeTaskMethod(profile, "AddOrUpdateAsync", [typeof(Guid), typeof(string), typeof(bool), typeof(bool)], [workingPluginId, internalName, state, false], out var operationTask))
+        if (!TryInvokeTaskMethod(profile, "AddOrUpdateAsync", [typeof(Guid), typeof(string), typeof(bool), typeof(bool)], [workingPluginId, internalName, state, false], out var operationTask)
+         || operationTask == null)
             throw new InvalidOperationException($"Could not update {internalName}'s collection state.");
 
         await operationTask.ConfigureAwait(false);

@@ -37,6 +37,7 @@ namespace GatherBuddy.AutoGather
         public bool ShowAutoHomeChatWarning { get; set; } = true;
         public bool UseSkillsForFallbackItems { get; set; } = false;
         public bool AbandonNodes { get; set; } = false;
+        public bool AlwaysExhaustTimedCollectableNodes { get; set; } = true;
         public uint ExecutionDelay { get; set; } = 0;
         public bool CheckRetainers { get; set; } = false;
         public string LifestreamCommand { get; set; } = "auto";

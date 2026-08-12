@@ -63,7 +63,17 @@ public static class Simulator
             next.TrainedPerfectionActive = action == VulcanSkill.TrainedPerfection || (step.TrainedPerfectionActive && !HasDurabilityCost(action));
             next.TrainedPerfectionAvailable = step.TrainedPerfectionAvailable && action != VulcanSkill.TrainedPerfection;
             next.MaterialMiracleCharges = action == VulcanSkill.MaterialMiracle ? step.MaterialMiracleCharges - 1 : step.MaterialMiracleCharges;
-            next.MaterialMiracleActive = step.MaterialMiracleActive;
+            next.MaterialMiracleActive = action == VulcanSkill.MaterialMiracle || step.MaterialMiracleActive;
+            next.MaterialMiraclesUsed = action == VulcanSkill.MaterialMiracle ? step.MaterialMiraclesUsed + 1 : step.MaterialMiraclesUsed;
+            next.StellarSteadyHandCharges = action == VulcanSkill.StellarSteadyHand
+                ? step.StellarSteadyHandCharges - 1
+                : step.StellarSteadyHandCharges;
+            next.StellarSteadyHandLeft = action == VulcanSkill.StellarSteadyHand
+                ? 3
+                : Math.Max(0, step.StellarSteadyHandLeft - 1);
+            next.StellarSteadyHandsUsed = action == VulcanSkill.StellarSteadyHand
+                ? step.StellarSteadyHandsUsed + 1
+                : step.StellarSteadyHandsUsed;
             next.ObserveCounter = action == VulcanSkill.Observe ? step.ObserveCounter + 1 : 0;
 
             if (step.FinalAppraisalLeft > 0 && next.Progress >= craft.CraftProgress)
@@ -136,6 +146,7 @@ public static class Simulator
             VulcanSkill.DaringTouch => step.ExpedienceLeft > 0,
             VulcanSkill.QuickInnovation => step.QuickInnoLeft > 0 && step.InnovationLeft == 0 && step.CrafterDelineationsLeft > 0,
             VulcanSkill.MaterialMiracle => step.MaterialMiracleCharges > 0 && !step.MaterialMiracleActive,
+            VulcanSkill.StellarSteadyHand => step.StellarSteadyHandCharges > 0,
             _ => true
         } && craft.StatLevel >= MinLevel(action) && step.RemainingCP >= GetCPCost(step, action);
 
@@ -181,6 +192,7 @@ public static class Simulator
             VulcanSkill.ImmaculateMend => 98,
             VulcanSkill.TrainedPerfection => 100,
             VulcanSkill.MaterialMiracle => 101,
+            VulcanSkill.StellarSteadyHand => 90,
             _ => 1
         };
 
@@ -192,6 +204,9 @@ public static class Simulator
                 VulcanSkill.HastyTouch or VulcanSkill.DaringTouch => 0.6,
                 _ => 1.0
             };
+            if (step.StellarSteadyHandLeft > 0
+                && action is VulcanSkill.RapidSynthesis or VulcanSkill.HastyTouch or VulcanSkill.DaringTouch)
+                return 1.0;
             if (step.Condition == Condition.Centered)
                 rate += 0.25;
             return rate;
@@ -251,7 +266,7 @@ public static class Simulator
             };
             if (step.WasteNotLeft > 0)
                 cost -= cost / 2;
-            if (step.Condition == Condition.Sturdy)
+            if (step.Condition is Condition.Sturdy or Condition.Robust)
                 cost -= cost / 2;
             return cost;
         }
@@ -343,6 +358,7 @@ public static class Simulator
             Condition.Excellent => Condition.Poor,
             Condition.Poor => Condition.Normal,
             Condition.GoodOmen => Condition.Good,
+            Condition.Robust => Condition.Sturdy,
             _ => GetTransitionByRoll(craft, step, roll)
         };
 
@@ -371,6 +387,7 @@ public static class Simulator
                 Condition.Malleable => ConditionFlags.Malleable,
                 Condition.Primed => ConditionFlags.Primed,
                 Condition.GoodOmen => ConditionFlags.GoodOmen,
+                Condition.Robust => ConditionFlags.Robust,
                 _ => throw new NotImplementedException($"Unsupported crafting condition {condition}"),
             };
         }

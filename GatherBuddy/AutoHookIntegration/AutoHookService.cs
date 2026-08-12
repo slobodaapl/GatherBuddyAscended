@@ -33,7 +33,8 @@ public class AutoHookService
                 var exportString = AutoHookExporter.ExportPreset(preset);
                 GatherBuddy.Log.Debug($"[AutoHook Integration] Export string for '{preset.PresetName}' created, length: {exportString?.Length ?? 0}");
                 
-                AutoHook.ImportAndSelectPreset?.Invoke(exportString);
+                if (exportString != null)
+                    AutoHook.ImportAndSelectPreset?.Invoke(exportString);
             }
             
             if (selectPreset)

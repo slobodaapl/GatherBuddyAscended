@@ -26,11 +26,13 @@ public unsafe class TurninWindow(AtkUnitBase* addon) : TreeListWindowBase(addon)
                 continue;
                 
             var rawType = item->UIntValues.Count > 0 ? item->UIntValues[0] : 0;
+#pragma warning disable CS0618 // The replacement enum no longer exposes the group-header values.
             var itemType = (AtkComponentTreeListItemType)(rawType & 0xF);
             GatherBuddy.Log.Debug($"[TurninWindow] Index {i}: RawType=0x{rawType:X}, MaskedType={itemType}, Label='{Labels[i]}'");
             
             if (itemType == AtkComponentTreeListItemType.CollapsibleGroupHeader || 
                 itemType == AtkComponentTreeListItemType.GroupHeader)
+#pragma warning restore CS0618
             {
                 GatherBuddy.Log.Debug($"[TurninWindow] Skipping group header");
                 continue;

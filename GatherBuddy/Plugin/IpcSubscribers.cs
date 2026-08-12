@@ -308,19 +308,19 @@ namespace GatherBuddy.Plugin
             internal static bool Enabled => IPCSubscriber.IsReady("InventoryTools");
 
         [EzIPC("AllaganTools.ItemCountOwned", applyPrefix: false)]
-        internal static readonly Func<uint, bool, uint[], uint> ItemCountOwned;
+        internal static readonly Func<uint, bool, uint[], uint> ItemCountOwned = null!;
 
         [EzIPC("AllaganTools.ItemCount", applyPrefix: false)]
-        internal static readonly Func<uint, ulong, uint, uint> ItemCount;
+        internal static readonly Func<uint, ulong, uint, uint> ItemCount = null!;
 
         [EzIPC("AllaganTools.ItemCountHQ", applyPrefix: false)]
-        internal static readonly Func<uint, ulong, uint, uint> ItemCountHQ;
+        internal static readonly Func<uint, ulong, uint, uint> ItemCountHQ = null!;
 
         [EzIPC("AllaganTools.GetCharactersOwnedByActive", applyPrefix: false)]
-        internal static readonly Func<bool, HashSet<ulong>> GetCharactersOwnedByActive;
+        internal static readonly Func<bool, HashSet<ulong>> GetCharactersOwnedByActive = null!;
 
         [EzIPC("AllaganTools.IsInitialized", applyPrefix: false)]
-        internal static readonly Func<bool> IsInitialized;
+        internal static readonly Func<bool> IsInitialized = null!;
     }
 
     internal static class AutoHook

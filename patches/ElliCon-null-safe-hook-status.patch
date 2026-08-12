@@ -1,0 +1,18 @@
+diff --git a/ElliCon/Core/InputBlocker.cs b/ElliCon/Core/InputBlocker.cs
+--- a/ElliCon/Core/InputBlocker.cs
++++ b/ElliCon/Core/InputBlocker.cs
+@@ -71,8 +71,12 @@ public unsafe class InputBlocker : IDisposable
+ 
+         if (_config.EnableDebugLogging && _log != null)
+         {
+-            var cameraStatus = _getCameraControlTypeHook?.Address != IntPtr.Zero ? $"0x{_getCameraControlTypeHook.Address:X}" : "FAILED";
+-            _log.Information($"[ElliCon] InputBlocker initialized - Movement: 0x{_rmiWalkHook.Address:X}/0x{_rmiFlyHook.Address:X}, Camera: {cameraStatus}");
++            var cameraStatus = _getCameraControlTypeHook is { Address: var cameraAddress } && cameraAddress != IntPtr.Zero
++                ? $"0x{cameraAddress:X}"
++                : "FAILED";
++            var walkStatus = _rmiWalkHook is { } walkHook ? $"0x{walkHook.Address:X}" : "FAILED";
++            var flyStatus = _rmiFlyHook is { } flyHook ? $"0x{flyHook.Address:X}" : "FAILED";
++            _log.Information($"[ElliCon] InputBlocker initialized - Movement: {walkStatus}/{flyStatus}, Camera: {cameraStatus}");
+         }
+     }
+ 

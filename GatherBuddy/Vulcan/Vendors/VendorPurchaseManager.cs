@@ -346,7 +346,7 @@ public sealed class VendorPurchaseManager : IDisposable
 
         var affordableBatchQuantity = desiredBatchQuantity;
         VendorCurrencyAvailability limitingAvailability = default;
-        VendorCurrencyCost limitingCost = default;
+        VendorCurrencyCost? limitingCost = null;
         var hasLimitingCost = false;
         var wasLimitedByScripReserve = false;
         if (!VendorOfferMath.HasValidCurrencyCosts(_request.CurrencyCosts))
@@ -398,7 +398,7 @@ public sealed class VendorPurchaseManager : IDisposable
             }
         }
 
-        if (hasLimitingCost && affordableBatchQuantity == 0)
+        if (hasLimitingCost && affordableBatchQuantity == 0 && limitingCost != null)
         {
             var reserveAmount = GetReservedScripAmount(limitingCost);
             var spendableAmount = GetSpendableCurrencyAmount(limitingAvailability.AvailableAmount, reserveAmount);

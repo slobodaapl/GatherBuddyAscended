@@ -8,6 +8,11 @@ using System.Text.Json;
 
 var assertions = 0;
 
+typeof(global::GatherBuddy.GatherBuddy)
+    .GetProperty(nameof(global::GatherBuddy.GatherBuddy.Log))!
+    .GetSetMethod(nonPublic: true)!
+    .Invoke(null, [new ElliLib.Log.Logger()]);
+
 void Require(bool condition, string message)
 {
     if (!condition)
@@ -151,6 +156,9 @@ Require(standardRecommendation.Action != VulcanSkill.None
 var specialistCraft = Craft();
 specialistCraft.Specialist = true;
 specialistCraft.CrafterDelineations = 1;
+specialistCraft.DonatelloOptions = new DonatelloExecutionOptions(
+    DonatelloSolveObjective.MaximizeQuality,
+    MinimizeSteps: false);
 var specialistRoot = GameStateBuilder.BuildInitialStepState(specialistCraft);
 Require(specialistRoot.CarefulObservationLeft == 3,
     "specialists must begin with all three Careful Observation uses");
@@ -166,6 +174,53 @@ Require(afterQuickInnovation.CrafterDelineationsLeft == 0
         && !Simulator.CanUseAction(craft, afterQuickInnovation, VulcanSkill.HeartAndSoul),
     "Quick Innovation must consume the same delineation pool used by Heart and Soul");
 
+foreach (var solverName in new[]
+         {
+             "Default",
+             "Standard Recipe Solver",
+             "Raphael Recipe Solver",
+             "Macro",
+             "Expert Recipe Solver",
+         })
+{
+    var options = ArtisanIpcShim.BuildDonatelloOptions(
+        solverName, false, 3, 4, 5, 6, 7);
+    Require(options.Objective == DonatelloSolveObjective.MaximizeQuality && !options.MinimizeSteps,
+        $"ICE solver mode '{solverName}' must map to quality-maximizing Donatello without step minimization");
+}
+var progressOnlyOptions = ArtisanIpcShim.BuildDonatelloOptions(
+    "Progress Only Solver", true, 2, 3, 4, 5, 6);
+Require(progressOnlyOptions == new DonatelloExecutionOptions(
+        DonatelloSolveObjective.ProgressOnly,
+        MinimizeSteps: false,
+        MaxStellarSteadyHandUses: 2,
+        MaxMaterialMiracleUses: 3,
+        MinimumStepsBeforeMaterialMiracle: 4),
+    "ICE Progress Only Solver must map to progress-only Donatello and preserve expert Cosmic limits");
+var standardOptions = ArtisanIpcShim.BuildDonatelloOptions(
+    "Default", false, 2, 3, 4, 5, 6);
+Require(standardOptions == new DonatelloExecutionOptions(
+        DonatelloSolveObjective.MaximizeQuality,
+        MinimizeSteps: false,
+        MaxStellarSteadyHandUses: 0,
+        MaxMaterialMiracleUses: 5,
+        MinimumStepsBeforeMaterialMiracle: 6),
+    "non-expert ICE crafts must use standard Material Miracle limits and never expert Stellar limits");
+Require(CraftingGameInterop.CosmicIngredientButtonOrder(progressOnlyOptions) == (39u, 40u)
+        && CraftingGameInterop.CosmicIngredientButtonOrder(standardOptions) == (40u, 39u),
+    "Cosmic ingredient assignment must prefer NQ for progress-only and HQ for quality-maximizing ICE crafts");
+
+var cacheKeyRequest = new RaphaelSolveRequest(1, 100, 5000, 5000, 600, true, false);
+Require(cacheKeyRequest.GetKey() != (cacheKeyRequest with
+        { Objective = DonatelloSolveObjective.ProgressOnly }).GetKey()
+        && cacheKeyRequest.GetKey() != (cacheKeyRequest with { MinimizeSteps = true }).GetKey()
+        && cacheKeyRequest.GetKey() != (cacheKeyRequest with { SplendorCosmic = true }).GetKey()
+        && cacheKeyRequest.GetKey() != (cacheKeyRequest with { StellarSteadyHandCharges = 1 }).GetKey()
+        && cacheKeyRequest.GetKey() != (cacheKeyRequest with { MaxMaterialMiracleUses = 1 }).GetKey()
+        && cacheKeyRequest.GetKey() != (cacheKeyRequest with
+        { MinimumStepsBeforeMaterialMiracle = 1 }).GetKey(),
+    "Donatello cache keys must isolate every ICE execution objective and Cosmic-use limit");
+
 using var requestJson = JsonDocument.Parse(DonatelloNative.SerializeRequest(
     specialistCraft, specialistRoot, allowSpecialistActions: true, backloadProgress: false));
 var nativeRoot = requestJson.RootElement.GetProperty("root");
@@ -173,7 +228,7 @@ var expectedRequestFields = new HashSet<string>
 {
     "abiVersion", "maxCp", "maxDurability", "maxProgress", "maxQuality", "baseProgress",
     "baseQuality", "jobLevel", "manipulation", "specialist", "backloadProgress",
-    "minimizeSteps", "incumbentActionIds", "root",
+    "objective", "minimizeSteps", "stellarSteadyHandCharges", "incumbentActionIds", "root",
 };
 var expectedRootFields = new HashSet<string>
 {
@@ -181,15 +236,18 @@ var expectedRootFields = new HashSet<string>
     "innovation", "veneration", "greatStrides", "muscleMemory", "finalAppraisal",
     "carefulObservationCharges", "combo", "heartAndSoulActive", "heartAndSoulAvailable",
     "quickInnovationAvailable", "trainedPerfectionActive", "trainedPerfectionAvailable",
-    "expedience", "condition", "crafterDelineations",
+    "stellarSteadyHandCharges", "stellarSteadyHand", "splendorCosmic", "expedience", "condition",
+    "crafterDelineations",
 };
 Require(requestJson.RootElement.EnumerateObject().Select(property => property.Name).ToHashSet()
             .SetEquals(expectedRequestFields)
         && nativeRoot.EnumerateObject().Select(property => property.Name).ToHashSet()
             .SetEquals(expectedRootFields),
-    "Donatello requests must contain exactly the fields required by native ABI v3");
-Require(requestJson.RootElement.GetProperty("abiVersion").GetUInt32() == 3
+    "Donatello requests must contain exactly the fields required by native ABI v5");
+Require(requestJson.RootElement.GetProperty("abiVersion").GetUInt32() == 5
+        && requestJson.RootElement.GetProperty("objective").GetInt32() == 0
         && !requestJson.RootElement.GetProperty("minimizeSteps").GetBoolean()
+        && requestJson.RootElement.GetProperty("stellarSteadyHandCharges").GetUInt32() == 0
         && requestJson.RootElement.GetProperty("incumbentActionIds").GetArrayLength() == 0
         && !requestJson.RootElement.TryGetProperty("AbiVersion", out _)
         && nativeRoot.GetProperty("wasteNot").GetInt32() == 0
@@ -200,7 +258,32 @@ Require(requestJson.RootElement.GetProperty("abiVersion").GetUInt32() == 3
         && nativeRoot.GetProperty("muscleMemory").GetInt32() == 0
         && nativeRoot.GetProperty("crafterDelineations").GetInt32() == 1
         && !nativeRoot.TryGetProperty("manipulationLeft", out _),
-    "Donatello requests must match every ABI v3 camelCase field name exactly");
+    "Donatello requests must match every ABI v5 camelCase field name exactly");
+
+var progressOnlyCraft = Craft();
+progressOnlyCraft.DonatelloOptions = progressOnlyOptions;
+progressOnlyCraft.SplendorCosmic = true;
+using var progressOnlyRequestJson = JsonDocument.Parse(DonatelloNative.SerializeRequest(
+    progressOnlyCraft,
+    Root() with
+    {
+        Quality = 321,
+        StellarSteadyHandCharges = 3,
+        StellarSteadyHandLeft = 2,
+        StellarSteadyHandsUsed = 1,
+    },
+    allowSpecialistActions: false,
+    backloadProgress: false));
+var progressOnlyRoot = progressOnlyRequestJson.RootElement.GetProperty("root");
+Require(progressOnlyRequestJson.RootElement.GetProperty("objective").GetInt32() == 1
+        && progressOnlyRequestJson.RootElement.GetProperty("maxQuality").GetInt32() == 0
+        && !progressOnlyRequestJson.RootElement.GetProperty("minimizeSteps").GetBoolean()
+        && progressOnlyRequestJson.RootElement.GetProperty("stellarSteadyHandCharges").GetUInt32() == 1
+        && progressOnlyRoot.GetProperty("quality").GetInt32() == 0
+        && progressOnlyRoot.GetProperty("stellarSteadyHandCharges").GetUInt32() == 1
+        && progressOnlyRoot.GetProperty("stellarSteadyHand").GetInt32() == 2
+        && progressOnlyRoot.GetProperty("splendorCosmic").GetBoolean(),
+    "progress-only native requests must erase quality, disable minimization, and enforce the remaining Stellar-use cap");
 using var incumbentRequestJson = JsonDocument.Parse(DonatelloNative.SerializeRequest(
     specialistCraft,
     specialistRoot,
@@ -212,6 +295,47 @@ Require(incumbentRequestJson.RootElement.GetProperty("incumbentActionIds")[0].Ge
     "Donatello replans must send the current finishing suffix as the native search incumbent");
 var qualityRoot = GameStateBuilder.BuildInitialStepState(Craft() with { InitialQuality = 321 }, 321);
 Require(qualityRoot.Quality == 321, "initial HQ-material quality must survive root construction");
+
+var robust = Simulator.Execute(craft, Root(Condition.Robust), VulcanSkill.BasicTouch, 0, 1).Item2;
+Require(robust.Durability == 35 && robust.Condition == Condition.Sturdy,
+    "Robust must halve durability cost and deterministically transition to Sturdy");
+
+var stellarRoot = Root() with { StellarSteadyHandCharges = 1 };
+Require(Simulator.CanUseAction(craft, stellarRoot, VulcanSkill.StellarSteadyHand),
+    "Stellar Steady Hand must be usable when its Cosmic duty-action charge exists");
+var afterStellar = Simulator.Execute(
+    craft, stellarRoot, VulcanSkill.StellarSteadyHand, 0, 1).Item2;
+Require(afterStellar.StellarSteadyHandCharges == 0
+        && afterStellar.StellarSteadyHandLeft == 3
+        && afterStellar.StellarSteadyHandsUsed == 1
+        && Simulator.GetSuccessRate(afterStellar, VulcanSkill.RapidSynthesis) == 1,
+    "Stellar Steady Hand must consume one charge and guarantee the next three risky actions");
+var afterZeroStepAction = Simulator.Execute(
+    craft, afterStellar, VulcanSkill.FinalAppraisal, 0, 1).Item2;
+Require(afterZeroStepAction.StellarSteadyHandLeft == 2,
+    "Stellar Steady Hand duration must count zero-step crafting actions, matching Artisan");
+
+var materialMiracleCraft = Craft();
+materialMiracleCraft.StatLevel = 101;
+materialMiracleCraft.DonatelloOptions = new DonatelloExecutionOptions(
+    DonatelloSolveObjective.MaximizeQuality,
+    MaxMaterialMiracleUses: 2,
+    MinimumStepsBeforeMaterialMiracle: 4);
+var materialMiracleRoot = Root() with { Index = 4, MaterialMiracleCharges = 1 };
+Require(!DonatelloSolver.ShouldUseMaterialMiracle(
+        materialMiracleCraft, materialMiracleRoot with { Index = 3 })
+        && DonatelloSolver.ShouldUseMaterialMiracle(materialMiracleCraft, materialMiracleRoot)
+        && !DonatelloSolver.ShouldUseMaterialMiracle(
+            materialMiracleCraft, materialMiracleRoot with { MaterialMiracleActive = true })
+        && !DonatelloSolver.ShouldUseMaterialMiracle(
+            materialMiracleCraft, materialMiracleRoot with { MaterialMiraclesUsed = 2 }),
+    "Material Miracle policy must enforce minimum step, active-effect exclusion, and maximum uses");
+
+if (args.Contains("--artisan-shim", StringComparer.Ordinal))
+{
+    Console.WriteLine($"Artisan shim/Donatello acceptance: {assertions} assertions passed");
+    return;
+}
 
 AcquisitionAcceptanceTests.Run(Require);
 await MarketplaceAcceptanceTests.Run(Require);

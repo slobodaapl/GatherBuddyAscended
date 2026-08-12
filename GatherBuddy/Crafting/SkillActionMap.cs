@@ -45,7 +45,7 @@ public static class SkillActionMap
         {
             var isCraftAction = baseActionId >= 100000;
             var actionIds = new uint[8];
-            string skillName = null;
+            string? skillName = null;
 
             if (isCraftAction)
             {

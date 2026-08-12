@@ -2,6 +2,7 @@ using GatherBuddy.Classes;
 using System;
 using Newtonsoft.Json;
 using GatherBuddy.Interfaces;
+using GatherBuddy.Vulcan;
 
 namespace GatherBuddy.AutoGather
 {
@@ -34,6 +35,7 @@ namespace GatherBuddy.AutoGather
         public int CollectableTagetScore { get => collectableTagetScore; set => collectableTagetScore = Math.Max(0, Math.Min(MaxCollectability, value)); }
         public int CollectableMinScore { get => collectableMinScore; set => collectableMinScore = Math.Max(0, Math.Min(MaxCollectability, value)); }
         public bool ChooseBestActionsAutomatically { get; set; } = true;
+        public CollectableSolverMode CollectableSolver { get; set; } = CollectableSolverMode.ExpectedScrip;
         public bool SpendGPOnBestNodesOnly { get; set; } = false;
         public GatheringActionsRec GatherableActions { get; init; } = new();
         public CollectableActionsRec CollectableActions { get; init; } = new();
@@ -238,6 +240,7 @@ namespace GatherBuddy.AutoGather
             CollectableMinScore = original.CollectableMinScore;
 
             ChooseBestActionsAutomatically = original.ChooseBestActionsAutomatically;
+            CollectableSolver = original.CollectableSolver;
             SpendGPOnBestNodesOnly = original.SpendGPOnBestNodesOnly;
 
             GatherableActions = original.GatherableActions with { };

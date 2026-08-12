@@ -7,8 +7,9 @@ using GatherBuddy.Classes;
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Text.RegularExpressions;
 using Dalamud.Game.ClientState.Objects.SubKinds;
+using GatherBuddy.Vulcan;
+using Lumina.Excel.Sheets;
 
 namespace GatherBuddy.AutoGather
 {
@@ -35,33 +36,197 @@ namespace GatherBuddy.AutoGather
             return true;
         }
 
-        private unsafe partial class CollectableRotation
+        private unsafe class CollectableRotation
         {
-            public CollectableRotation(ConfigPreset config, Gatherable item, uint quantity)
+            public CollectableRotation(ConfigPreset config, Gatherable item, uint quantity, int gatherChance)
             {
                 this.config = config;
                 shouldUseFullRotation = Player.Object?.CurrentGp >= config.CollectableActionsMinGP;
                 this.item = item;
                 this.quantity = quantity;
+                this.gatherChance = gatherChance;
             }
 
             private readonly bool shouldUseFullRotation = false;
             private readonly ConfigPreset config;
             private readonly Gatherable item;
             private readonly uint quantity;
+            private readonly int gatherChance;
+            private int? previousIntegrity;
+            private bool revisitUsed;
 
-            [GeneratedRegex(@"\d+")]
-            private static partial Regex NumberRegex();
+            private static bool ShouldAbandonCompletedCollectable(Gatherable collectable)
+                => GatherBuddy.Config.AutoGatherConfig.AbandonNodes
+                && !(GatherBuddy.Config.AutoGatherConfig.AlwaysExhaustTimedCollectableNodes
+                  && collectable.NodeType is Enums.NodeType.Unspoiled or Enums.NodeType.Legendary or Enums.NodeType.Clouded);
 
             public Actions.BaseAction GetNextAction(GatheringMasterpieceReader masterpieceReader)
             {
-                var player = Player.Object ?? throw new InvalidOperationException("Player object is null");
-                var itemsLeft = (int)(quantity - item.GetTotalCount());
+                try
+                {
+                    return GetNativeNextAction(masterpieceReader);
+                }
+                catch (Exception exception) when (exception is DllNotFoundException
+                                                       or EntryPointNotFoundException
+                                                       or BadImageFormatException
+                                                       or InvalidOperationException)
+                {
+                    throw new CollectableSolverException(exception.Message, exception);
+                }
+            }
 
-                if (itemsLeft <= 0 && GatherBuddy.Config.AutoGatherConfig.AbandonNodes)
+            private Actions.BaseAction GetNativeNextAction(GatheringMasterpieceReader masterpieceReader)
+            {
+                var player = Player.Object ?? throw new InvalidOperationException("Player object is null");
+                var itemsLeft = (int)Math.Max(0L, (long)quantity - item.GetTotalCount());
+                if (itemsLeft <= 0 && ShouldAbandonCompletedCollectable(item))
                     throw new NoGatherableItemsInNodeException();
 
-                var regex = NumberRegex();
+                if (previousIntegrity == 1 && masterpieceReader.IntegrityCurrent == masterpieceReader.IntegrityMax)
+                    revisitUsed = true;
+                previousIntegrity = masterpieceReader.IntegrityCurrent;
+
+                var (targetScore, minScore) = GetCollectabilityScores(masterpieceReader);
+                var (rewards, unsupportedReason) = ResolveRewards(masterpieceReader);
+                var mode = config.ChooseBestActionsAutomatically
+                    ? config.CollectableSolver
+                    : CollectableSolverMode.Legacy;
+                var scourGain = masterpieceReader.ScourGain;
+                if (Player.Status.Any(status => status.StatusId == Actions.Scrutiny.EffectId))
+                    scourGain = Math.Max(1, scourGain / 2);
+                var brazenGains = Enumerable.Range(0, 11)
+                    .Select(index => new GatheringWeightedGain(scourGain / 2 + scourGain * index / 10, 1))
+                    .ToArray();
+                var standard = Player.Status.Any(status => status.StatusId == 3911) ? 2
+                    : Player.Status.Any(status => status.StatusId == 2418) ? 1
+                    : 0;
+                var automatic = config.ChooseBestActionsAutomatically;
+                var request = new GatheringSolveRequest(
+                    mode,
+                    new GatheringSolverState(
+                        masterpieceReader.CollectabilityCurrent,
+                        masterpieceReader.IntegrityCurrent,
+                        masterpieceReader.IntegrityMax,
+                        (int)player.CurrentGp,
+                        (int)player.MaxGp,
+                        itemsLeft,
+                        Player.Status.Any(status => status.StatusId == Actions.Scrutiny.EffectId),
+                        Player.Status.Any(status => status.StatusId == Actions.CollectorsFocus.EffectId),
+                        Player.Status.Any(status => status.StatusId == Actions.PrimingTouch.EffectId),
+                        standard,
+                        Player.Status.Any(status => status.StatusId == Actions.SolidAge.EffectId),
+                        revisitUsed),
+                    rewards,
+                    new GatheringActionModel(
+                        scourGain,
+                        scourGain * 3 / 4,
+                        brazenGains,
+                        Actions.Scrutiny.GpCost,
+                        Actions.CollectorsFocus.GpCost,
+                        Actions.PrimingTouch.GpCost,
+                        Actions.SolidAge.GpCost,
+                        IsEnabled(Actions.Scour, config.CollectableActions.Scour, automatic),
+                        IsEnabled(Actions.Brazen, config.CollectableActions.Brazen, automatic),
+                        IsEnabled(Actions.Meticulous, config.CollectableActions.Meticulous, automatic),
+                        IsEnabled(Actions.Scrutiny, config.CollectableActions.Scrutiny, automatic),
+                        automatic && player.Level >= Actions.CollectorsFocus.MinLevel,
+                        automatic && player.Level >= Actions.PrimingTouch.MinLevel,
+                        IsEnabled(Actions.SolidAge, config.CollectableActions.SolidAge, automatic),
+                        player.Level >= Actions.Wise.MinLevel),
+                    new GatheringMechanics(
+                        Math.Clamp(gatherChance, 0, 100) * 100,
+                        4000,
+                        player.Level >= 100 ? 10000 : 7000,
+                        100,
+                        2000,
+                        player.Level >= 100 ? 2000 : 0,
+                        2500,
+                        4000,
+                        2,
+                        5000,
+                        player.Level >= 91 ? 1000 : 0,
+                        6,
+                        20000,
+                        500000),
+                    new GatheringLegacyOptions(
+                        targetScore,
+                        minScore,
+                        shouldUseFullRotation,
+                        config.CollectableAlwaysUseSolidAge,
+                        ShouldAbandonCompletedCollectable(item)),
+                    mode == CollectableSolverMode.ExpectedScrip ? unsupportedReason : null);
+                var decision = DonatelloNative.SolveGathering(request);
+                if (decision.FallbackReason != null)
+                    GatherBuddy.Log.Debug($"[AutoGather] Expected-scrip solver used legacy fallback for {item.Name}: {decision.FallbackReason}");
+                return MapAction(decision.Action);
+            }
+
+            private static bool IsEnabled(Actions.BaseAction action, ConfigPreset.ActionConfig actionConfig, bool automatic)
+                => Player.Level >= action.MinLevel && (automatic || actionConfig.Enabled);
+
+            private static Actions.BaseAction MapAction(GatheringSolverAction action)
+                => action switch
+                {
+                    GatheringSolverAction.Scour => Actions.Scour,
+                    GatheringSolverAction.Brazen => Actions.Brazen,
+                    GatheringSolverAction.Meticulous => Actions.Meticulous,
+                    GatheringSolverAction.Scrutiny => Actions.Scrutiny,
+                    GatheringSolverAction.CollectorsFocus => Actions.CollectorsFocus,
+                    GatheringSolverAction.PrimingTouch => Actions.PrimingTouch,
+                    GatheringSolverAction.SolidReason => Actions.SolidAge,
+                    GatheringSolverAction.WiseToTheWorld => Actions.Wise,
+                    GatheringSolverAction.Collect => Actions.Collect,
+                    _ => throw new InvalidOperationException($"Unsupported native gathering action {action}"),
+                };
+
+            private (IReadOnlyList<GatheringRewardTier> Rewards, string? UnsupportedReason) ResolveRewards(
+                GatheringMasterpieceReader masterpieceReader)
+            {
+                var fallback = new[] { new GatheringRewardTier(Math.Max(1, masterpieceReader.LowThreshold), 1) };
+                if (item.ItemData.AetherialReduce > 0)
+                    return (fallback, "aetherial reduction collectable");
+                if (item.ItemData.AdditionalData.RowId != 0 || item.GatheringData.Unknown3 is 3 or 4 or 6)
+                    return (fallback, "non-scrip collectable");
+
+                var rows = Dalamud.GameData.GetSubrowExcelSheet<CollectablesShopItem>()?
+                    .SelectMany(group => group)
+                    .Where(row => row.Item.RowId == item.ItemId
+                               && row.CollectablesShopRefine.RowId != 0
+                               && row.CollectablesShopRewardScrip.RowId != 0)
+                    .ToArray() ?? [];
+                if (rows.Length != 1)
+                    return (fallback, $"expected one scrip reward row, found {rows.Length}");
+
+                var refine = rows[0].CollectablesShopRefine.Value;
+                var reward = rows[0].CollectablesShopRewardScrip.Value;
+                var rewards = new[]
+                {
+                    new GatheringRewardTier((int)refine.LowCollectability, (int)reward.LowReward),
+                    new GatheringRewardTier((int)refine.MidCollectability, (int)reward.MidReward),
+                    new GatheringRewardTier((int)refine.HighCollectability, (int)reward.HighReward),
+                }.Where(tier => tier.Threshold > 0 && tier.Scrip > 0)
+                 .DistinctBy(tier => tier.Threshold)
+                 .OrderBy(tier => tier.Threshold)
+                 .ToArray();
+                var visibleThresholds = new[]
+                {
+                    masterpieceReader.LowThreshold,
+                    masterpieceReader.MidThreshold,
+                    masterpieceReader.HighThreshold,
+                }.Where(threshold => threshold > 0).Distinct().Order().ToArray();
+                if (rewards.Length == 0 || !rewards.Select(tier => tier.Threshold).SequenceEqual(visibleThresholds))
+                    return (fallback, "reward thresholds do not match the live gathering window");
+                return (rewards, null);
+            }
+
+            private Actions.BaseAction GetLegacyNextAction(GatheringMasterpieceReader masterpieceReader)
+            {
+                var player = Player.Object ?? throw new InvalidOperationException("Player object is null");
+                var itemsLeft = (int)Math.Max(0L, (long)quantity - item.GetTotalCount());
+
+                if (itemsLeft <= 0 && ShouldAbandonCompletedCollectable(item))
+                    throw new NoGatherableItemsInNodeException();
+
                 int collectability   = masterpieceReader.CollectabilityCurrent;
                 int currentIntegrity = masterpieceReader.IntegrityCurrent;
                 int maxIntegrity     = masterpieceReader.IntegrityMax;

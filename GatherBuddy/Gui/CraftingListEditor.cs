@@ -51,14 +51,12 @@ public class CraftingListEditor
     private Dictionary<uint, string> _recipeSearchLabels = new();
     private string _cachedFuzzyFilter = string.Empty;
     private List<Recipe> _cachedFuzzyRecipes = new();
-    private bool _showMaterials = true;
     private ClippedSelectableCombo<Recipe>? _recipeCombo = null;
     private List<Recipe> _allRecipes = new();
     private List<Recipe> _keywordFilteredRecipes = new();
     private string _lastComboFilter = string.Empty;
     
     private QueueCacheSnapshot? _queueCache = null;
-    private int _cachedRecipeCount = -1;
     private int _queueGenerationVersion = 0;
     private int _selectedQueueIndex = -1;
     private bool _showPrecrafts = true;
@@ -966,7 +964,7 @@ public class CraftingListEditor
             ImGui.TextColored(
                 exceedsMaximum ? ImGuiColors.DalamudOrange : ImGuiColors.DalamudYellow,
                 exceedsMaximum
-                    ? $"Preferred estimate: {result.PreferredEstimate.TotalGil:N0} Gil (over max {maximum.Value:N0}; fallback will relax preferences)"
+                    ? $"Preferred estimate: {result.PreferredEstimate.TotalGil:N0} Gil (over max {maximum.GetValueOrDefault():N0}; fallback will relax preferences)"
                     : $"Preferred estimate: {result.PreferredEstimate.TotalGil:N0} Gil");
         }
         if (result.MinimumGilEstimate != null)

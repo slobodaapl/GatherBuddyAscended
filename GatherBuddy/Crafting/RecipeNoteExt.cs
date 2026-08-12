@@ -1,5 +1,7 @@
 using System;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using FFXIVClientStructs.FFXIV.Client.Game.UI;
 using FFXIVClientStructs.FFXIV.Component.GUI;
 using GatherBuddy.Automation;
 
@@ -65,6 +67,44 @@ public unsafe struct RecipeNoteIngredientEntry
 
 public static unsafe class RecipeNoteExt
 {
+    [StructLayout(LayoutKind.Explicit, Size = 0x400)]
+    public struct RecipeEntry
+    {
+        [FieldOffset(0x000)] public fixed byte Ingredients[6 * 0x88];
+        [FieldOffset(0x3B2)] public ushort RecipeId;
+        [FieldOffset(0x3D7)] public byte CraftType;
+
+        public Span<RecipeNoteIngredientEntry> IngredientsSpan
+            => new(Unsafe.AsPointer(ref Ingredients[0]), 6);
+    }
+
+    [StructLayout(LayoutKind.Explicit, Size = 0x470)]
+    public struct RecipeData
+    {
+        [FieldOffset(0x000)] public RecipeEntry* Recipes;
+        [FieldOffset(0x008)] public int RecipesCount;
+        [FieldOffset(0x468)] public ushort SelectedIndex;
+    }
+
+    public static RecipeData* GetRecipeData()
+    {
+        var recipeNote = RecipeNote.Instance();
+        return recipeNote == null ? null : (RecipeData*)recipeNote->RecipeList;
+    }
+
+    public static RecipeEntry* GetSelectedRecipeEntry()
+    {
+        var data = GetRecipeData();
+        return data != null
+            && data->Recipes != null
+            && data->SelectedIndex < data->RecipesCount
+            ? data->Recipes + data->SelectedIndex
+            : null;
+    }
+
+    public static Span<RecipeNoteIngredientEntry> GetIngredientsSpan(RecipeEntry* recipe)
+        => recipe == null ? [] : recipe->IngredientsSpan;
+
     public static Span<RecipeNoteIngredientEntry> GetIngredientsSpan(FFXIVClientStructs.FFXIV.Client.Game.UI.RecipeNote.RecipeEntry* recipe)
     {
         if (recipe == null)

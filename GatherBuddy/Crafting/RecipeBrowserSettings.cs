@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using GatherBuddy.Vulcan;
 using Newtonsoft.Json;
 
 namespace GatherBuddy.Crafting;
@@ -37,6 +38,7 @@ public class RecipeCraftSettings
     public string? SelectedMacroId { get; set; }
     public MacroOverrideMode MacroMode { get; set; } = MacroOverrideMode.Inherit;
     public SolverOverrideMode SolverOverride { get; set; } = SolverOverrideMode.Default;
+    [JsonIgnore] public DonatelloExecutionOptions? DonatelloOptions { get; set; }
 
     public bool HasAnySettings()
     {
@@ -51,7 +53,8 @@ public class RecipeCraftSettings
             || IngredientPreferences.Count > 0
             || UseAllNQ
             || !string.IsNullOrEmpty(SelectedMacroId)
-            || SolverOverride != SolverOverrideMode.Default;
+            || SolverOverride != SolverOverrideMode.Default
+            || DonatelloOptions != null;
     }
 
     public RecipeCraftSettings Clone()
@@ -73,6 +76,7 @@ public class RecipeCraftSettings
             SelectedMacroId = SelectedMacroId,
             MacroMode = MacroMode,
             SolverOverride = SolverOverride,
+            DonatelloOptions = DonatelloOptions,
         };
     }
 
@@ -93,6 +97,7 @@ public class RecipeCraftSettings
         SelectedMacroId = null;
         MacroMode = MacroOverrideMode.Inherit;
         SolverOverride = SolverOverrideMode.Default;
+        DonatelloOptions = null;
     }
 }
 

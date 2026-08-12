@@ -412,12 +412,14 @@ public static class CollectableTurnInRouteResolver
             return false;
 
         var typeHash = RowRef.CreateTypeHash(CustomTalkScriptTypes);
+#pragma warning disable CA1857 // Type hash is derived from the supported runtime row-type set.
         scriptTarget = RowRef.GetFirstValidRowOrUntyped(
             Dalamud.GameData.Excel,
             scriptArg,
             CustomTalkScriptTypes,
             typeHash,
             Dalamud.GameData.GameData.Options.DefaultExcelLanguage);
+#pragma warning restore CA1857
         return scriptTarget.RowId != 0;
     }
 

@@ -20,6 +20,9 @@ jobs:
         with:
           dotnet-version: 10.0.x
 
+      - name: Apply pinned dependency patches
+        run: git apply patches/ElliCon-null-safe-hook-status.patch patches/ElliLib-nullable-path-dropped-event.patch
+
       - name: Download Dalamud
         run: |
           Invoke-WebRequest -Uri https://goatcorp.github.io/dalamud-distrib/latest.zip -OutFile latest.zip

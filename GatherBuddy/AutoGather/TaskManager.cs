@@ -22,7 +22,7 @@ public class TaskManager : IDisposable
     public bool ShowDebug { get; set; } = true;
 
     public string? CurrentTaskName => _currentTask?.Name;
-    public List<string> TaskStack => _immediateTasks.Select(x => x.Name).Union(_tasks.Select(x => x.Name)).ToList();
+    public List<string> TaskStack => _immediateTasks.Select(x => x.Name).Union(_tasks.Select(x => x.Name)).OfType<string>().ToList();
     public int NumQueuedTasks => _tasks.Count + _immediateTasks.Count + (_currentTask == null ? 0 : 1);
     public bool IsBusy => _currentTask != null || _tasks.Count > 0 || _immediateTasks.Count > 0;
 

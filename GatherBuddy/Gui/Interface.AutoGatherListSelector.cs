@@ -308,7 +308,7 @@ public partial class Interface
 
             if (ImGui.BeginMenu("Add to Existing List", result.Targets.Count > 0 && vendorBuyListManager!.Lists.Count > 0))
             {
-                foreach (var list in vendorBuyListManager.Lists.OrderByDescending(list => list.CreatedAt))
+                foreach (var list in vendorBuyListManager!.Lists.OrderByDescending(list => list.CreatedAt))
                 {
                     if (ImGui.MenuItem(list.Name))
                         AddTargetsToVendorBuyList(leaf.Value, list.Id, list.Name, result, vendorBuyListManager);

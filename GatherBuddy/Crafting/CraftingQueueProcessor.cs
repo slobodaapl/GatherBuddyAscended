@@ -49,8 +49,6 @@ public class CraftingQueueProcessor : IDisposable
     private CraftingListConsumableSettings? _listConsumables = null;
     private DateTime _consumableDelayUntil = DateTime.MinValue;
     private bool _retainerRestock = false;
-    private bool _retainerWithdrawalCompleted;
-    private bool _acquisitionCompleted;
     private RetainerTaskExecutor? _retainerExecutor = null;
     private RetainerBellNavigator? _retainerBellNavigator = null;
     private Task<LiveAcquisitionResult>? _acquisitionTask;
@@ -142,8 +140,6 @@ public class CraftingQueueProcessor : IDisposable
         _missingIngredientFailures.Clear();
         _pauseReason = string.Empty;
         _retainerRestock = executionPlan.RetainerRestock;
-        _retainerWithdrawalCompleted = false;
-        _acquisitionCompleted = false;
         _retainerExecutor = null;
         _retainerBellNavigator = null;
         CancelAcquisition();
@@ -198,6 +194,12 @@ public class CraftingQueueProcessor : IDisposable
     {
         if (_executionPlan == null || _currentState is QueueState.Failed or QueueState.Complete)
             return;
+
+        if (!_executionPlan.AllowMaterialAcquisition)
+        {
+            BeginFinalPreflight();
+            return;
+        }
 
         if (!WaitForAcquisitionDrain())
             return;
@@ -315,7 +317,6 @@ public class CraftingQueueProcessor : IDisposable
             _executionPlan?.RegisterAcquiredAvailability(acquiredAvailability);
             ReleaseAcquisition();
             RebuildQueueAndMaterialsFromCurrentInventory();
-            _acquisitionCompleted = true;
             BeginGatherStage();
         }
         catch (Exception ex)
@@ -1172,6 +1173,7 @@ public class CraftingQueueProcessor : IDisposable
 
         var selectedMacroId = executionContext.SelectedMacroId;
         CraftingGameInterop.SetSelectedMacro(selectedMacroId);
+        CraftingGameInterop.SetDonatelloOptions(executionContext.DonatelloOptions);
         if (!string.IsNullOrEmpty(selectedMacroId))
         {
             GatherBuddy.Log.Information($"[CraftingQueueProcessor] Using macro: {selectedMacroId}");
@@ -1363,7 +1365,7 @@ public class CraftingQueueProcessor : IDisposable
         var recipe = RecipeManager.GetRecipe(recipeId);
         var itemName = recipe != null ? recipe.Value.ItemResult.Value.Name.ExtractText() : $"Recipe {recipeId}";
 
-        string failureReason = "unknown";
+        string? failureReason = "unknown";
         if (_raphaelCoordinator != null)
         {
             var request = BuildRaphaelRequestForItem(recipeItem);
@@ -1572,9 +1574,9 @@ public class CraftingQueueProcessor : IDisposable
         var canAffordNPC = npcRoute.HasValue
             && (ulong)gilCount >= (ulong)repairPrice + npcRoute.Value.TeleportCost;
 
-        if (prioritizeNPC && canAffordNPC)
+        if (prioritizeNPC && canAffordNPC && npcRoute is { } prioritizedRoute)
         {
-            QueueNPCRepairTasks(npcRoute.Value, repairPrice);
+            QueueNPCRepairTasks(prioritizedRoute, repairPrice);
             return;
         }
 
@@ -1589,9 +1591,9 @@ public class CraftingQueueProcessor : IDisposable
             return;
         }
 
-        if (!prioritizeNPC && canAffordNPC)
+        if (!prioritizeNPC && canAffordNPC && npcRoute is { } fallbackRoute)
         {
-            QueueNPCRepairTasks(npcRoute.Value, repairPrice);
+            QueueNPCRepairTasks(fallbackRoute, repairPrice);
             return;
         }
 
@@ -1746,7 +1748,6 @@ public class CraftingQueueProcessor : IDisposable
     private unsafe void TransitionFromRetainerWithdrawComplete()
     {
         RebuildQueueAndMaterialsFromCurrentInventory();
-        _retainerWithdrawalCompleted = true;
         GatherBuddy.Log.Debug("[CraftingQueueProcessor] Computing remaining materials after retainer withdrawal");
 
         var stillGatherCount = BuildCurrentMaterialDeficits().Count;
@@ -2025,8 +2026,6 @@ public class CraftingQueueProcessor : IDisposable
         _jobSwitchRequestedFor = 0u;
         _jobSwitchRequestedAt = DateTime.MinValue;
         _retainerRestock = false;
-        _retainerWithdrawalCompleted = false;
-        _acquisitionCompleted = false;
         _retainerExecutor = null;
         _retainerBellNavigator?.Stop();
         _retainerBellNavigator = null;

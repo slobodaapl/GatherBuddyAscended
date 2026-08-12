@@ -42,7 +42,6 @@ public partial class VulcanWindow
     private static SortDirection _sortDirection = SortDirection.Ascending;
     private static bool _hideCrafted = false;
     private static bool _filterByEquipLevel = false;
-    private static RecipeTable? _recipeTable;
     private static string _recipeSearchText = "";
     private static HashSet<uint> _selectedJobFilters = new();
     private static int _minLevel = 1;

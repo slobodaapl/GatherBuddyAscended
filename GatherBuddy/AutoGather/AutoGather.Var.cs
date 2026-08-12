@@ -183,6 +183,7 @@ namespace GatherBuddy.AutoGather
 
         public readonly HashSet<Vector3> FarNodesSeenSoFar = new(8);
         public readonly List<uint>       VisitedNodes      = new(4);        
+        private DateTime _farNodeRetryAfter = DateTime.MinValue;
         // Distance at which a node is expected to become visible, and it is given up on if it does not.
         public const float NodeVisibilityDistance = 50f;
 

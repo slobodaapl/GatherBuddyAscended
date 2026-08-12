@@ -82,6 +82,7 @@ public partial class GatherBuddy : IDalamudPlugin
     public static LiveAcquisitionExecutor? LiveAcquisitionExecutor { get; private set; }
     public static Crafting.RaphaelSolveCoordinator RaphaelSolveCoordinator { get; private set; } = null!;
     public static Crafting.RecipeBrowserSettings RecipeBrowserSettings { get; private set; } = null!;
+    public static Crafting.ArtisanIpcShim? ArtisanShim { get; private set; }
     public static Gui.CraftingStatusWindow? CraftingStatusWindow { get; private set; }
     public static Gui.VulcanWindow? VulcanWindow { get; private set; }
     public static Gui.CraftingMaterialsWindow? CraftingMaterialsWindow { get; private set; }
@@ -196,6 +197,7 @@ public partial class GatherBuddy : IDalamudPlugin
             CollectableManager = new AutoGather.Collectables.CollectableManager(Dalamud.Framework, Dalamud.Conditions, Config);
             global::GatherBuddy.AutoGather.Collectables.CollectableInventoryHelper.InitializeAsync();
             CraftingGatherBridge.BindCollectableManager(CollectableManager);
+            ArtisanShim = new Crafting.ArtisanIpcShim(pluginInterface);
             WindowSystem = new WindowSystem(Name);
             Interface    = new Interface(this);
             _vulcanWindow = new VulcanWindow();
@@ -510,7 +512,7 @@ public partial class GatherBuddy : IDalamudPlugin
                     // Only add offsets if player is gathering and is not flying
                     // (I've seen glitches where the flying character would gather, let's exclude those)
                     if (character->Mode == FFXIVClientStructs.FFXIV.Client.Game.Character.CharacterModes.Gathering
-                        && character->MovementState != FFXIVClientStructs.FFXIV.Client.Game.Character.MovementStateOptions.Flying)
+                        && character->MoveController.MovementState != FFXIVClientStructs.FFXIV.Client.Game.Character.MovementStateOptions.Flying)
                     {
                         var target = player.TargetObject;
                         if (target != null && target.ObjectKind == ObjectKind.GatheringPoint)
@@ -526,6 +528,7 @@ public partial class GatherBuddy : IDalamudPlugin
         {
             CraftingGameInterop.Update();
             CraftingGatherBridge.Update();
+            ArtisanShim?.Update();
             VendorNavigator.Update();
             VendorPurchaseManager.Update();
             VendorBuyListManager.Update();
@@ -631,6 +634,8 @@ public partial class GatherBuddy : IDalamudPlugin
             Dalamud.PluginInterface.UiBuilder.OpenConfigUi -= Interface.Toggle;
             Dalamud.PluginInterface.UiBuilder.OpenMainUi -= Interface.Toggle;
         }
+        ArtisanShim?.Dispose();
+        ArtisanShim = null;
         CraftingGameInterop.Dispose();
         FishRecorder?.Dispose();
         ContextMenu?.Dispose();

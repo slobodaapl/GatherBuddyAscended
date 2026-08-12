@@ -74,7 +74,14 @@ public static unsafe class SynthesisReader
                 ?? craft.StatLevel >= Simulator.MinLevel(VulcanSkill.TrainedPerfection),
             HeartAndSoulAvailable = previousStep?.HeartAndSoulAvailable ?? craft.Specialist,
             QuickInnoAvailable = previousStep?.QuickInnoAvailable ?? craft.Specialist,
-            MaterialMiracleCharges = previousStep?.MaterialMiracleCharges ?? (craft.MissionHasMaterialMiracle ? 1u : 0u),
+            MaterialMiracleCharges = craft.MissionHasMaterialMiracle
+                ? CraftingStateBuilder.GetDutyActionCharges((uint)VulcanSkill.MaterialMiracle)
+                : 0,
+            MaterialMiraclesUsed = previousStep?.MaterialMiraclesUsed ?? 0,
+            StellarSteadyHandCharges = craft.MissionHasStellarSteadyHand
+                ? CraftingStateBuilder.GetDutyActionCharges((uint)VulcanSkill.StellarSteadyHand)
+                : 0,
+            StellarSteadyHandsUsed = previousStep?.StellarSteadyHandsUsed ?? 0,
             CarefulObservationLeft = previousStep?.CarefulObservationLeft ?? (craft.Specialist ? 3 : 0),
             CrafterDelineationsLeft = previousStep?.CrafterDelineationsLeft ?? craft.CrafterDelineations,
             QuickInnoLeft = previousStep?.QuickInnoLeft ?? (craft.Specialist ? 1 : 0),
@@ -135,6 +142,12 @@ public static unsafe class SynthesisReader
                     break;
                 case 3812:
                     step.ExpedienceLeft = status.Param;
+                    break;
+                case 4220:
+                    step.MaterialMiracleActive = true;
+                    break;
+                case 4839:
+                    step.StellarSteadyHandLeft = status.Param;
                     break;
             }
         }

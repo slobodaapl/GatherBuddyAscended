@@ -93,7 +93,8 @@ internal static class StepStateReconciler
             && left.HeartAndSoulActive == right.HeartAndSoulActive
             && left.ExpedienceLeft == right.ExpedienceLeft
             && left.TrainedPerfectionActive == right.TrainedPerfectionActive
-            && left.MaterialMiracleActive == right.MaterialMiracleActive;
+            && left.MaterialMiracleActive == right.MaterialMiracleActive
+            && left.StellarSteadyHandLeft == right.StellarSteadyHandLeft;
 
     private static bool PersistentEquivalent(StepState left, StepState right)
         => left.CarefulObservationLeft == right.CarefulObservationLeft
@@ -105,6 +106,9 @@ internal static class StepStateReconciler
             && left.TrainedPerfectionAvailable == right.TrainedPerfectionAvailable
             && left.PrevComboAction == right.PrevComboAction
             && left.MaterialMiracleCharges == right.MaterialMiracleCharges
+            && left.MaterialMiraclesUsed == right.MaterialMiraclesUsed
+            && left.StellarSteadyHandCharges == right.StellarSteadyHandCharges
+            && left.StellarSteadyHandsUsed == right.StellarSteadyHandsUsed
             && left.ObserveCounter == right.ObserveCounter;
 
     private static StepState OverlayObserved(StepState inferred, StepState observed)
@@ -128,6 +132,7 @@ internal static class StepStateReconciler
         result.ExpedienceLeft = observed.ExpedienceLeft;
         result.TrainedPerfectionActive = observed.TrainedPerfectionActive;
         result.MaterialMiracleActive = observed.MaterialMiracleActive;
+        result.StellarSteadyHandLeft = observed.StellarSteadyHandLeft;
         return result;
     }
 }
