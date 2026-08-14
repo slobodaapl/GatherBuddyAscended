@@ -423,6 +423,13 @@ public partial class VulcanWindow
 
     private void DrawResultsList()
     {
+        var resetResultsScroll = _recipeResultsScrollResetPending;
+        if (resetResultsScroll)
+        {
+            ImGui.SetScrollY(0);
+            _recipeResultsScrollResetPending = false;
+        }
+
         if (_filteredRecipes == null || _filteredRecipes.Count == 0)
         {
             ImGui.Spacing();
@@ -490,6 +497,7 @@ public partial class VulcanWindow
             var targetIndex = _filteredRecipes.FindIndex(r => r.Recipe.RowId == _pendingRecipeScrollId.Value);
             if (targetIndex >= 0)
             {
+                EnsureRecipeDisplayed(targetIndex);
                 var viewportHeight = ImGui.GetContentRegionAvail().Y;
                 var targetScroll = Math.Max(0f, targetIndex * itemHeight - Math.Max(0f, (viewportHeight - itemHeight) * 0.5f));
                 ImGui.SetScrollY(targetScroll);
@@ -500,7 +508,7 @@ public partial class VulcanWindow
             }
         }
 
-        ElliLib.ImGuiClip.ClippedDraw(_filteredRecipes, recipe =>
+        ElliLib.ImGuiClip.ClippedDraw(_displayedRecipes, recipe =>
         {
             var isSelected = _selectedRecipe?.Recipe.RowId == recipe.Recipe.RowId;
             var rowStartY = ImGui.GetCursorPosY();
@@ -616,6 +624,14 @@ public partial class VulcanWindow
             ImGui.TextColored(new Vector4(0.5f, 0.5f, 0.5f, 1), _filterByEquipLevel ? $"{recipe.ItemEquipLevel}" : $"{recipe.Level}");
             ImGui.SetCursorPosY(rowStartY + itemHeight);
         }, itemHeight);
+
+        if (!resetResultsScroll
+            && _displayedRecipes.Count < _filteredRecipes.Count
+            && ImGui.GetScrollMaxY() > 0f
+            && ImGui.GetScrollY() >= ImGui.GetScrollMaxY() - itemHeight * RecipePaginationThresholdRows)
+        {
+            AppendNextRecipePage();
+        }
     }
 
     private void DrawDetailsPanel()

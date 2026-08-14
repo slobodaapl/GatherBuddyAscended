@@ -6,6 +6,7 @@ using GatherBuddy.Utility;
 using GatherBuddy.Vulcan.Tests;
 using Newtonsoft.Json;
 using System.Text.Json;
+using System.Threading;
 
 var assertions = 0;
 
@@ -803,4 +804,80 @@ Require(reconciledObservation.CarefulObservationLeft == 2
         && reconciledObservation.Condition == Condition.Good,
     "Careful Observation reconciliation must consume one charge and trust the observed condition");
 
+var ingredientSelection = new IngredientSelectionSequencer();
+ingredientSelection.BeginEquipment(123, true, 1_000);
+Require(ingredientSelection.Phase == EquipmentIngredientSelectionPhase.WaitingForMenu
+        && ingredientSelection.ItemId == 123
+        && ingredientSelection.HighQuality,
+    "equipment ingredient selection must retain the pending item while waiting for its menu");
+Require(!ingredientSelection.IsReady(1_149) && ingredientSelection.IsReady(1_150),
+    "equipment ingredient menu selection must resume after 150 ms without blocking the framework thread");
+ingredientSelection.MarkMenuSelectionComplete(1_150);
+Require(ingredientSelection.Phase == EquipmentIngredientSelectionPhase.WaitingForAssignment
+        && !ingredientSelection.IsReady(1_349)
+        && ingredientSelection.IsReady(1_350),
+    "equipment assignment verification must resume 200 ms later without blocking the framework thread");
+ingredientSelection.CompleteEquipmentAssignment();
+Require(ingredientSelection.Phase == EquipmentIngredientSelectionPhase.None
+        && ingredientSelection.ItemId == 0,
+    "completed equipment assignment must clear pending state");
+ingredientSelection.DelayNormalAssignment(2_000);
+Require(!ingredientSelection.IsReady(2_049) && ingredientSelection.IsReady(2_050),
+    "normal material assignment verification must resume after 50 ms without blocking the framework thread");
+
+var frameworkThreadId = Environment.CurrentManagedThreadId;
+var backgroundSolver = new ThreadRecordingSolver();
+CraftingProcessor.Setup();
+CraftingProcessor.RegisterSolver(new ThreadRecordingSolverDefinition(backgroundSolver));
+CraftingProcessor.OnCraftStarted(Craft(), Root(), 1, false);
+Require(CraftingProcessor.NextRecommendation.Action == VulcanSkill.None,
+    "craft start must submit solver work without blocking for a recommendation");
+Require(SpinWait.SpinUntil(() => backgroundSolver.SolveThreadId != 0, TimeSpan.FromSeconds(5)),
+    "background solver must start promptly");
+Require(backgroundSolver.SolveThreadId != frameworkThreadId,
+    "solver work must not run on the submitting framework thread");
+var newerSolverStep = Root(Condition.Good) with { Index = 2 };
+CraftingProcessor.OnCraftAdvanced(Craft(), newerSolverStep, 1);
+backgroundSolver.Release();
+Require(SpinWait.SpinUntil(() =>
+    {
+        CraftingProcessor.Update();
+        return CraftingProcessor.NextRecommendation.Comment == "step 2";
+    }, TimeSpan.FromSeconds(5)),
+    "the latest queued craft snapshot must replace the stale in-flight result");
+Require(backgroundSolver.Calls == 2,
+    "the bounded crafting worker must run one in-flight request plus one latest queued request");
+CraftingProcessor.OnCraftFinished(Craft(), newerSolverStep, 1, false);
+CraftingProcessor.Dispose();
+
 Console.WriteLine($"Donatello Vulcan acceptance: {assertions} assertions passed");
+
+sealed class ThreadRecordingSolverDefinition(ThreadRecordingSolver solver) : ISolverDefinition
+{
+    public IEnumerable<ISolverDefinition.Desc> Flavors(CraftState craft)
+    {
+        yield return new(this, 0, 1000, "Thread recording solver");
+    }
+
+    public Solver Create(CraftState craft, int flavor) => solver;
+}
+
+sealed class ThreadRecordingSolver : Solver
+{
+    private readonly ManualResetEventSlim _release = new(false);
+    private int _calls;
+    private int _solveThreadId;
+
+    public int Calls => Volatile.Read(ref _calls);
+    public int SolveThreadId => Volatile.Read(ref _solveThreadId);
+
+    public void Release() => _release.Set();
+
+    public override Recommendation Solve(CraftState craft, StepState step)
+    {
+        Volatile.Write(ref _solveThreadId, Environment.CurrentManagedThreadId);
+        if (Interlocked.Increment(ref _calls) == 1)
+            _release.Wait();
+        return new(VulcanSkill.BasicSynthesis, $"step {step.Index}");
+    }
+}

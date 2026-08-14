@@ -7,6 +7,8 @@ using GatherBuddy.Classes;
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
 using Dalamud.Game.ClientState.Objects.SubKinds;
 using GatherBuddy.Vulcan;
 using Lumina.Excel.Sheets;
@@ -38,6 +40,8 @@ namespace GatherBuddy.AutoGather
 
         private unsafe class CollectableRotation
         {
+            private static readonly SemaphoreSlim SolverGate = new(1, 1);
+
             public CollectableRotation(
                 ConfigPreset config,
                 Gatherable item,
@@ -61,28 +65,75 @@ namespace GatherBuddy.AutoGather
             private readonly uint completionItemId;
             private int? previousIntegrity;
             private bool revisitUsed;
+            private Task<GatheringDecision>? pendingSolve;
+            private GatheringSolveRequest? pendingRequest;
 
             private static bool ShouldAbandonCompletedCollectable(Gatherable collectable)
                 => GatherBuddy.Config.AutoGatherConfig.AbandonNodes
                 && !(GatherBuddy.Config.AutoGatherConfig.AlwaysExhaustTimedCollectableNodes
                   && collectable.NodeType is Enums.NodeType.Unspoiled or Enums.NodeType.Legendary or Enums.NodeType.Clouded);
 
-            public Actions.BaseAction GetNextAction(GatheringMasterpieceReader masterpieceReader)
+            public bool TryGetNextAction(
+                GatheringMasterpieceReader masterpieceReader,
+                out Actions.BaseAction action)
             {
+                action = null!;
                 try
                 {
-                    return GetNativeNextAction(masterpieceReader);
+                    if (pendingSolve == null)
+                    {
+                        if (!SolverGate.Wait(0))
+                            return false;
+                        try
+                        {
+                            pendingRequest = BuildRequest(masterpieceReader);
+                        }
+                        catch
+                        {
+                            SolverGate.Release();
+                            throw;
+                        }
+                        var request = pendingRequest;
+                        pendingSolve = Task.Run(() =>
+                        {
+                            try
+                            {
+                                return DonatelloNative.SolveGathering(request);
+                            }
+                            finally
+                            {
+                                SolverGate.Release();
+                            }
+                        });
+                        return false;
+                    }
+
+                    if (!pendingSolve.IsCompleted)
+                        return false;
+
+                    var decision = pendingSolve.GetAwaiter().GetResult();
+                    var solvedRequest = pendingRequest!;
+                    pendingSolve = null;
+                    pendingRequest = null;
+                    if (!RequestStillMatchesLiveState(masterpieceReader, solvedRequest))
+                        return false;
+                    if (decision.FallbackReason != null)
+                        GatherBuddy.Log.Debug($"[AutoGather] Expected-scrip solver used legacy fallback for {item.Name}: {decision.FallbackReason}");
+                    action = MapAction(decision.Action);
+                    return true;
                 }
                 catch (Exception exception) when (exception is DllNotFoundException
                                                        or EntryPointNotFoundException
                                                        or BadImageFormatException
                                                        or InvalidOperationException)
                 {
+                    pendingSolve = null;
+                    pendingRequest = null;
                     throw new CollectableSolverException(exception.Message, exception);
                 }
             }
 
-            private Actions.BaseAction GetNativeNextAction(GatheringMasterpieceReader masterpieceReader)
+            private GatheringSolveRequest BuildRequest(GatheringMasterpieceReader masterpieceReader)
             {
                 var player = Player.Object ?? throw new InvalidOperationException("Player object is null");
                 var itemsLeft = (int)Math.Max(0L, (long)quantity - item.GetCompletionCount(completionItemId));
@@ -108,7 +159,7 @@ namespace GatherBuddy.AutoGather
                     : Player.Status.Any(status => status.StatusId == 2418) ? 1
                     : 0;
                 var automatic = config.ChooseBestActionsAutomatically;
-                var request = new GatheringSolveRequest(
+                return new GatheringSolveRequest(
                     mode,
                     new GatheringSolverState(
                         masterpieceReader.CollectabilityCurrent,
@@ -162,10 +213,32 @@ namespace GatherBuddy.AutoGather
                         config.CollectableAlwaysUseSolidAge,
                         ShouldAbandonCompletedCollectable(item)),
                     mode == CollectableSolverMode.ExpectedScrip ? unsupportedReason : null);
-                var decision = DonatelloNative.SolveGathering(request);
-                if (decision.FallbackReason != null)
-                    GatherBuddy.Log.Debug($"[AutoGather] Expected-scrip solver used legacy fallback for {item.Name}: {decision.FallbackReason}");
-                return MapAction(decision.Action);
+            }
+
+            private bool RequestStillMatchesLiveState(
+                GatheringMasterpieceReader masterpieceReader,
+                GatheringSolveRequest request)
+            {
+                var player = Player.Object;
+                if (player == null)
+                    return false;
+                var state = request.State;
+                var itemsLeft = (int)Math.Max(0L, (long)quantity - item.GetCompletionCount(completionItemId));
+                var standard = Player.Status.Any(status => status.StatusId == 3911) ? 2
+                    : Player.Status.Any(status => status.StatusId == 2418) ? 1
+                    : 0;
+                return state.Collectability == masterpieceReader.CollectabilityCurrent
+                    && state.Integrity == masterpieceReader.IntegrityCurrent
+                    && state.MaxIntegrity == masterpieceReader.IntegrityMax
+                    && state.Gp == (int)player.CurrentGp
+                    && state.MaxGp == (int)player.MaxGp
+                    && state.Remaining == itemsLeft
+                    && state.Scrutiny == Player.Status.Any(status => status.StatusId == Actions.Scrutiny.EffectId)
+                    && state.CollectorsFocus == Player.Status.Any(status => status.StatusId == Actions.CollectorsFocus.EffectId)
+                    && state.PrimingTouch == Player.Status.Any(status => status.StatusId == Actions.PrimingTouch.EffectId)
+                    && state.Standard == standard
+                    && state.Eureka == Player.Status.Any(status => status.StatusId == Actions.SolidAge.EffectId)
+                    && state.RevisitUsed == revisitUsed;
             }
 
             private static bool IsEnabled(Actions.BaseAction action, ConfigPreset.ActionConfig actionConfig, bool automatic)

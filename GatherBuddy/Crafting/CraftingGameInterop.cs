@@ -42,6 +42,8 @@ public static class CraftingGameInterop
         Fatal,
     }
 
+    private static readonly IngredientSelectionSequencer IngredientSelection = new();
+
 
     public enum CraftState
     {
@@ -284,6 +286,7 @@ public static class CraftingGameInterop
         _currentState = CraftState.PreparingCraft;
         _taskManagerIdleSince = DateTime.MinValue;
         _lastPreparationFailure = null;
+        ResetIngredientSelectionState();
         GatherBuddy.Log.Debug($"[Crafting] StartCraft - entering PreparingCraft state (QuickSynth={useQuickSynthesis})");
         
         var tm = GatherBuddy.AutoGather?.TaskManager;
@@ -409,6 +412,28 @@ public static class CraftingGameInterop
                 GatherBuddy.Log.Debug($"[Crafting] SelectedRecipe is null");
                 return IngredientAssignmentResult.Retry;
             }
+
+            var now = Environment.TickCount64;
+            if (!IngredientSelection.IsReady(now))
+                return IngredientAssignmentResult.Retry;
+
+            if (IngredientSelection.Phase == EquipmentIngredientSelectionPhase.WaitingForMenu)
+            {
+                if (!SelectEquipmentIngredientFromMenu(
+                        IngredientSelection.ItemId,
+                        IngredientSelection.HighQuality))
+                {
+                    IngredientSelection.DelayNormalAssignment(now);
+                    return IngredientAssignmentResult.Retry;
+                }
+
+                IngredientSelection.MarkMenuSelectionComplete(now);
+                return IngredientAssignmentResult.Retry;
+            }
+
+            if (IngredientSelection.Phase == EquipmentIngredientSelectionPhase.WaitingForAssignment)
+                IngredientSelection.CompleteEquipmentAssignment();
+
             var qualityPolicy = GetActiveQualityPolicy();
             if (qualityPolicy == null)
             {
@@ -418,6 +443,7 @@ public static class CraftingGameInterop
 
             if (cosmic)
             {
+                ResetIngredientSelectionState();
                 var (firstButton, secondButton) = CosmicIngredientButtonOrder(_currentDonatelloOptions);
                 if (!ClickCosmicIngredientButton(atkUnit, firstButton)
                     || !ClickCosmicIngredientButton(atkUnit, secondButton))
@@ -428,6 +454,7 @@ public static class CraftingGameInterop
             }
 
             var ingredients = RecipeNoteExt.GetIngredientsSpan(selectedRecipe);
+            var clickedMaterial = false;
             for (int i = 0; i < ingredients.Length; i++)
             {
                 var ingredient = ingredients[i];
@@ -470,15 +497,15 @@ public static class CraftingGameInterop
 
                 if (IsEquipmentIngredient(ingredient.ItemId))
                 {
-                    if (!SelectEquipmentIngredient(atkUnit, (uint)i, ingredient.ItemId, desiredHQ > 0))
+                    if (!OpenEquipmentIngredientMenu(atkUnit, (uint)i))
                     {
                         GatherBuddy.Log.Debug(
                             $"[Crafting] Equipment ingredient selection did not apply for item {ingredient.ItemId}, retrying");
                         return IngredientAssignmentResult.Retry;
                     }
 
-                    System.Threading.Thread.Sleep(150);
-                    continue;
+                    IngredientSelection.BeginEquipment(ingredient.ItemId, desiredHQ > 0, now);
+                    return IngredientAssignmentResult.Retry;
                 }
 
                 var missingHQ = Math.Max(0, desiredHQ - ingredient.NumAssignedHQ);
@@ -486,19 +513,26 @@ public static class CraftingGameInterop
                 {
                     for (int m = 0; m < missingHQ; m++)
                         ClickMaterial(atkUnit, (uint)i, true);
+                    clickedMaterial = true;
                 }
                 var missingNQ = Math.Max(0, desiredNQ - ingredient.NumAssignedNQ);
                 if (missingNQ > 0 && ingredient.NumAvailableNQ >= missingNQ)
                 {
                     for (int m = 0; m < missingNQ; m++)
                         ClickMaterial(atkUnit, (uint)i, false);
+                    clickedMaterial = true;
                 }
             }
 
-            System.Threading.Thread.Sleep(50);
+            if (clickedMaterial)
+            {
+                IngredientSelection.DelayNormalAssignment(now);
+                return IngredientAssignmentResult.Retry;
+            }
             if (!AreIngredientsAssigned())
                 return IngredientAssignmentResult.Retry;
 
+            ResetIngredientSelectionState();
             _lastPreparationFailure = null;
             GatherBuddy.Log.Debug($"[Crafting] Ingredients assigned, ready to craft");
             return IngredientAssignmentResult.Success;
@@ -550,7 +584,7 @@ public static class CraftingGameInterop
         }
     }
     
-    private static unsafe bool SelectEquipmentIngredient(AtkUnitBase* recipeNoteUnit, uint index, uint itemId, bool preferHQ)
+    private static unsafe bool OpenEquipmentIngredientMenu(AtkUnitBase* recipeNoteUnit, uint index)
     {
         try
         {
@@ -588,9 +622,19 @@ public static class CraftingGameInterop
             var buttonClickEvent = stackalloc AtkEvent[1];
             var eventData = (AtkEventData*)clickButtonNode;
             recipeNoteUnit->ReceiveEvent(AtkEventType.ButtonClick, 5, buttonClickEvent, eventData);
-            
-            System.Threading.Thread.Sleep(150);
-            
+            return true;
+        }
+        catch (Exception ex)
+        {
+            GatherBuddy.Log.Error($"[Crafting] Error opening equipment ingredient menu: {ex.Message}\n{ex.StackTrace}");
+            return false;
+        }
+    }
+
+    private static unsafe bool SelectEquipmentIngredientFromMenu(uint itemId, bool preferHQ)
+    {
+        try
+        {
             var contextMenuAddon = Dalamud.GameGui.GetAddonByName("ContextIconMenu");
             if (contextMenuAddon.Address == nint.Zero)
             {
@@ -605,24 +649,20 @@ public static class CraftingGameInterop
                 return false;
             }
             
-            uint selectItemId = itemId;
-            if (preferHQ)
-            {
-                selectItemId += 1_000_000;
-            }
+            var selectItemId = preferHQ ? itemId + 1_000_000 : itemId;
             
             Callback.Fire(contextMenu, true, 0, 0, 0, selectItemId, 0);
-            
-            System.Threading.Thread.Sleep(50);
-            
             return true;
         }
         catch (Exception ex)
         {
-            GatherBuddy.Log.Error($"[Crafting] Error selecting equipment ingredient: {ex.Message}\n{ex.StackTrace}");
+            GatherBuddy.Log.Error($"[Crafting] Error selecting equipment ingredient from menu: {ex.Message}\n{ex.StackTrace}");
             return false;
         }
     }
+
+    private static void ResetIngredientSelectionState()
+        => IngredientSelection.Reset();
     
     public static void DebugClickRecipeNote(uint ingredientIndex, int clickCount, bool isHQ, bool autoOpen = false, uint recipeId = 0)
     {
@@ -1078,6 +1118,7 @@ public static class CraftingGameInterop
 
     public static void Update()
     {
+        CraftingProcessor.Update();
         CheckGatherToCraftTransition();
         
         if (_currentState != CraftState.IdleNormal)
@@ -1617,6 +1658,7 @@ public static class CraftingGameInterop
     {
         _nextActionAllowedAt = DateTime.MinValue;
         _lastPreparationFailure = null;
+        ResetIngredientSelectionState();
 
         if (_currentRecipe != null)
             CraftFinished?.Invoke(_currentRecipe, cancelled);

@@ -394,22 +394,15 @@ namespace GatherBuddy.AutoGather
                         if (ActionSequence == null)
                         {
                             var task = RotationSolver.SolveAsync(slot, configPreset, GatheringWindowReader);
-
-                            if (task.Wait(1))
+                            TaskManager.Enqueue(() =>
                             {
-                                ActionSequence = task.Result.AsEnumerable().GetEnumerator();
-                            }
-                            else
-                            {
-                                TaskManager.Enqueue(() =>
-                                {
-                                    if (task.IsCompleted)
-                                        ActionSequence = task.Result.GetEnumerator();
-                                    return task.IsCompleted;
-                                });
-                                AutoStatus = "Calculating best action sequence...";
-                                return;
-                            }
+                                if (!task.IsCompleted)
+                                    return false;
+                                ActionSequence = task.GetAwaiter().GetResult().GetEnumerator();
+                                return true;
+                            });
+                            AutoStatus = "Calculating best action sequence...";
+                            return;
                         }
 
                         if (!ActionSequence.MoveNext())
@@ -529,9 +522,10 @@ namespace GatherBuddy.AutoGather
                 LastCollectability = collectibility;
                 LastIntegrity      = integrity;
 
-                var collectibleAction = CurrentCollectableRotation.GetNextAction(MasterpieceReader);
-
-                EnqueueActionWithDelay(() => UseAction(collectibleAction));
+                if (CurrentCollectableRotation.TryGetNextAction(MasterpieceReader, out var collectibleAction))
+                    EnqueueActionWithDelay(() => UseAction(collectibleAction));
+                else
+                    AutoStatus = "Calculating best collectable action...";
             }
         }
 

@@ -37,6 +37,10 @@ public partial class VulcanWindow
     
     private static List<ExtendedRecipe>? _extendedRecipeList;
     private static List<ExtendedRecipe>? _filteredRecipes;
+    private const int RecipePageSize = 100;
+    private const int RecipePaginationThresholdRows = 5;
+    private static readonly List<ExtendedRecipe> _displayedRecipes = new(RecipePageSize);
+    private static bool _recipeResultsScrollResetPending;
     private static bool _filtersDirty = true;
     private static ExtendedRecipe? _selectedRecipe;
     private static SortColumn _sortColumn = SortColumn.Level;
@@ -127,8 +131,31 @@ public partial class VulcanWindow
         
         _filteredRecipes = filtered;
         _filteredUncraftedRecipeCount = _filteredRecipes.Count(r => !r.IsCrafted);
+        _displayedRecipes.Clear();
+        AppendNextRecipePage();
+        _recipeResultsScrollResetPending = true;
         _filtersDirty = false;
         GatherBuddy.Log.Debug($"[VulcanWindow] Filtered to {_filteredRecipes.Count} recipes");
+    }
+
+    private static void AppendNextRecipePage()
+    {
+        if (_filteredRecipes == null || _displayedRecipes.Count >= _filteredRecipes.Count)
+            return;
+
+        var remaining = _filteredRecipes.Count - _displayedRecipes.Count;
+        var pageCount = Math.Min(RecipePageSize, remaining);
+        for (var i = 0; i < pageCount; i++)
+            _displayedRecipes.Add(_filteredRecipes[_displayedRecipes.Count]);
+    }
+
+    private static void EnsureRecipeDisplayed(int targetIndex)
+    {
+        if (_filteredRecipes == null || targetIndex < 0)
+            return;
+
+        while (_displayedRecipes.Count <= targetIndex && _displayedRecipes.Count < _filteredRecipes.Count)
+            AppendNextRecipePage();
     }
 
     private static bool EnsureRecipeVisibleInBrowser(ExtendedRecipe recipe)

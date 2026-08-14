@@ -59,6 +59,9 @@ namespace GatherBuddy.AutoGather.Helpers
             public uint GPRegenPerHit { get; init; }
             public uint GPRegenPerTick { get; init; }
             public bool SpendGPOnBestNodesOnly { get; set; }
+            public float GivingLandCooldown { get; init; }
+            public bool InDiadem { get; init; }
+            public bool UseGivingLandOnCooldown { get; init; }
 
             public GlobalState(GlobalState other)
             {
@@ -73,6 +76,8 @@ namespace GatherBuddy.AutoGather.Helpers
                 GPRegenPerHit = other.GPRegenPerHit;
                 GPRegenPerTick = other.GPRegenPerTick;
                 InitialGP = other.InitialGP;
+                GivingLandCooldown = other.GivingLandCooldown;
+                InDiadem = other.InDiadem;
                 IsCrystal = other.IsCrystal;
                 Iterations = other.Iterations;
                 MaxGP = other.MaxGP;
@@ -81,6 +86,7 @@ namespace GatherBuddy.AutoGather.Helpers
                 PlayerJob = other.PlayerJob;
                 PlayerLevel = other.PlayerLevel;
                 SpendGPOnBestNodesOnly = other.SpendGPOnBestNodesOnly;
+                UseGivingLandOnCooldown = other.UseGivingLandOnCooldown;
                 UsedActions = new(other.UsedActions.Reverse());
             }
         }
@@ -249,16 +255,13 @@ namespace GatherBuddy.AutoGather.Helpers
             }
         }
 
-        public static async Task<IEnumerable<Actions.BaseAction?>> SolveAsync(ItemSlot slot, ConfigPreset config, GatheringReader gatheringWindow)
+        public static Task<IEnumerable<Actions.BaseAction?>> SolveAsync(ItemSlot slot, ConfigPreset config, GatheringReader gatheringWindow)
         {
             Debug.Assert(Dalamud.Framework.IsInFrameworkUpdateThread);
             Debug.Assert(Player.Available);
 
             if (slot.IsRare)
-                return [];
-
-            var timer = new Stopwatch();
-            timer.Start();
+                return Task.FromResult<IEnumerable<Actions.BaseAction?>>([]);
 
             var gpQuest = QuestManager.IsQuestComplete(GPRegenQuestId);
 
@@ -277,7 +280,10 @@ namespace GatherBuddy.AutoGather.Helpers
                 GPRegenPerTick         = gpQuest ? (Player.Level switch { >= 83 => 8u, >= 80 => 7u, _ => 6u }) : 5u,
                 GPRegenPerHit          = (gpQuest && Player.Level >= 80) ? 6u : 5u,
                 SpendGPOnBestNodesOnly = config.SpendGPOnBestNodesOnly,
-                BaseBoonChance         = slot.BoonChance > 0 ? CalculateBoonChance(slot.Item.GatheringData.GatheringItemLevel.RowId) : 0
+                BaseBoonChance         = slot.BoonChance > 0 ? CalculateBoonChance(slot.Item.GatheringData.GatheringItemLevel.RowId) : 0,
+                GivingLandCooldown     = slot.Item.NodeType == Enums.NodeType.Regular ? TheGivingLandCooldown : 0,
+                InDiadem               = Diadem.IsInside,
+                UseGivingLandOnCooldown = GatherBuddy.Config.AutoGatherConfig.UseGivingLandOnCooldown,
             };
             var state = new State()
             {
@@ -295,24 +301,23 @@ namespace GatherBuddy.AutoGather.Helpers
                     | (Player.Status.Any(s => s.StatusId == Actions.BountifulII.EffectId) ? EffectType.Bountiful : EffectType.None)
             };
 
-            if (slot.Item.NodeType is Enums.NodeType.Unspoiled or Enums.NodeType.Legendary or Enums.NodeType.Clouded)
+            var nodeType = slot.Item.NodeType;
+            return Task.Run<IEnumerable<Actions.BaseAction?>>(async () =>
             {
-                await Task.Run(() => SolveInternal(state));
-            }
-            else if (slot.Item.NodeType is Enums.NodeType.Regular)
-            {
-                await SolveForRegularNodes(state);
-            }
-            else
-            {
-                return [.. Enumerable.Repeat<Actions.BaseAction?>(null, state.Integrity)];
-            }
+                var timer = Stopwatch.StartNew();
+                if (nodeType is Enums.NodeType.Unspoiled or Enums.NodeType.Legendary or Enums.NodeType.Clouded)
+                    SolveInternal(state);
+                else if (nodeType is Enums.NodeType.Regular)
+                    await SolveForRegularNodes(state);
+                else
+                    return [.. Enumerable.Repeat<Actions.BaseAction?>(null, state.Integrity)];
 
-            global.BestActions.Reverse();
-            timer.Stop();
-            GatherBuddy.Log.Debug($"Rotation solver: simulated {global.Iterations} sequences in {timer.ElapsedTicks * 1000m / Stopwatch.Frequency:F3} ms. Yield: {global.BestYield / 1000m}. Sequence: {string.Join(", ", global.BestActions.Select(a => GetActionName(global, a)))}.");
+                global.BestActions.Reverse();
+                timer.Stop();
+                GatherBuddy.Log.Debug($"Rotation solver: simulated {global.Iterations} sequences in {timer.ElapsedTicks * 1000m / Stopwatch.Frequency:F3} ms. Yield: {global.BestYield / 1000m}. Sequence: {string.Join(", ", global.BestActions.Select(a => GetActionName(global, a)))}.");
 
-            return global.BestActions;
+                return global.BestActions.ToArray();
+            });
         }
 
         //Prevents accessing Player.Job from a worker thread
@@ -334,7 +339,7 @@ namespace GatherBuddy.AutoGather.Helpers
                 return;
             }
 
-            var givingCooldown = TheGivingLandCooldown;
+            var givingCooldown = state.Global.GivingLandCooldown;
 
             var bountiful = state.Global.AvailableActions.FirstOrDefault(x => x.Action == Actions.Bountiful);
             var bountifulYield = bountiful != null ? (uint)state.Global.BountifulYield * 1000u : 0u;
@@ -348,7 +353,7 @@ namespace GatherBuddy.AutoGather.Helpers
             //When Bountiful's yield is 3 and the item is not a crystal, we can skip all the calculations,
             //because nothing can beat that, except actions for crystals.
             //Exception: In Diadem, +5 integrity nodes (10 total) may beat Bountiful +3, so always simulate.
-            var inTheDiadem = Diadem.IsInside;
+            var inTheDiadem = state.Global.InDiadem;
             if (bountifulYield < 3000 || bounty != null || inTheDiadem)
             {
                 state.Global.AvailableActions.RemoveAll(x => x.Action == Actions.Bountiful || x.Action == Actions.GivingLand);
@@ -471,7 +476,7 @@ namespace GatherBuddy.AutoGather.Helpers
                         }));
                     }
 
-                    await Task.WhenAll(tasks.Select(t => Task.Run(() => SolveInternal(t.state))).ToList());
+                    await Task.WhenAll(tasks.Select(task => Task.Run(() => SolveInternal(task.state))));
 
                     GatherBuddy.Log.Debug($"Rotation solver: yield / 100gp {string.Join("; ", tasks.Select(t => $"{t.tag}: {t.state.Global.BestYield / 1000m}"))}; filler: {fillerYield / 1000m}.");
 
@@ -480,7 +485,7 @@ namespace GatherBuddy.AutoGather.Helpers
                 }
                 else
                 {
-                    await Task.Run(() => SolveInternal(state));
+                    SolveInternal(state);
                     GatherBuddy.Log.Debug($"Rotation solver: yield / 100gp current: {state.Global.BestYield / 1000m}; filler: {fillerYield / 1000m}.");
                 }
             }
@@ -490,7 +495,7 @@ namespace GatherBuddy.AutoGather.Helpers
                 //Use Bountiful/Bounty as either best or filler rotation
                 //GatherBuddy.Log.Debug($"Rotation solver: using filler sequence.");
 
-                var canUseGiving = (isCrystal || GatherBuddy.Config.AutoGatherConfig.UseGivingLandOnCooldown)
+                var canUseGiving = (isCrystal || state.Global.UseGivingLandOnCooldown)
                     && state.Global.PlayerLevel >= Actions.GivingLand.MinLevel && !inTheDiadem;
                 //Aim for 200 GP 10s before The Giving Land is off cooldown (2s/gather, 2s close; 1s/Bountiful is not accounted for, covered by 10s buffer).
                 var keepGP = canUseGiving ? Actions.GivingLand.GpCost - Math.Max((int)((givingCooldown - 10 - state.Integrity * 2 - 2) * state.Global.GPRegenPerTick / 3), 0) : 0;
