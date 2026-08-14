@@ -10,6 +10,7 @@ public enum AcquisitionPathKind
     Craft,
     Gather,
     Fish,
+    Reduction,
     Unknown,
 }
 
@@ -35,6 +36,9 @@ public sealed class AcquisitionCapability
     public bool FolkloreRequired { get; init; }
     public bool FolkloreKnown { get; init; }
     public bool FolkloreUnlocked { get; init; }
+    public int RequiredPerception { get; init; }
+    public int ActualPerception { get; init; }
+    public bool PerceptionKnown { get; init; }
     public bool RouteKnown { get; init; }
     public bool RouteAvailable { get; init; }
     public IReadOnlyDictionary<string, string> Evidence { get; init; }
@@ -69,6 +73,9 @@ public sealed class AcquisitionCapabilityEvidence
     public bool FolkloreRequired { get; init; }
     public bool FolkloreKnown { get; init; }
     public bool FolkloreUnlocked { get; init; }
+    public int RequiredPerception { get; init; }
+    public int ActualPerception { get; init; }
+    public bool PerceptionKnown { get; init; }
     public bool RouteKnown { get; init; }
     public bool RouteAvailable { get; init; }
     public IReadOnlyDictionary<string, string> AdditionalEvidence { get; init; }
@@ -81,6 +88,8 @@ public sealed class AcquisitionPath
     public uint RecipeId { get; init; }
     public uint JobId { get; init; }
     public string JobName { get; init; } = string.Empty;
+    public uint SourceItemId { get; init; }
+    public IReadOnlyList<uint> AlternativeSourceItemIds { get; init; } = Array.Empty<uint>();
     public AcquisitionCapability Capability { get; init; } = new();
 }
 

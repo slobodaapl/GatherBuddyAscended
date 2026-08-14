@@ -64,6 +64,11 @@ public class CachedRaphaelSolution
     public DateTime GeneratedAt { get; set; }
     public bool IsFailed { get; set; }
     public string? FailureReason { get; set; }
+    public bool Optimal { get; set; } = true;
+    public bool OptimizationDeadlineReached { get; set; }
+    public int AchievedQuality { get; set; }
+    public int QualityUpperBound { get; set; }
+    public long SolveElapsedMillis { get; set; }
 
     public CachedRaphaelSolution() { }
 
@@ -92,11 +97,13 @@ public enum VulcanSolverMode
 public class RaphaelSolveCoordinatorConfig
 {
     public bool RaphaelEnabled { get; set; } = true;
+    // Retained for configuration compatibility. Native solves are intentionally serialized.
     public int MaxConcurrentRaphaelProcesses { get; set; } = 1;
     public int RaphaelTimeoutMinutes { get; set; } = 5;
-    public bool RaphaelBackloadProgress { get; set; } = false;
+    public int RaphaelInitialOptimizationSeconds { get; set; } = 30;
     public bool RaphaelAllowSpecialistActions { get; set; } = false;
     public bool DonatelloMinimizeSteps { get; set; } = false;
+    public int DonatelloOptimizationThresholdMs { get; set; } = DonatelloSolver.DefaultLiveReplanDeadlineMillis;
     public int DonatelloCacheMemoryMiB { get; set; } = 512;
     public bool AutoClearSolutionCache { get; set; } = true;
     public int SolutionCacheMaxAgeDays { get; set; } = 30;

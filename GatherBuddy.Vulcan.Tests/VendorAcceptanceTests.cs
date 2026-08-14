@@ -204,6 +204,13 @@ public static class VendorAcceptanceTests
         Require(!VendorOfferMath.HasValidCurrencyCosts(Array.Empty<VendorCurrencyCost>())
                 && !VendorOfferMath.HasValidReceivedItems(Array.Empty<VendorReceivedItem>(), entry.ItemId),
             "an offer containing only empty fixed slots must remain unresolved");
+        Require(VendorShopResolver.TryNormalizeSpecialShopReceivedItems(
+                    [(12345u, 1u), (0u, 1u)], out var paddedSpecialShopOutputs)
+                && paddedSpecialShopOutputs.SequenceEqual([new VendorReceivedItem(12345u, 1u)]),
+            "SpecialShop receive slots with no item must be ignored even when sheet padding supplies a default count");
+        Require(!VendorShopResolver.TryNormalizeSpecialShopReceivedItems(
+                    [(12345u, 0u), (0u, 1u)], out _),
+            "an active SpecialShop receive slot with zero quantity must remain invalid");
         RequireThrows<ArgumentException>(
             () => _ = VendorOfferMath.GetCurrencyTotals(
                 [new VendorCurrencyCost(0u, 0u, "Unknown currency", VendorCurrencyGroup.Other)], 1u),

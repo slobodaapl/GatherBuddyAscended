@@ -51,7 +51,8 @@ public readonly record struct CraftingListPlannerOptions(
     bool UseRetainerCraftableAvailability = false,
     bool ConsumeIntermediateAvailability = true,
     bool ConsumeFinalAvailability = true,
-    IReadOnlyDictionary<uint, AcquiredDependencyAvailability>? AcquiredAvailability = null);
+    IReadOnlyDictionary<uint, AcquiredDependencyAvailability>? AcquiredAvailability = null,
+    Func<Recipe, bool>? CanCraftPrecraft = null);
 
 public static class CraftingListPlanner
 {
@@ -109,6 +110,7 @@ public static class CraftingListPlanner
         private readonly bool _useRetainers;
         private readonly bool _consumeIntermediateAvailability;
         private readonly bool _consumeFinalAvailability;
+        private readonly Func<Recipe, bool>? _canCraftPrecraft;
         private readonly Dictionary<uint, CraftingListItem> _originalRecipeLookup;
 
         public Planner(CraftingListDefinition list, CraftingListPlannerOptions options)
@@ -117,6 +119,7 @@ public static class CraftingListPlanner
             _useRetainers = options.UseRetainerCraftableAvailability;
             _consumeIntermediateAvailability = options.ConsumeIntermediateAvailability;
             _consumeFinalAvailability = options.ConsumeFinalAvailability;
+            _canCraftPrecraft = options.CanCraftPrecraft;
             _originalRecipeLookup = list.Recipes
                 .GroupBy(item => item.RecipeId)
                 .ToDictionary(group => group.Key, group => group.First());
@@ -236,6 +239,8 @@ public static class CraftingListPlanner
                 }
 
                 AddCount(_plan.Precrafts, itemId, itemDemand.Total);
+                if (_canCraftPrecraft != null && !_canCraftPrecraft(subRecipe.Value))
+                    continue;
                 PlanPrecraftDemand(subRecipe.Value, itemDemand);
             }
         }

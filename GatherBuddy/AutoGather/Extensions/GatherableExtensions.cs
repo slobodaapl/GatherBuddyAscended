@@ -57,4 +57,15 @@ public static class GatherableExtensions
 
         return gatherable.GetInventoryCount();
     }
+
+    public static unsafe int GetCompletionCount(this IGatherable gatherable, uint completionItemId)
+    {
+        if (completionItemId == 0 || completionItemId == gatherable.ItemId)
+            return gatherable.GetTotalCount();
+
+        if (GatherBuddy.Config.AutoGatherConfig.CheckRetainers && AllaganTools.Enabled)
+            return (int)AllaganTools.ItemCountOwned(completionItemId, true, _inventoryTypesArray);
+
+        return InventoryManager.Instance()->GetInventoryItemCount(completionItemId, false, false, false, 0);
+    }
 }

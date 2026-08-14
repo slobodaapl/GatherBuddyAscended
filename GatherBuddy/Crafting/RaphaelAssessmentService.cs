@@ -412,9 +412,13 @@ public static class RaphaelAssessmentService
         var qualityPercent = craft.CraftQualityMax <= 0 ? 0f : finalStep.Quality * 100f / craft.CraftQualityMax;
         var hqChance = Calculations.GetHQChance(qualityPercent);
         var summary = BuildReadySummary(outcome, hqChance, qualityPercent);
+        if (!solution.Optimal)
+            summary += " Optimization stopped at the configured limit; this is the best validated result found so far.";
         var details = outcome == RaphaelAssessmentOutcome.PartialQuality
             ? $"Progress {finalStep.Progress}/{craft.CraftProgress} ({progressPercent:F0}%), Quality {finalStep.Quality}/{craft.CraftQualityMax}, HQ Chance {hqChance}%, Steps {solution.ActionIds.Count}."
             : $"Progress {finalStep.Progress}/{craft.CraftProgress} ({progressPercent:F0}%), Quality {finalStep.Quality}/{craft.CraftQualityMax} ({qualityPercent:F0}%), Steps {solution.ActionIds.Count}.";
+        if (!solution.Optimal)
+            details += $" Raphael did not prove optimality before the limit (quality bound {solution.QualityUpperBound}, {solution.SolveElapsedMillis} ms).";
 
         return new RaphaelAssessment(
             RaphaelAssessmentState.Ready,

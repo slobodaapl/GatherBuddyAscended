@@ -38,7 +38,7 @@ public partial class AutoGatherListsManager : IDisposable
     private const string FileNameFallback = "gather_window.json";
 
     private readonly FileSystem<AutoGatherList>             _fileSystem;
-    private readonly List<(IGatherable Item, uint Quantity)> _activeItems   = [];
+    private readonly List<(IGatherable Item, uint Quantity, uint CompletionItemId)> _activeItems = [];
     private readonly List<(IGatherable Item, uint Quantity)> _fallbackItems = [];
     public static ManualOrderSortMode SortMode { get; } = new();
 
@@ -48,7 +48,7 @@ public partial class AutoGatherListsManager : IDisposable
     public IEnumerable<AutoGatherList> Lists
         => _fileSystem.Select(kvp => kvp.Key);
 
-    public ReadOnlyCollection<(IGatherable Item, uint Quantity)> ActiveItems
+    public ReadOnlyCollection<(IGatherable Item, uint Quantity, uint CompletionItemId)> ActiveItems
         => _activeItems.AsReadOnly();
 
     public ReadOnlyCollection<(IGatherable Item, uint Quantity)> FallbackItems
@@ -127,12 +127,21 @@ public partial class AutoGatherListsManager : IDisposable
             .OfType<FileSystem<AutoGatherList>.Leaf>()
             .Select(leaf => leaf.Value)
             .Where(l => l.Enabled)
-            .SelectMany(l => l.Items.Select(i => (Item: i, Quantity: l.Quantities[i], l.Fallback, ItemEnabled: l.EnabledItems[i])))
+            .SelectMany(l => l.Items.Select(i => (
+                Item: i,
+                Quantity: l.Quantities[i],
+                CompletionItemId: l.CompletionItemIds.GetValueOrDefault(i),
+                l.Fallback,
+                ItemEnabled: l.EnabledItems[i])))
             .Where(i => i.ItemEnabled)
-            .GroupBy(i => (i.Item, i.Fallback))
-            .Select(x => (x.Key.Item, Quantity: (uint)Math.Min(x.Sum(g => g.Quantity), uint.MaxValue), x.Key.Fallback));
+            .GroupBy(i => (i.Item, i.CompletionItemId, i.Fallback))
+            .Select(x => (
+                x.Key.Item,
+                Quantity: (uint)Math.Min(x.Sum(g => g.Quantity), uint.MaxValue),
+                x.Key.CompletionItemId,
+                x.Key.Fallback));
 
-        foreach (var (item, quantity, fallback) in items)
+        foreach (var (item, quantity, completionItemId, fallback) in items)
         {
             if (fallback)
             {
@@ -140,7 +149,7 @@ public partial class AutoGatherListsManager : IDisposable
             }
             else
             {
-                _activeItems.Add((item, quantity));
+                _activeItems.Add((item, quantity, completionItemId));
             }
         }
 

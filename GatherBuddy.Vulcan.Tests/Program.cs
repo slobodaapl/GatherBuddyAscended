@@ -4,6 +4,7 @@ using GatherBuddy.AutoGather;
 using GatherBuddy.AutoGather.Helpers;
 using GatherBuddy.Utility;
 using GatherBuddy.Vulcan.Tests;
+using Newtonsoft.Json;
 using System.Text.Json;
 
 var assertions = 0;
@@ -48,6 +49,226 @@ static StepState Root(Condition condition = Condition.Normal) => new()
     TrainedPerfectionAvailable = true,
 };
 
+var qualityTimeSettings = new RecipeCraftSettings { MaximizeQualityAtCostOfTime = true };
+Require(qualityTimeSettings.HasAnySettings(),
+    "the per-item quality/time override must be persisted as a meaningful craft setting");
+Require(qualityTimeSettings.Clone().MaximizeQualityAtCostOfTime,
+    "cloning recipe or crafting-list item settings must preserve the quality/time override");
+Require(JsonConvert.DeserializeObject<RecipeCraftSettings>(
+        JsonConvert.SerializeObject(qualityTimeSettings))?.MaximizeQualityAtCostOfTime == true,
+    "recipe settings JSON must persist the quality/time override");
+qualityTimeSettings.DonatelloOptions = new DonatelloExecutionOptions(
+    Objective: DonatelloSolveObjective.ProgressOnly);
+var qualityTimeOptions = CraftingContextResolver.ResolveDonatelloOptions(qualityTimeSettings);
+Require(qualityTimeOptions?.MaximizeQualityAtCostOfTime == true,
+    "craft execution context must propagate the per-item quality/time override");
+Require(qualityTimeOptions?.Objective == DonatelloSolveObjective.ProgressOnly,
+    "the persisted quality/time override must preserve transient Donatello execution options");
+Require(DonatelloSolver.ResolveLiveReplanDeadlineMillis(
+        Craft() with { DonatelloOptions = qualityTimeOptions }, 50) == 30_000,
+    "the per-item quality/time override must raise the live replan cutoff to 30 seconds");
+Require(DonatelloSolver.ResolveLiveReplanDeadlineMillis(Craft(), 50) == 50,
+    "items without the override must retain the configured live replan cutoff");
+qualityTimeSettings.Clear();
+Require(!qualityTimeSettings.MaximizeQualityAtCostOfTime && !qualityTimeSettings.HasAnySettings(),
+    "clearing per-item settings must clear the quality/time override");
+
+var hardExpertProgressCraft = new CraftState
+{
+    StatCraftsmanship = 5474,
+    StatControl = 4857,
+    StatCP = 573,
+    StatLevel = 100,
+    CraftLevel = 100,
+    CraftDurability = 45,
+    CraftProgress = 6900,
+    CraftQualityMax = 22100,
+    CraftProgressDivider = 170,
+    CraftProgressModifier = 100,
+    CraftQualityDivider = 150,
+    CraftQualityModifier = 100,
+    CraftExpert = true,
+    UnlockedManipulation = true,
+};
+var hardExpertProgressState = new StepState
+{
+    Index = 1,
+    Durability = hardExpertProgressCraft.CraftDurability,
+    RemainingCP = hardExpertProgressCraft.StatCP,
+    Condition = Condition.Normal,
+    TrainedPerfectionAvailable = true,
+};
+
+StepState ReplayNativePlan(
+    CraftState craft,
+    StepState root,
+    DonatelloNative.SolveResult result,
+    string caseName)
+{
+    var state = root;
+    foreach (var action in result.Actions)
+    {
+        if (SolverUtils.Status(craft, state) != SolverUtils.CraftStatus.InProgress)
+            break;
+        var (executeResult, next) = Simulator.Execute(craft, state, action, 0, 1);
+        Require(executeResult == Simulator.ExecuteResult.Succeeded,
+            $"{caseName}: native action {action} must be legal in GatherBuddy at {state}");
+        state = next;
+    }
+    Require(result.FinalState.Complete == (SolverUtils.Status(craft, state) == SolverUtils.CraftStatus.Complete)
+            && result.FinalState.Cp == state.RemainingCP
+            && result.FinalState.Durability == state.Durability
+            && result.FinalState.Progress == state.Progress
+            && result.FinalState.Quality == state.Quality,
+        $"{caseName}: raphael-sim final {result.FinalState.Progress}/{result.FinalState.Quality}/{result.FinalState.Durability}/{result.FinalState.Cp} must equal GatherBuddy {state.Progress}/{state.Quality}/{state.Durability}/{state.RemainingCP}");
+    return state;
+}
+
+foreach (var delineations in new[] { 0, 1, 2 })
+{
+    var crossCraft = hardExpertProgressCraft with
+    {
+        CraftQualityMax = 0,
+        Specialist = true,
+        CrafterDelineations = delineations,
+    };
+    var crossRoot = GameStateBuilder.BuildInitialStepState(crossCraft);
+    var native = DonatelloNative.SolveDetailed(
+        crossCraft,
+        crossRoot,
+        allowSpecialistActions: true,
+        DonatelloNative.SolveMode.CompleteFastest,
+        softDeadlineMillis: 30_000,
+        hardDeadlineMillis: 30_000,
+        bypassSolutionCache: true);
+    var final = ReplayNativePlan(crossCraft, crossRoot, native, $"recipe 38202 specialist d{delineations}");
+    Require(SolverUtils.Status(crossCraft, final) == SolverUtils.CraftStatus.Complete,
+        $"recipe 38202 specialist d{delineations}: native Complete/Fastest must complete");
+}
+
+var (benchmarkCraft, benchmarkBaseline, benchmarkScenarios) =
+    DonatelloOptimizationBenchmark.CreateFixtureScenarios();
+var benchmarkWarmup = benchmarkScenarios[0];
+DonatelloNative.SolveDetailed(
+    benchmarkCraft,
+    benchmarkWarmup.Root,
+    allowSpecialistActions: true,
+    DonatelloNative.SolveMode.LiveAdaptive,
+    incumbent: benchmarkWarmup.Incumbent,
+    softDeadlineMillis: 2000,
+    hardDeadlineMillis: 2000,
+    bypassSolutionCache: true,
+    minimizeSteps: true);
+var benchmarkWins = 0;
+foreach (var scenario in benchmarkScenarios.Where(scenario =>
+             scenario.Root.Condition is Condition.Excellent or Condition.Good or Condition.GoodOmen))
+{
+    var benchmarkIncumbent = DonatelloPlanEvaluator.Evaluate(benchmarkCraft, scenario.Root, scenario.Incumbent);
+    var candidate = DonatelloNative.SolveDetailed(
+        benchmarkCraft,
+        scenario.Root,
+        allowSpecialistActions: true,
+        DonatelloNative.SolveMode.LiveAdaptive,
+        incumbent: scenario.Incumbent,
+        softDeadlineMillis: 100,
+        hardDeadlineMillis: 100,
+        bypassSolutionCache: true,
+        minimizeSteps: true);
+    var evaluation = DonatelloPlanEvaluator.Evaluate(benchmarkCraft, scenario.Root, candidate.Actions);
+    Require(evaluation.Completes, "known-win benchmark candidate must preserve completion");
+    Require(!benchmarkIncumbent.IsStrictlyBetterThan(evaluation),
+        "known-win benchmark candidate must not regress its incumbent");
+    if (evaluation.IsStrictlyBetterThan(benchmarkIncumbent))
+    {
+        benchmarkWins++;
+        break;
+    }
+}
+Require(benchmarkWins > 0,
+    $"recipe 38202 specialist d2 benchmark fixture must produce a strict Donatello win within 100 ms; "
+    + $"baseline={DonatelloPlanEvaluator.Evaluate(benchmarkCraft, GameStateBuilder.BuildInitialStepState(benchmarkCraft), benchmarkBaseline)}");
+
+var cosmicCraft = new CraftState
+{
+    StatCraftsmanship = 6000,
+    StatControl = 6000,
+    StatCP = 600,
+    StatLevel = 100,
+    UnlockedManipulation = true,
+    Specialist = true,
+    CrafterDelineations = 2,
+    SplendorCosmic = true,
+    CraftExpert = true,
+    CraftLevel = 100,
+    CraftDurability = 80,
+    CraftProgress = 10_000,
+    CraftQualityMax = 20_000,
+    CraftProgressDivider = 60,
+    CraftProgressModifier = 100,
+    CraftQualityDivider = 62,
+    CraftQualityModifier = 100,
+};
+var cosmicConditions = new[]
+{
+    Condition.Good,
+    Condition.Centered,
+    Condition.Sturdy,
+    Condition.Pliant,
+    Condition.Malleable,
+    Condition.Primed,
+    Condition.GoodOmen,
+    Condition.Robust,
+    Condition.Excellent,
+    Condition.Poor,
+    Condition.Normal,
+};
+var cosmicState = GameStateBuilder.BuildInitialStepState(cosmicCraft);
+IReadOnlyList<VulcanSkill> cosmicIncumbent = [];
+for (var step = 0; step < 100 && SolverUtils.Status(cosmicCraft, cosmicState) == SolverUtils.CraftStatus.InProgress; ++step)
+{
+    cosmicState = cosmicState with { Condition = cosmicConditions[step % cosmicConditions.Length] };
+    var incumbentEvaluation = DonatelloPlanEvaluator.Evaluate(cosmicCraft, cosmicState, cosmicIncumbent);
+    var native = DonatelloNative.SolveDetailed(
+        cosmicCraft,
+        cosmicState,
+        allowSpecialistActions: true,
+        DonatelloNative.SolveMode.LiveAdaptive,
+        incumbent: cosmicIncumbent,
+        softDeadlineMillis: 1000,
+        hardDeadlineMillis: 1000,
+        bypassSolutionCache: true);
+    Require(native.ElapsedMillis <= 1500,
+        $"Cosmic live replan {step} exceeded its 1000ms hard budget: {native.ElapsedMillis}ms");
+    Require(native.Actions.Count > 0, $"Cosmic live replan {step} returned no action");
+    ReplayNativePlan(cosmicCraft, cosmicState, native, $"Cosmic live replan {step}");
+    var candidateEvaluation = DonatelloPlanEvaluator.Evaluate(cosmicCraft, cosmicState, native.Actions);
+    Require(!incumbentEvaluation.Completes
+            || !incumbentEvaluation.IsStrictlyBetterThan(candidateEvaluation),
+        $"Cosmic live replan {step} replaced a completing incumbent with a lexicographically worse plan");
+    var (executeResult, next) = Simulator.Execute(cosmicCraft, cosmicState, native.Actions[0], 0, 1);
+    Require(executeResult == Simulator.ExecuteResult.Succeeded,
+        $"Cosmic live replan {step} first action {native.Actions[0]} must be legal");
+    cosmicState = next;
+    cosmicIncumbent = native.Actions.Skip(1).ToArray();
+}
+Require(SolverUtils.Status(cosmicCraft, cosmicState) == SolverUtils.CraftStatus.Complete,
+    $"condition-changing Cosmic expert must complete within 100 actions; final: {cosmicState}");
+
+var hardExpertProgressActions = new List<VulcanSkill>();
+var hardExpertProgressSolver = new ProgressOnlySolver();
+for (var step = 0; step < 100 && SolverUtils.Status(hardExpertProgressCraft, hardExpertProgressState) == SolverUtils.CraftStatus.InProgress; ++step)
+{
+    var action = hardExpertProgressSolver.Solve(hardExpertProgressCraft, hardExpertProgressState).Action;
+    var (result, next) = Simulator.Execute(hardExpertProgressCraft, hardExpertProgressState, action, 0, 1);
+    Require(result == Simulator.ExecuteResult.Succeeded,
+        $"progress-only emergency action {action} must be legal at {hardExpertProgressState}");
+    hardExpertProgressActions.Add(action);
+    hardExpertProgressState = next;
+}
+Require(SolverUtils.Status(hardExpertProgressCraft, hardExpertProgressState) == SolverUtils.CraftStatus.Complete,
+    $"native progress-only solver must complete the 6900-difficulty expert recipe; actions: {string.Join(", ", hardExpertProgressActions)}; final: {hardExpertProgressState}");
+Console.WriteLine($"Native progress-only 6900 expert: {string.Join(", ", hardExpertProgressActions)} -> {hardExpertProgressState}");
+
 Require(SearchTextNormalizer.Normalize("Ra'Kaznar Ingot").Contains(SearchTextNormalizer.Normalize("rakaznar")),
     "recipe search must ignore apostrophes");
 Require(SearchTextNormalizer.Normalize("Crème brûlée") == "cremebrulee",
@@ -64,6 +285,31 @@ Require(FuzzySearch.Score("rakaznaringot", ["unrelated"]) == null,
     "recipe search fallback must reject weak matches");
 Require(FuzzySearch.Score("raisinbread", ["raisin", "bred"]) == 1,
     "recipe search fallback must match every search term independently");
+var allocationQuery = new[] { "razaknar" };
+_ = FuzzySearch.Score("rakaznaringot", allocationQuery);
+var fuzzyAllocationStart = GC.GetAllocatedBytesForCurrentThread();
+for (var iteration = 0; iteration < 100; ++iteration)
+    _ = FuzzySearch.Score("rakaznaringot", allocationQuery);
+Require(GC.GetAllocatedBytesForCurrentThread() == fuzzyAllocationStart,
+    "recipe fuzzy scoring must not allocate managed memory for normal-length names");
+var recipeSearchNames = new[]
+{
+    "Ra'Kaznar Ingot",
+    "Raisin Bread",
+    "Darksteel Ingot",
+};
+Require(RecipeSearch.Filter(recipeSearchNames, "rakaznar", name => name).SequenceEqual(["Ra'Kaznar Ingot"]),
+    "Recipes-tab search must resolve Ra'Kaznar after removing punctuation");
+Require(RecipeSearch.Filter(recipeSearchNames, "razaknar", name => name).SequenceEqual(["Ra'Kaznar Ingot"]),
+    "Recipes-tab search must fall back to the closest typo-tolerant match");
+var competingFuzzyNames = new[]
+{
+    "Ra'Kaznar Ingot",
+    "Razaknor Ring",
+    "Darksteel Ingot",
+};
+Require(RecipeSearch.Filter(competingFuzzyNames, "razaknar", name => name).SequenceEqual(["Razaknor Ring"]),
+    "Recipes-tab fallback must retain only candidates with the globally closest accepted score");
 var autoHomeWarning = AutoHomeNotification.Build("gathering is done");
 Require(autoHomeWarning.Contains("gathering is done")
      && autoHomeWarning.Contains("Go home when done")
@@ -222,13 +468,15 @@ Require(cacheKeyRequest.GetKey() != (cacheKeyRequest with
     "Donatello cache keys must isolate every ICE execution objective and Cosmic-use limit");
 
 using var requestJson = JsonDocument.Parse(DonatelloNative.SerializeRequest(
-    specialistCraft, specialistRoot, allowSpecialistActions: true, backloadProgress: false));
+    specialistCraft, specialistRoot, allowSpecialistActions: true,
+    solveMode: DonatelloNative.SolveMode.OptimizeQuality));
 var nativeRoot = requestJson.RootElement.GetProperty("root");
 var expectedRequestFields = new HashSet<string>
 {
     "abiVersion", "maxCp", "maxDurability", "maxProgress", "maxQuality", "baseProgress",
-    "baseQuality", "jobLevel", "manipulation", "specialist", "backloadProgress",
-    "objective", "minimizeSteps", "stellarSteadyHandCharges", "incumbentActionIds", "root",
+    "baseQuality", "jobLevel", "manipulation", "specialist", "solveMode",
+    "minimizeSteps", "stellarSteadyHandCharges", "incumbentActionIds",
+    "softDeadlineMillis", "hardDeadlineMillis", "bypassSolutionCache", "root",
 };
 var expectedRootFields = new HashSet<string>
 {
@@ -243,12 +491,15 @@ Require(requestJson.RootElement.EnumerateObject().Select(property => property.Na
             .SetEquals(expectedRequestFields)
         && nativeRoot.EnumerateObject().Select(property => property.Name).ToHashSet()
             .SetEquals(expectedRootFields),
-    "Donatello requests must contain exactly the fields required by native ABI v5");
-Require(requestJson.RootElement.GetProperty("abiVersion").GetUInt32() == 5
-        && requestJson.RootElement.GetProperty("objective").GetInt32() == 0
+    "Donatello requests must contain exactly the fields required by native ABI v7");
+Require(requestJson.RootElement.GetProperty("abiVersion").GetUInt32() == 7
+        && requestJson.RootElement.GetProperty("solveMode").GetInt32() == 0
         && !requestJson.RootElement.GetProperty("minimizeSteps").GetBoolean()
         && requestJson.RootElement.GetProperty("stellarSteadyHandCharges").GetUInt32() == 0
         && requestJson.RootElement.GetProperty("incumbentActionIds").GetArrayLength() == 0
+        && requestJson.RootElement.GetProperty("softDeadlineMillis").GetInt32() == 0
+        && requestJson.RootElement.GetProperty("hardDeadlineMillis").GetInt32() == 0
+        && !requestJson.RootElement.GetProperty("bypassSolutionCache").GetBoolean()
         && !requestJson.RootElement.TryGetProperty("AbiVersion", out _)
         && nativeRoot.GetProperty("wasteNot").GetInt32() == 0
         && nativeRoot.GetProperty("manipulation").GetInt32() == 0
@@ -258,7 +509,7 @@ Require(requestJson.RootElement.GetProperty("abiVersion").GetUInt32() == 5
         && nativeRoot.GetProperty("muscleMemory").GetInt32() == 0
         && nativeRoot.GetProperty("crafterDelineations").GetInt32() == 1
         && !nativeRoot.TryGetProperty("manipulationLeft", out _),
-    "Donatello requests must match every ABI v5 camelCase field name exactly");
+    "Donatello requests must match every ABI v7 camelCase field name exactly");
 
 var progressOnlyCraft = Craft();
 progressOnlyCraft.DonatelloOptions = progressOnlyOptions;
@@ -273,9 +524,9 @@ using var progressOnlyRequestJson = JsonDocument.Parse(DonatelloNative.Serialize
         StellarSteadyHandsUsed = 1,
     },
     allowSpecialistActions: false,
-    backloadProgress: false));
+    solveMode: DonatelloNative.SolveMode.CompleteFastest));
 var progressOnlyRoot = progressOnlyRequestJson.RootElement.GetProperty("root");
-Require(progressOnlyRequestJson.RootElement.GetProperty("objective").GetInt32() == 1
+Require(progressOnlyRequestJson.RootElement.GetProperty("solveMode").GetInt32() == 1
         && progressOnlyRequestJson.RootElement.GetProperty("maxQuality").GetInt32() == 0
         && !progressOnlyRequestJson.RootElement.GetProperty("minimizeSteps").GetBoolean()
         && progressOnlyRequestJson.RootElement.GetProperty("stellarSteadyHandCharges").GetUInt32() == 1
@@ -288,7 +539,7 @@ using var incumbentRequestJson = JsonDocument.Parse(DonatelloNative.SerializeReq
     specialistCraft,
     specialistRoot,
     allowSpecialistActions: true,
-    backloadProgress: false,
+    solveMode: DonatelloNative.SolveMode.LiveAdaptive,
     incumbent: [VulcanSkill.BasicSynthesis]));
 Require(incumbentRequestJson.RootElement.GetProperty("incumbentActionIds")[0].GetUInt32()
         == (uint)VulcanSkill.BasicSynthesis,
@@ -372,10 +623,9 @@ var lowerQualityShort = new DonatelloPlanEvaluation(true, 10, 1, 3, []);
 var higherQualityLong = new DonatelloPlanEvaluation(true, 20, 2, 6, []);
 Require(!lowerQualityShort.IsStrictlyBetterThan(higherQualityLong),
     "fewer steps must not outrank higher quality");
-Require(!same.IsStrictlyBetterThan(
-        new DonatelloPlanEvaluation(true, same.Quality, same.Steps + 1, same.Duration + 3, []),
-        minimizeSteps: false),
-    "quality-only Donatello mode must retain equal-quality incumbents regardless of steps");
+Require(same.IsStrictlyBetterThan(
+        new DonatelloPlanEvaluation(true, same.Quality, same.Steps + 1, same.Duration + 3, [])),
+    "minimize-steps disabled must still adopt a lexicographically better proven plan");
 
 // A condition-aware replacement can prove useful through the independent Vulcan gate.
 var goodRoot = Root(Condition.Good);
@@ -511,6 +761,38 @@ Require(StepStateReconciler.TryReconcileAction(
 Require(reconciledTouch.Condition == Condition.Good
         && reconciledTouch.PrevComboAction == VulcanSkill.BasicTouch,
     "pending-action reconciliation must trust the observed condition and retain inferred hidden state");
+
+var overcapCraft = Craft() with { CraftQualityMax = 2500 };
+var overcapRoot = Root() with
+{
+    Quality = 2400,
+    IQStacks = 3,
+    InnovationLeft = 2,
+};
+var overcapDelicate = Simulator.Execute(
+    overcapCraft,
+    overcapRoot,
+    VulcanSkill.DelicateSynthesis,
+    0,
+    0.5f).Item2;
+Require(overcapDelicate.Quality == overcapCraft.CraftQualityMax,
+    "simulated quality must clamp to the recipe maximum reported by the game");
+Require(overcapDelicate.IQStacks == 4,
+    "a successful quality action must grant Inner Quiet even when visible quality caps");
+var observedOvercap = overcapDelicate with
+{
+    PrevComboAction = overcapRoot.PrevComboAction,
+    PrevActionFailed = overcapRoot.PrevActionFailed,
+};
+Require(StepStateReconciler.TryReconcileAction(
+        overcapCraft,
+        overcapRoot,
+        VulcanSkill.DelicateSynthesis,
+        observedOvercap,
+        out var reconciledOvercap),
+    "a quality-overcapping action must reconcile against the game's capped quality");
+Require(reconciledOvercap.Quality == 2500 && reconciledOvercap.IQStacks == 4,
+    "quality-overcap reconciliation must preserve the capped quality and inferred Inner Quiet");
 
 var observationRoot = Root(Condition.Normal) with { CarefulObservationLeft = 3 };
 var observedObservation = observationRoot with { Condition = Condition.Good };

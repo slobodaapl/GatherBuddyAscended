@@ -1,6 +1,8 @@
 ﻿using System;
 using System.Linq;
 using System.Numerics;
+using System.Threading;
+using System.Threading.Tasks;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface.Colors;
 using ElliLib.Raii;
@@ -15,6 +17,12 @@ namespace GatherBuddy.Gui;
 
 public partial class VulcanWindow
 {
+    private Task<Vulcan.DonatelloOptimizationBenchmarkResult>? _donatelloBenchmark;
+    private Vulcan.DonatelloOptimizationBenchmarkResult? _donatelloBenchmarkResult;
+    private string? _donatelloBenchmarkError;
+    private int _donatelloBenchmarkCompleted;
+    private int _donatelloBenchmarkTotal;
+
     private void DrawSettingsTab()
     {
         IDisposable tabItem;
@@ -156,16 +164,6 @@ public partial class VulcanWindow
             ImGui.Spacing();
 
             ImGui.BeginGroup();
-            ImGui.Text("  Max Concurrent: ");
-            ImGui.SameLine();
-            var maxConcurrent = raphaelConfig.MaxConcurrentRaphaelProcesses;
-            ImGui.SetNextItemWidth(VulcanUiScaling.Scaled(100f));
-            if (ImGui.InputInt("###MaxConcurrent", ref maxConcurrent, 1, 1))
-            {
-                raphaelConfig.MaxConcurrentRaphaelProcesses = Math.Max(1, maxConcurrent);
-                GatherBuddy.Config.Save();
-            }
-
             ImGui.Text("  Solve Timeout (minutes): ");
             ImGui.SameLine();
             var timeoutMinutes = raphaelConfig.RaphaelTimeoutMinutes;
@@ -178,6 +176,18 @@ public partial class VulcanWindow
             if (ImGui.IsItemHovered())
                 ImGui.SetTooltip("Timeout in minutes per Raphael solve. If exceeded, the solution is marked as failed and the craft will be skipped.");
 
+            ImGui.Text("  Initial optimization budget (seconds): ");
+            ImGui.SameLine();
+            var initialOptimizationSeconds = Math.Clamp(raphaelConfig.RaphaelInitialOptimizationSeconds, 1, 300);
+            ImGui.SetNextItemWidth(VulcanUiScaling.Scaled(100f));
+            if (ImGui.InputInt("###RaphaelInitialOptimization", ref initialOptimizationSeconds, 5, 15))
+            {
+                raphaelConfig.RaphaelInitialOptimizationSeconds = Math.Clamp(initialOptimizationSeconds, 1, 300);
+                GatherBuddy.Config.Save();
+            }
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip("Pure Raphael first generates a safe completion plan, then improves it for this long. A valid best-so-far plan is retained when the budget expires.");
+
             ImGui.Text("  Cache Max Age (days): ");
             ImGui.SameLine();
             var maxAgeDays = raphaelConfig.SolutionCacheMaxAgeDays;
@@ -189,17 +199,6 @@ public partial class VulcanWindow
             }
             if (ImGui.IsItemHovered())
                 ImGui.SetTooltip("Solutions older than this many days are discarded on plugin load.");
-
-            ImGui.Spacing();
-            var backloadProgress = raphaelConfig.RaphaelBackloadProgress;
-            if (ImGui.Checkbox("  Backload Progress###RaphaelBackloadProgress", ref backloadProgress))
-            {
-                raphaelConfig.RaphaelBackloadProgress = backloadProgress;
-                GatherBuddy.Config.Save();
-                coordinator.Clear();
-            }
-            if (ImGui.IsItemHovered())
-                ImGui.SetTooltip("Only use progress-increasing actions at the end of the rotation.\nMay decrease achievable quality. Disable for maximum quality output.\nChanging this clears the solution cache.");
 
             var allowSpecialist = raphaelConfig.RaphaelAllowSpecialistActions;
             if (ImGui.Checkbox("  Allow Specialist Actions###RaphaelAllowSpecialist", ref allowSpecialist))
@@ -221,6 +220,69 @@ public partial class VulcanWindow
             if (ImGui.IsItemHovered())
                 ImGui.SetTooltip("May greatly increase solving time, but can reduce crafting time.");
 
+            ImGui.Text("  Optimization threshold (ms): ");
+            ImGui.SameLine();
+            var optimizationThreshold = Math.Clamp(
+                raphaelConfig.DonatelloOptimizationThresholdMs,
+                10,
+                10000);
+            ImGui.SetNextItemWidth(VulcanUiScaling.Scaled(100f));
+            if (ImGui.InputInt("###DonatelloOptimizationThreshold", ref optimizationThreshold, 50, 250))
+            {
+                raphaelConfig.DonatelloOptimizationThresholdMs = Math.Clamp(optimizationThreshold, 10, 10000);
+                GatherBuddy.Config.Save();
+            }
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip("Maximum wall-clock time for each live Donatello replan. The validated existing plan remains the fallback.");
+            ImGui.SameLine();
+            if (_donatelloBenchmark == null
+                && ImGui.Button("Benchmark###DonatelloOptimizationBenchmark"))
+            {
+                _donatelloBenchmarkResult = null;
+                _donatelloBenchmarkError = null;
+                _donatelloBenchmarkCompleted = 0;
+                _donatelloBenchmarkTotal = 1;
+                _donatelloBenchmark = Vulcan.DonatelloOptimizationBenchmark.RunAsync(
+                    (completed, total) =>
+                    {
+                        Volatile.Write(ref _donatelloBenchmarkCompleted, completed);
+                        Volatile.Write(ref _donatelloBenchmarkTotal, total);
+                    });
+            }
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip("Uses a fixed recipe 38202 specialist fixture with known strict-win replans. Selects the fastest threshold whose improvement rate is no more than 5 percentage points below a 2000 ms reference.");
+            if (_donatelloBenchmark?.IsCompleted == true)
+            {
+                try
+                {
+                    _donatelloBenchmarkResult = _donatelloBenchmark.GetAwaiter().GetResult();
+                    raphaelConfig.DonatelloOptimizationThresholdMs = _donatelloBenchmarkResult.RecommendedMilliseconds;
+                    GatherBuddy.Config.Save();
+                }
+                catch (Exception ex)
+                {
+                    _donatelloBenchmarkError = ex.Message;
+                }
+                _donatelloBenchmark = null;
+            }
+            if (_donatelloBenchmark != null)
+            {
+                var completed = Volatile.Read(ref _donatelloBenchmarkCompleted);
+                var total = Math.Max(1, Volatile.Read(ref _donatelloBenchmarkTotal));
+                ImGui.ProgressBar((float)completed / total, VulcanUiScaling.Scaled(280f, 0f), $"Benchmarking {completed}/{total}");
+            }
+            else if (_donatelloBenchmarkResult != null)
+            {
+                ImGui.TextColored(
+                    ImGuiColors.HealerGreen,
+                    $"  Recommended {_donatelloBenchmarkResult.RecommendedMilliseconds} ms "
+                    + $"({_donatelloBenchmarkResult.ReferenceWins}/{_donatelloBenchmarkResult.Scenarios} reference wins; recipe {_donatelloBenchmarkResult.RecipeId})");
+            }
+            else if (!string.IsNullOrEmpty(_donatelloBenchmarkError))
+            {
+                ImGui.TextColored(ImGuiColors.DalamudRed, $"  Benchmark failed: {_donatelloBenchmarkError}");
+            }
+
             ImGui.Text("  Solver cache memory (MiB): ");
             ImGui.SameLine();
             var cacheMemoryMiB = Math.Clamp(raphaelConfig.DonatelloCacheMemoryMiB, 64, 1024);
@@ -235,7 +297,7 @@ public partial class VulcanWindow
                 ImGui.SetTooltip("Maximum retained memory for native Donatello caches. Active solve memory is not included.");
 
             var activeColor = coordinator.ActiveSolves > 0 ? ImGuiColors.HealerGreen : ImGuiColors.DalamudGrey;
-            ImGui.TextColored(activeColor, $"  Active Solves: {coordinator.ActiveSolves}/{raphaelConfig.MaxConcurrentRaphaelProcesses}");
+            ImGui.TextColored(activeColor, $"  Active Solves: {coordinator.ActiveSolves}/1");
 
             var pendingColor = coordinator.PendingSolves > 0 ? ImGuiColors.DalamudOrange : ImGuiColors.DalamudGrey;
             ImGui.TextColored(pendingColor, $"  Pending: {coordinator.PendingSolves}");

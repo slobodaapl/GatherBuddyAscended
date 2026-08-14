@@ -252,15 +252,15 @@ public sealed record VendorShopEntry(
     uint                RequiredAlliedSocietyId = 0,
     uint                RequiredAlliedSocietyRank = 0)
 {
-    public IReadOnlyList<VendorCurrencyCost> CurrencyCosts { get; } =
-        CurrencyCostVector is not null
+    public IReadOnlyList<VendorCurrencyCost> CurrencyCosts
+        => CurrencyCostVector is not null
             ? CurrencyCostVector
                 .Where(cost => cost is null || cost.CurrencyItemId != 0 || cost.Amount != 0)
                 .ToArray()
             : [new VendorCurrencyCost(CurrencyItemId, Cost, CurrencyName, Group)];
 
-    public IReadOnlyList<VendorReceivedItem> ReceivedItems { get; } =
-        ReceivedOutputs is not null
+    public IReadOnlyList<VendorReceivedItem> ReceivedItems
+        => ReceivedOutputs is not null
             ? ReceivedOutputs
                 .Where(output => output is null || output.ItemId != 0 || output.Quantity != 0)
                 .ToArray()

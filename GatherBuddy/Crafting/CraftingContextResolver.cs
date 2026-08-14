@@ -68,7 +68,16 @@ public static class CraftingContextResolver
             hasCraftedBefore,
             useQuickSynthesis,
             selectedMacroId,
-            item.CraftSettings?.DonatelloOptions);
+            ResolveDonatelloOptions(item.CraftSettings));
+    }
+
+    internal static DonatelloExecutionOptions? ResolveDonatelloOptions(RecipeCraftSettings? settings)
+    {
+        var options = settings?.DonatelloOptions;
+        if (settings?.MaximizeQualityAtCostOfTime != true)
+            return options;
+
+        return (options ?? new DonatelloExecutionOptions()) with { MaximizeQualityAtCostOfTime = true };
     }
 
     public static bool UsesSelectedMacro(CraftingExecutionContext executionContext)

@@ -928,6 +928,7 @@ public sealed class LiveAcquisitionExecutor : IDisposable
         // An overbuy consumes the complete listing. When a global cap exists,
         // keep every other still-planned transaction's reservation intact.
         if (_options.MaximumGilSpend.HasValue
+            && listing.Quantity > remaining
             && checked(_gilSpent + listing.TotalGil + otherReservation) > _options.MaximumGilSpend.Value)
             return false;
 
@@ -1421,7 +1422,9 @@ public sealed class LiveAcquisitionExecutor : IDisposable
         {
             Status = partial || HasIrreversiblePurchasesObserved
                 ? LiveAcquisitionStatus.PartiallyCompleted
-                : LiveAcquisitionStatus.Failed,
+                : kind == LiveAcquisitionFailureKind.Cancelled
+                    ? LiveAcquisitionStatus.Cancelled
+                    : LiveAcquisitionStatus.Failed,
             FailureKind = kind,
             FinalStage = stage,
             Message = message,

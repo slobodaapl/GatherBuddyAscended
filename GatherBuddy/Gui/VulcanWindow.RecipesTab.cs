@@ -15,6 +15,7 @@ using Lumina.Excel.Sheets;
 using FFXIVClientStructs.FFXIV.Client.Game;
 using FFXIVClientStructs.FFXIV.Client.UI.Misc;
 using ImRaii = ElliLib.Raii.ImRaii;
+using RecipeSearch = GatherBuddy.Utility.RecipeSearch;
 
 namespace GatherBuddy.Gui;
 
@@ -104,7 +105,8 @@ public partial class VulcanWindow
         if (!_filtersDirty || _extendedRecipeList == null)
             return;
 
-        var filtered = _extendedRecipeList.Where(PassesFilters).ToList();
+        var filtered = _extendedRecipeList.Where(PassesNonSearchFilters).ToList();
+        filtered = RecipeSearch.FilterNormalized(filtered, _recipeSearchText, recipe => recipe.NormalizedName).ToList();
         
         filtered = _sortColumn switch
         {
@@ -352,6 +354,11 @@ public partial class VulcanWindow
                 return false;
         }
 
+        return PassesNonSearchFilters(item);
+    }
+
+    private static bool PassesNonSearchFilters(ExtendedRecipe item)
+    {
         if (_selectedJobFilters.Count > 0)
         {
             if (!_selectedJobFilters.Contains(item.JobId))

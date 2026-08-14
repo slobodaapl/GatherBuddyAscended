@@ -15,6 +15,7 @@ using Lumina.Excel.Sheets;
 using FFXIVClientStructs.FFXIV.Client.Game;
 using FFXIVClientStructs.FFXIV.Client.UI.Misc;
 using ImRaii = ElliLib.Raii.ImRaii;
+using SearchTextNormalizer = GatherBuddy.Utility.SearchTextNormalizer;
 
 namespace GatherBuddy.Gui;
 
@@ -25,6 +26,7 @@ public partial class VulcanWindow
         public Recipe Recipe;
         public ISharedImmediateTexture Icon = null!;
         public string Name = string.Empty;
+        internal string NormalizedName = string.Empty;
         public string JobAbbreviation = string.Empty;
         public uint JobId;
         public uint Level;
@@ -50,6 +52,7 @@ public partial class VulcanWindow
                 if (item.RowId > 0)
                 {
                     Name = item.Name.ExtractText();
+                    NormalizedName = SearchTextNormalizer.Normalize(Name);
                     Icon = Icons.DefaultStorage.TextureProvider.GetFromGameIcon(new GameIconLookup(item.Icon));
                     ItemEquipLevel = (uint)item.LevelEquip;
                 }
@@ -93,6 +96,7 @@ public partial class VulcanWindow
                 if (item.RowId > 0)
                 {
                     Name = item.Name.ExtractText();
+                    NormalizedName = SearchTextNormalizer.Normalize(Name);
                     Icon = Icons.DefaultStorage.TextureProvider.GetFromGameIcon(new GameIconLookup(item.Icon));
                     ItemEquipLevel = (uint)item.LevelEquip;
                 }

@@ -98,6 +98,12 @@ public partial class Interface
                 GatherBuddy.Config.AutoGatherConfig.UseSkillsForFallbackItems,
                 b => GatherBuddy.Config.AutoGatherConfig.UseSkillsForFallbackItems = b);
 
+        public static void DrawAssistManualGatheringBox()
+            => DrawCheckbox("Continue manually selected gatherables",
+                "When list-based Auto-Gather is off, selecting an item in a gathering node automatically continues that item—including collectables—until it is unavailable or the node is exhausted.",
+                GatherBuddy.Config.AutoGatherConfig.AssistManualGathering,
+                b => GatherBuddy.Config.AutoGatherConfig.AssistManualGathering = b);
+
         public static void DrawAbandonNodesBox()
             => DrawCheckbox("Abandon nodes without needed items",
                 "Stop gathering and abandon the node when you have gathered enough items,\n"
@@ -1508,6 +1514,7 @@ public partial class Interface
             new("Go home when done Go home when idle",            ConfigFunctions.DrawGoHomeBox),
             new("Gather any crystals when The Giving Land is off cooldown", ConfigFunctions.DrawUseGivingLandOnCooldown),
             new("Use skills for fallback items",                  ConfigFunctions.DrawUseSkillsForFallabckBox),
+            new("Continue manually selected gatherables",         ConfigFunctions.DrawAssistManualGatheringBox),
             new("Abandon nodes without needed items",             ConfigFunctions.DrawAbandonNodesBox),
             new("Always use all gathering attempts on timed collectables", ConfigFunctions.DrawAlwaysExhaustTimedCollectableNodesBox),
             new("Always gather maps when available",              ConfigFunctions.DrawAlwaysMapsBox),

@@ -21,11 +21,12 @@ public static class Simulator
             var next = new StepState();
             next.Index = SkipUpdates(action) ? step.Index : step.Index + 1;
             next.Progress = step.Progress + (success ? CalculateProgress(craft, step, action) : 0);
-            next.Quality = step.Quality + (success ? CalculateQuality(craft, step, action) : 0);
+            var qualityIncrease = success ? CalculateQuality(craft, step, action) : 0;
+            next.Quality = Math.Min(craft.CraftQualityMax, step.Quality + qualityIncrease);
             next.IQStacks = step.IQStacks;
             if (success)
             {
-                if (next.Quality != step.Quality)
+                if (qualityIncrease > 0)
                     ++next.IQStacks;
                 if (action is VulcanSkill.PreciseTouch or VulcanSkill.PreparatoryTouch or VulcanSkill.Reflect or VulcanSkill.RefinedTouch)
                     ++next.IQStacks;

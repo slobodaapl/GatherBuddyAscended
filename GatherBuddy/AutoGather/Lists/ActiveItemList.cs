@@ -62,6 +62,12 @@ namespace GatherBuddy.AutoGather.Lists
         public bool HasReachableItemsToGather
             => _gatherableItems.Any(NeedsGathering);
 
+        public bool HasCompletionSourceItems
+            => _listsManager.ActiveItems.Any(item =>
+                item.CompletionItemId != 0
+             && item.Item.GetInventoryCount() > 0
+             && NeedsGathering(item));
+
         public bool IsCloudedNodeConsumed
             => _consumedCloudedNode;
 
@@ -116,7 +122,7 @@ namespace GatherBuddy.AutoGather.Lists
         public void MarkVisited(IGameObject target)
         {
             // In almost all cases, the target is the first item in the list, so it's O(1).
-            var (_, loc, time, _) = _gatherableItems.FirstOrDefault(x => x.Node?.WorldPositions.ContainsKey(target.BaseId) ?? false);
+            var (_, loc, time, _, _) = _gatherableItems.FirstOrDefault(x => x.Node?.WorldPositions.ContainsKey(target.BaseId) ?? false);
             var node = loc as GatheringNode;
 
             // Could happen with manual navigation if gathered node isn't on the list.
@@ -149,14 +155,14 @@ namespace GatherBuddy.AutoGather.Lists
                 _consumedCloudedNode = EnhancedCurrentWeather.GetCurrentWeatherId() == x.Node.UmbralWeather.Id;
         }
 
-        private bool NeedsGathering((IGatherable item, uint quantity) value)
+        private bool NeedsGathering((IGatherable Item, uint Quantity, uint CompletionItemId) value)
         {
-            var (item, quantity) = value;
-            return item.GetTotalCount() < quantity && CheckOvercap(item);
+            return value.Item.GetCompletionCount(value.CompletionItemId) < value.Quantity
+                && CheckOvercap(value.Item);
         }
 
         private bool NeedsGathering(GatherTarget target)
-            => NeedsGathering((target.Item, target.Quantity));
+            => NeedsGathering((target.Item, target.Quantity, target.CompletionItemId));
 
         private static bool CheckOvercap(IGatherable item)
         {
@@ -345,7 +351,7 @@ namespace GatherBuddy.AutoGather.Lists
                 // Filter out items that are already gathered.
                 .Where(NeedsGathering)
                 // Fetch preferred location.
-                .Select(x => (x.Item, x.Quantity, PreferredLocation: _listsManager.GetPreferredLocation(x.Item)))
+                .Select(x => (x.Item, x.Quantity, x.CompletionItemId, PreferredLocation: _listsManager.GetPreferredLocation(x.Item)))
                 // Flatten node list and calculate the next uptime.
                 .SelectMany(x => x.Item.Locations.Select(Location
                     => (x.Item, Location, Time: Location switch
@@ -353,7 +359,7 @@ namespace GatherBuddy.AutoGather.Lists
                         GatheringNode node => node.Times.NextUptime(adjustedServerTime),
                         FishingSpot spot => GatherBuddy.UptimeManager.NextUptime((x.Item as Fish)!, spot.Territory, adjustedServerTime),
                         _ => throw new InvalidOperationException()
-                    }, x.Quantity, x.PreferredLocation)))
+                    }, x.Quantity, x.CompletionItemId, x.PreferredLocation)))
                 // Skip item/location pairs for which no usable route exists during this run.
                 .Where(x => !_permanentlyUnreachableLocations.Contains((x.Item.ItemId, x.Location.Id)))
                 // If treasure map, only gather if the allowance is up.
@@ -374,7 +380,7 @@ namespace GatherBuddy.AutoGather.Lists
                 // Remove uptime for nodes that have already been gathered.
                 .Select(x => x.Location is GatheringNode node && _visitedTimedNodes.ContainsKey(node) ? x with { Time = TimeInterval.Invalid } : x)
                 // Group by item and select the best node.
-                .GroupBy(x => x.Item, x => x, (_, g) => g
+                .GroupBy(x => (x.Item, x.CompletionItemId), x => x, (_, g) => g
                     // Prioritize active nodes
                     .OrderBy(x => !IsAvailable(x.Time, adjustedServerTime, adjustedEndTime))
                     // Prioritize preferred location, then current job, then preferred job, then the rest.
@@ -407,7 +413,7 @@ namespace GatherBuddy.AutoGather.Lists
                     })
                     .First()
                 )
-                .Select(x => new GatherTarget(x.Item, x.Location, x.Time, x.Quantity))
+                .Select(x => new GatherTarget(x.Item, x.Location, x.Time, x.Quantity, x.CompletionItemId))
                 // Put inactive timed nodes to the end, ordered by start time.
                 .OrderBy(x => IsAvailable(x.Time, adjustedServerTime, adjustedEndTime) ? TimeStamp.MinValue : x.Time.Start)
                 // Bring active timed nodes to the front.
@@ -763,8 +769,19 @@ namespace GatherBuddy.AutoGather.Lists
 
 
 
-    public readonly record struct GatherTarget(IGatherable Item, ILocation Location, TimeInterval Time, uint Quantity)
+    public readonly record struct GatherTarget(
+        IGatherable Item,
+        ILocation Location,
+        TimeInterval Time,
+        uint Quantity,
+        uint CompletionItemId = 0)
     {
+        public int CompletionCount
+            => Item.GetCompletionCount(CompletionItemId);
+
+        public bool NeedsGathering
+            => CompletionCount < Quantity;
+
         public GatheringNode? Node
             => Location as GatheringNode;
 

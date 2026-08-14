@@ -2,8 +2,10 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text.Json;
+using GatherBuddy.AutoGather;
 using GatherBuddy.Crafting;
 using GatherBuddy.Crafting.Acquisition;
+using LuminaSupplemental.Excel.Model;
 
 namespace GatherBuddy.Vulcan.Tests;
 
@@ -11,6 +13,8 @@ public static class AcquisitionAcceptanceTests
 {
     public static void Run(Action<bool, string> require)
     {
+        ManualGatherAssistSettingDefaultsOn(require);
+        ReductionSourcesComeFromSupplementalRelations(require);
         FinalOutputsAreNeverPurchased(require);
         FinalOutputAndIntermediateDemandAreDistinct(require);
         DisabledAcquisitionIsAnExplicitNoOp(require);
@@ -27,8 +31,42 @@ public static class AcquisitionAcceptanceTests
         CurrencyVectorsAreRequiredTogether(require);
         PreferenceRelaxationStaysWithinHardBudget(require);
         CoProductVendorTransactionIsSharedAcrossDependencies(require);
+        ParetoFrontierAvoidsCartesianGlobalExplosion(require);
         ExactSearchReportsItsDeterministicLimit(require);
         AcquisitionSettingsRoundTrip(require);
+    }
+
+    private static void ReductionSourcesComeFromSupplementalRelations(Action<bool, string> require)
+    {
+        var index = AetherialReductionSourceResolver.BuildIndex(
+        [
+            new ItemSupplement(900u, 901u, ItemSupplementSource.Reduction),
+            new ItemSupplement(900u, 902u, ItemSupplementSource.Reduction),
+            new ItemSupplement(900u, 901u, ItemSupplementSource.Reduction),
+            new ItemSupplement(900u, 903u, ItemSupplementSource.Desynth),
+        ]);
+        require(index.TryGetValue(900u, out var sources) && sources.SequenceEqual([901u, 902u]),
+            "reduction source indexing must retain every distinct reduction candidate and exclude other transforms");
+
+        require(AetherialReductionSourceResolver.GetSourceItemIds(46246u)
+                .SequenceEqual([46247u, 46248u, 46249u]),
+            "the packaged supplemental data must expose all Levinchrome Aethersand reduction candidates");
+    }
+
+    private static void ManualGatherAssistSettingDefaultsOn(Action<bool, string> require)
+    {
+        var config = new AutoGatherConfig();
+        require(ManualGatherAssistPolicy.IsEnabled(config),
+            "manual gathering assistance for normal items and collectables must default on");
+
+        config.AssistManualGathering = false;
+        require(!ManualGatherAssistPolicy.IsEnabled(config),
+            "one manual gathering setting must control both normal items and collectables");
+
+        config.AssistManualGathering = true;
+        config.DoGathering = false;
+        require(!ManualGatherAssistPolicy.IsEnabled(config),
+            "the global gathering-window interaction setting must disable manual assistance");
     }
 
     private static void FinalOutputsAreNeverPurchased(Action<bool, string> require)
@@ -259,6 +297,65 @@ public static class AcquisitionAcceptanceTests
         require(requiredUnknownFolklore.Status == AcquisitionCapabilityStatus.Unknown
             && requiredUnknownFolklore.Reason.Contains("folklore", StringComparison.OrdinalIgnoreCase),
             "unknown required folklore state must remain unknown instead of being guessed usable");
+
+        var unknownPerception = AcquisitionCapabilityResolver.Resolve(
+            AcquisitionPathKind.Gather,
+            new AcquisitionCapabilityEvidence
+            {
+                RequiredLevel = 100,
+                ActualLevel = 100,
+                GearsetKnown = true,
+                GearsetAvailable = true,
+                UnlockKnown = true,
+                UnlockAvailable = true,
+                RequiredPerception = 4900,
+                PerceptionKnown = false,
+                RouteKnown = true,
+                RouteAvailable = true,
+            });
+        require(unknownPerception.Status == AcquisitionCapabilityStatus.Unknown
+            && unknownPerception.Reason.Contains("perception", StringComparison.OrdinalIgnoreCase),
+            "unknown saved-gearset perception must fail closed");
+
+        var insufficientPerception = AcquisitionCapabilityResolver.Resolve(
+            AcquisitionPathKind.Gather,
+            new AcquisitionCapabilityEvidence
+            {
+                RequiredLevel = 100,
+                ActualLevel = 100,
+                GearsetKnown = true,
+                GearsetAvailable = true,
+                UnlockKnown = true,
+                UnlockAvailable = true,
+                RequiredPerception = 4900,
+                ActualPerception = 4800,
+                PerceptionKnown = true,
+                RouteKnown = true,
+                RouteAvailable = true,
+            });
+        require(insufficientPerception.Status == AcquisitionCapabilityStatus.Unusable
+            && insufficientPerception.Reason.Contains("4900", StringComparison.Ordinal)
+            && insufficientPerception.Reason.Contains("4800", StringComparison.Ordinal),
+            "insufficient saved-gearset perception must reject gathering with required and actual values");
+
+        var sufficientPerception = AcquisitionCapabilityResolver.Resolve(
+            AcquisitionPathKind.Gather,
+            new AcquisitionCapabilityEvidence
+            {
+                RequiredLevel = 100,
+                ActualLevel = 100,
+                GearsetKnown = true,
+                GearsetAvailable = true,
+                UnlockKnown = true,
+                UnlockAvailable = true,
+                RequiredPerception = 4900,
+                ActualPerception = 4900,
+                PerceptionKnown = true,
+                RouteKnown = true,
+                RouteAvailable = true,
+            });
+        require(sufficientPerception.Status == AcquisitionCapabilityStatus.Usable,
+            "meeting the exact perception requirement must preserve gathering as usable");
     }
 
     private static void UnknownPathKindIsExplicitlyUnknown(Action<bool, string> require)
@@ -522,6 +619,35 @@ public static class AcquisitionAcceptanceTests
 
         require(result.Status == AcquisitionPlanStatus.DeterministicLimitExceeded,
             "bounded exact search must fail explicitly instead of returning a partial greedy plan");
+    }
+
+    private static void ParetoFrontierAvoidsCartesianGlobalExplosion(Action<bool, string> require)
+    {
+        var dependencies = Enumerable.Range(0, 10)
+            .Select(index => Blocked((uint)(850 + index), 1))
+            .ToArray();
+        var listings = dependencies
+            .SelectMany((dependency, dependencyIndex) => Enumerable.Range(0, 4)
+                .Select(choice => Listing(
+                    dependency.ItemId,
+                    85_000 + dependencyIndex * 10 + choice,
+                    1,
+                    price: choice + 1)))
+            .ToArray();
+
+        var result = AcquisitionPlanner.Plan(
+            new AcquisitionPlanningInput
+            {
+                Dependencies = dependencies,
+                MarketListings = listings,
+                GilBalance = 1_000_000,
+            },
+            Enabled());
+
+        require(result.IsSuccess
+                && result.SelectedPlan?.Transactions.Count == dependencies.Length
+                && result.SelectedPlan.Estimate.TotalGil == dependencies.Length,
+            "exact Pareto search must collapse dominated choices instead of enumerating the Cartesian product");
     }
 
     private static void CoProductVendorTransactionIsSharedAcrossDependencies(Action<bool, string> require)

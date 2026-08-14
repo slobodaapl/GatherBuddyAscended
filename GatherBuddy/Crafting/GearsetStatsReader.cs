@@ -15,10 +15,12 @@ public static unsafe class GearsetStatsReader
     private const uint CraftsmanshipParamId = 70;
     private const uint ControlParamId = 71;
     private const uint CpParamId = 11;
+    private const uint PerceptionParamId = 73;
     private const int CraftsmanshipIndex = 0;
     private const int ControlIndex = 1;
     private const int CpIndex = 2;
-    private const int StatCount = 3;
+    private const int PerceptionIndex = 3;
+    private const int StatCount = 4;
     private const int MateriaSlotCount = 5;
     private const int GearsetItemCount = 14;
     private const int SpecialistSlotIndex = 13;
@@ -232,6 +234,7 @@ public static unsafe class GearsetStatsReader
             CraftsmanshipParamId => CraftsmanshipIndex,
             ControlParamId => ControlIndex,
             CpParamId => CpIndex,
+            PerceptionParamId => PerceptionIndex,
             _ => -1
         };
         return statIndex >= 0;
@@ -301,8 +304,82 @@ public static unsafe class GearsetStatsReader
             CraftsmanshipParamId => levelItem.Craftsmanship,
             ControlParamId => levelItem.Control,
             CpParamId => levelItem.CP,
+            PerceptionParamId => levelItem.Perception,
             _ => 0
         };
+    }
+
+    public static bool TryReadGearsetPerception(uint jobId, out int perception)
+    {
+        perception = 0;
+        try
+        {
+            if (Dalamud.Objects.LocalPlayer?.ClassJob.RowId == jobId)
+            {
+                var playerState = PlayerState.Instance();
+                if (playerState == null)
+                    return false;
+                perception = playerState->Attributes[(int)PerceptionParamId];
+                return true;
+            }
+
+            var gearsetModule = RaptureGearsetModule.Instance();
+            if (gearsetModule == null
+             || !TryResolveExistingGearsetIndex(gearsetModule, jobId, out var gearsetIndex))
+                return false;
+
+            fixed (RaptureGearsetModule.GearsetEntry* entries = gearsetModule->Entries)
+                return TryCalculatePerceptionFromGearset(&entries[gearsetIndex], out perception);
+        }
+        catch (Exception ex)
+        {
+            GatherBuddy.Log.Warning($"[GearsetStatsReader] Failed to read perception for job {jobId}: {ex.Message}");
+            return false;
+        }
+    }
+
+    private static bool TryCalculatePerceptionFromGearset(
+        RaptureGearsetModule.GearsetEntry* gearset,
+        out int perception)
+    {
+        perception = 0;
+        var itemSheet = Dalamud.GameData.GetExcelSheet<Item>();
+        var materiaSheet = Dalamud.GameData.GetExcelSheet<Materia>();
+        if (itemSheet == null || materiaSheet == null)
+            return false;
+
+        for (var i = 0; i < GearsetItemCount; i++)
+        {
+            var gearItem = gearset->Items[i];
+            if (gearItem.ItemId == 0)
+                continue;
+
+            var actualItemId = gearItem.ItemId % 1_000_000;
+            var isHighQuality = gearItem.ItemId >= 1_000_000;
+            if (!itemSheet.TryGetRow(actualItemId, out var item))
+                return false;
+
+            var baseStats = new int[StatCount];
+            var meldStats = new int[StatCount];
+            AccumulateBaseStats(item, isHighQuality, baseStats);
+            for (var materiaIndex = 0; materiaIndex < MateriaSlotCount; materiaIndex++)
+            {
+                var materiaId = gearItem.Materia[materiaIndex];
+                if (materiaId == 0)
+                    continue;
+                if (!materiaSheet.TryGetRow(materiaId, out var materia))
+                    return false;
+                AccumulateMateriaStats(materia, gearItem.MateriaGrades[materiaIndex], meldStats);
+            }
+
+            perception += CalculateEffectiveItemStat(
+                item,
+                PerceptionParamId,
+                baseStats[PerceptionIndex],
+                meldStats[PerceptionIndex]);
+        }
+
+        return true;
     }
 
     public static GameStateBuilder.PlayerStats? ReadGearsetStatsForJob(uint jobId)
@@ -403,7 +480,8 @@ public static unsafe class GearsetStatsReader
                 Level: 100,
                 Manipulation: manipulation,
                 Specialist: isSpecialist,
-                SplendorCosmic: false
+                SplendorCosmic: false,
+                CrafterDelineations: CraftingSpecialistResources.GetCrafterDelineationCount()
             );
         }
         catch (Exception ex)

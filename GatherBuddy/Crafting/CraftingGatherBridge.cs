@@ -9,6 +9,7 @@ using FFXIVClientStructs.FFXIV.Component.GUI;
 using GatherBuddy.Automation;
 using GatherBuddy.AutoGather.Lists;
 using GatherBuddy.AutoGather.Collectables;
+using GatherBuddy.Crafting.Acquisition;
 using GatherBuddy.Helpers;
 using Lumina.Excel.Sheets;
 using GatherBuddy.Plugin;
@@ -82,6 +83,18 @@ public static class CraftingGatherBridge
             || _pendingQueueStart != null
             || !_queueProcessorDrain.IsCompleted;
     public static bool IsQueuePaused => _queueProcessor?.Paused == true;
+
+    internal static bool TryGetActiveQueueFailure(out string reason)
+    {
+        if (_queueProcessor?.CurrentState == CraftingQueueProcessor.QueueState.Failed)
+        {
+            reason = _queueProcessor.PauseReason;
+            return true;
+        }
+
+        reason = string.Empty;
+        return false;
+    }
 
     public static void PauseQueue(string? reason = null)
         => _queueProcessor?.Pause(reason);
@@ -162,14 +175,19 @@ public static class CraftingGatherBridge
 
             foreach (var (itemId, quantity) in materials)
             {
-                var gatherQuantity = GetCraftingGatherTargetQuantity(itemId, quantity, out var gatherItemId);
+                var gatherQuantity = GetCraftingGatherTargetQuantity(
+                    itemId,
+                    quantity,
+                    quantityIsDeficit: false,
+                    out var gatherItemId,
+                    out var completionItemId);
                 if (gatherQuantity <= 0)
                     continue;
 
                 if (GatherBuddy.GameData.Gatherables.TryGetValue(gatherItemId, out var gatherable))
-                    gatherList.Add(gatherable, (uint)gatherQuantity);
+                    gatherList.Add(gatherable, (uint)gatherQuantity, completionItemId);
                 else if (GatherBuddy.GameData.Fishes.TryGetValue(gatherItemId, out var fish))
-                    gatherList.Add(fish, (uint)gatherQuantity);
+                    gatherList.Add(fish, (uint)gatherQuantity, completionItemId);
                 else
                     GatherBuddy.Log.Debug($"[CraftingGatherBridge] Item {gatherItemId} not found in gatherables or fish, skipping");
             }
@@ -191,14 +209,37 @@ public static class CraftingGatherBridge
         }
     }
 
-    private static int GetCraftingGatherTargetQuantity(uint itemId, int quantity, out uint gatherItemId)
+    private static int GetCraftingGatherTargetQuantity(
+        uint itemId,
+        int quantity,
+        bool quantityIsDeficit,
+        out uint gatherItemId,
+        out uint completionItemId)
     {
         gatherItemId = itemId;
+        completionItemId = 0;
         if (quantity <= 0)
             return 0;
 
         if (!AutoGather.Helpers.Diadem.ApprovedToRawItemIds.TryGetValue(itemId, out var rawItemId))
+        {
+            var reductionPath = AcquisitionPlanningInputBuilder.ResolvePath(itemId, null);
+            if (reductionPath is
+                {
+                    Kind: AcquisitionPathKind.Reduction,
+                    SourceItemId: not 0,
+                    Capability.Status: AcquisitionCapabilityStatus.Usable,
+                })
+            {
+                gatherItemId = reductionPath.SourceItemId;
+                completionItemId = itemId;
+                return quantityIsDeficit
+                    ? checked(GetInventoryCount(itemId) + quantity)
+                    : quantity;
+            }
+
             return quantity;
+        }
         var approvedDeficit = Math.Max(0, quantity - GetInventoryCount(itemId));
         if (approvedDeficit <= 0)
             return 0;
@@ -395,14 +436,19 @@ public static class CraftingGatherBridge
 
             foreach (var (itemId, quantity) in missing)
             {
-                var gatherQuantity = GetCraftingGatherTargetQuantity(itemId, quantity, out var gatherItemId);
+                var gatherQuantity = GetCraftingGatherTargetQuantity(
+                    itemId,
+                    quantity,
+                    quantityIsDeficit: true,
+                    out var gatherItemId,
+                    out var completionItemId);
                 if (gatherQuantity <= 0)
                     continue;
                 
                 if (GatherBuddy.GameData.Gatherables.TryGetValue(gatherItemId, out var gatherable))
-                    _gatherList.Add(gatherable, (uint)gatherQuantity);
+                    _gatherList.Add(gatherable, (uint)gatherQuantity, completionItemId);
                 else if (GatherBuddy.GameData.Fishes.TryGetValue(gatherItemId, out var fish))
-                    _gatherList.Add(fish, (uint)gatherQuantity);
+                    _gatherList.Add(fish, (uint)gatherQuantity, completionItemId);
                 else
                     GatherBuddy.Log.Debug($"[CraftingGatherBridge] Item {gatherItemId} not found in gatherables or fish, skipping");
             }
@@ -614,8 +660,10 @@ public static class CraftingGatherBridge
         foreach (var item in _gatherList.Items)
         {
             var needed = _gatherList.Quantities.TryGetValue(item, out var qty) ? qty : 0;
-            var (nq, hq) = CraftingInventoryCounter.GetInventorySplitCounts(item.ItemId);
-            var demand = _activeExecutionPlan?.IngredientDemandsView.GetValueOrDefault(item.ItemId) ?? default;
+            var completionItemId = _gatherList.CompletionItemIds.GetValueOrDefault(item);
+            var countedItemId = completionItemId == 0 ? item.ItemId : completionItemId;
+            var (nq, hq) = CraftingInventoryCounter.GetInventorySplitCounts(countedItemId);
+            var demand = _activeExecutionPlan?.IngredientDemandsView.GetValueOrDefault(countedItemId) ?? default;
             if (!IsGatheringItemComplete(needed, demand, nq, hq))
             {
                 allComplete = false;

@@ -201,6 +201,22 @@ public sealed class ArtisanIpcShim : IDisposable
 
     private void CraftItem(ushort recipeId, int amount)
     {
+        GatherBuddy.Log.Information($"[ArtisanIpcShim] Received ICE craft request: recipe={recipeId}, amount={amount}");
+        try
+        {
+            CraftItemCore(recipeId, amount);
+        }
+        catch (Exception ex)
+        {
+            var reason = ex.Message.Replace('\n', ' ');
+            GatherBuddy.Log.Error($"[ArtisanIpcShim] Rejected ICE craft: recipe={recipeId}, amount={amount}: {ex}");
+            Dalamud.Chat.PrintError($"[GatherBuddy Ascended] ICE craft could not start: {reason}");
+            throw;
+        }
+    }
+
+    private void CraftItemCore(ushort recipeId, int amount)
+    {
         if (amount <= 0)
             throw new ArgumentOutOfRangeException(nameof(amount), amount, "Craft amount must be positive.");
         if (IsShimBusy())
@@ -229,6 +245,8 @@ public sealed class ArtisanIpcShim : IDisposable
         if (!CraftingQueuePreflight.TryValidate(plan, out var failure))
             throw new InvalidOperationException(failure.Replace('\n', ' '));
         CraftingGatherBridge.StartQueueCraftAndGather(plan);
+        if (CraftingGatherBridge.TryGetActiveQueueFailure(out failure))
+            throw new InvalidOperationException(failure.Replace('\n', ' '));
         GatherBuddy.Log.Information(
             $"[ArtisanIpcShim] Accepted ICE craft: recipe={recipeId}, amount={amount}, objective={list.Recipes[0].CraftSettings?.DonatelloOptions?.Objective}");
     }

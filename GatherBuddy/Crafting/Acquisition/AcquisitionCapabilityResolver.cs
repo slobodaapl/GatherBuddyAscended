@@ -83,6 +83,27 @@ public static class AcquisitionCapabilityResolver
             }
         }
 
+        if (evidence.RequiredPerception > 0)
+        {
+            if (!evidence.PerceptionKnown)
+            {
+                return Create(
+                    AcquisitionCapabilityStatus.Unknown,
+                    pathKind,
+                    evidence,
+                    "Saved gearset perception is unknown.");
+            }
+
+            if (evidence.ActualPerception < evidence.RequiredPerception)
+            {
+                return Create(
+                    AcquisitionCapabilityStatus.Unusable,
+                    pathKind,
+                    evidence,
+                    $"Requires {evidence.RequiredPerception} perception; saved gearset has {evidence.ActualPerception}.");
+            }
+        }
+
         if (!evidence.RouteKnown)
         {
             return Create(
@@ -124,6 +145,9 @@ public static class AcquisitionCapabilityResolver
             FolkloreRequired = evidence.FolkloreRequired,
             FolkloreKnown = evidence.FolkloreKnown,
             FolkloreUnlocked = evidence.FolkloreUnlocked,
+            RequiredPerception = evidence.RequiredPerception,
+            ActualPerception = evidence.ActualPerception,
+            PerceptionKnown = evidence.PerceptionKnown,
             RouteKnown = evidence.RouteKnown,
             RouteAvailable = evidence.RouteAvailable,
             Evidence = new Dictionary<string, string>(evidence.AdditionalEvidence),

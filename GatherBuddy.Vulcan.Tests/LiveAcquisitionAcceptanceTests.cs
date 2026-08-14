@@ -658,7 +658,8 @@ internal static class LiveAcquisitionAcceptanceTests
         var replanRaceResult = replanRaceExecution.GetAwaiter().GetResult();
         Require(replanRaceResult.Status == LiveAcquisitionStatus.Cancelled
             && replanRace.VendorPurchaseCalls == 0,
-            "a replan result that completes after cancellation must not be published into execution");
+            $"a replan result that completes after cancellation must not be published into execution "
+            + $"(status={replanRaceResult.Status}, vendorCalls={replanRace.VendorPurchaseCalls})");
 
         var lowerPrice = new FakeEnvironment
         {
@@ -724,7 +725,10 @@ internal static class LiveAcquisitionAcceptanceTests
         Require(globalReservationResult.Status == LiveAcquisitionStatus.PartiallyCompleted
             && globalReservationItemFive == 1
             && globalReservationItemSix == 0,
-            "global Gil reservation must stop later purchases without claiming complete fulfillment");
+            $"global Gil reservation must stop later purchases without claiming complete fulfillment "
+            + $"(status={globalReservationResult.Status}, item5={globalReservationItemFive}, "
+            + $"item6={globalReservationItemSix}, marketCalls={globalReservation.MarketPurchaseCalls}, "
+            + $"gil={globalReservationResult.GilSpent})");
 
         var repeatedItem = new FakeEnvironment
         {

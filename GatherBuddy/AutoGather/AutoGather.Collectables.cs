@@ -38,13 +38,19 @@ namespace GatherBuddy.AutoGather
 
         private unsafe class CollectableRotation
         {
-            public CollectableRotation(ConfigPreset config, Gatherable item, uint quantity, int gatherChance)
+            public CollectableRotation(
+                ConfigPreset config,
+                Gatherable item,
+                uint quantity,
+                int gatherChance,
+                uint completionItemId = 0)
             {
                 this.config = config;
                 shouldUseFullRotation = Player.Object?.CurrentGp >= config.CollectableActionsMinGP;
                 this.item = item;
                 this.quantity = quantity;
                 this.gatherChance = gatherChance;
+                this.completionItemId = completionItemId;
             }
 
             private readonly bool shouldUseFullRotation = false;
@@ -52,6 +58,7 @@ namespace GatherBuddy.AutoGather
             private readonly Gatherable item;
             private readonly uint quantity;
             private readonly int gatherChance;
+            private readonly uint completionItemId;
             private int? previousIntegrity;
             private bool revisitUsed;
 
@@ -78,7 +85,7 @@ namespace GatherBuddy.AutoGather
             private Actions.BaseAction GetNativeNextAction(GatheringMasterpieceReader masterpieceReader)
             {
                 var player = Player.Object ?? throw new InvalidOperationException("Player object is null");
-                var itemsLeft = (int)Math.Max(0L, (long)quantity - item.GetTotalCount());
+                var itemsLeft = (int)Math.Max(0L, (long)quantity - item.GetCompletionCount(completionItemId));
                 if (itemsLeft <= 0 && ShouldAbandonCompletedCollectable(item))
                     throw new NoGatherableItemsInNodeException();
 
@@ -222,7 +229,7 @@ namespace GatherBuddy.AutoGather
             private Actions.BaseAction GetLegacyNextAction(GatheringMasterpieceReader masterpieceReader)
             {
                 var player = Player.Object ?? throw new InvalidOperationException("Player object is null");
-                var itemsLeft = (int)Math.Max(0L, (long)quantity - item.GetTotalCount());
+                var itemsLeft = (int)Math.Max(0L, (long)quantity - item.GetCompletionCount(completionItemId));
 
                 if (itemsLeft <= 0 && ShouldAbandonCompletedCollectable(item))
                     throw new NoGatherableItemsInNodeException();

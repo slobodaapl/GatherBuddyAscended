@@ -2,7 +2,6 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using FFXIVClientStructs.FFXIV.Client.Game;
-using FFXIVClientStructs.FFXIV.Client.Game.UI;
 using FFXIVClientStructs.FFXIV.Client.UI.Misc;
 using Dalamud.Utility;
 using GatherBuddy.Classes;
@@ -39,7 +38,8 @@ public static unsafe class AcquisitionPlanningInputBuilder
 
         var currentWorldId = Dalamud.Objects.LocalPlayer?.CurrentWorld.RowId ?? 0u;
         var settings = plan.PlanningSnapshot.GetAcquisitionSettings();
-        var dependencies = BuildDependencies(plan);
+        var boundaryPlan = plan.CreateAcquisitionBoundaryPlan(IsCraftPrecraftUsable);
+        var dependencies = BuildDependencies(plan, boundaryPlan);
         var requiresAcquisition = dependencies.Any(dependency =>
             !dependency.IsFinalOutput
             && dependency.SelectedPath?.Capability.Status != AcquisitionCapabilityStatus.Usable);
@@ -129,19 +129,21 @@ public static unsafe class AcquisitionPlanningInputBuilder
             : "A required precraft cannot be acquired or crafted:\n" + string.Join("\n", blocked);
     }
 
-    private static List<AcquisitionDependency> BuildDependencies(CraftingExecutionPlan plan)
+    private static List<AcquisitionDependency> BuildDependencies(
+        CraftingExecutionPlan plan,
+        CraftingListPlan boundaryPlan)
     {
         var dependencyQuantities = new Dictionary<uint, int>();
         var finalOutputItemIds = plan.OriginalRecipesView
             .Select(item => RecipeManager.GetRecipe(item.RecipeId)?.ItemResult.RowId ?? 0u)
             .Where(itemId => itemId != 0)
             .ToHashSet();
-        var intermediateDemandItemIds = plan.PrecraftsView.Keys
-            .Concat(plan.MaterialsView.Keys)
+        var intermediateDemandItemIds = boundaryPlan.Precrafts.Keys
+            .Concat(boundaryPlan.Materials.Keys)
             .ToHashSet();
-        foreach (var (itemId, quantity) in plan.PrecraftsView)
+        foreach (var (itemId, quantity) in boundaryPlan.Precrafts)
             AddQuantity(dependencyQuantities, itemId, quantity);
-        foreach (var (itemId, quantity) in plan.MaterialsView)
+        foreach (var (itemId, quantity) in boundaryPlan.Materials)
             AddQuantity(dependencyQuantities, itemId, quantity);
 
         var result = new List<AcquisitionDependency>(dependencyQuantities.Count);
@@ -151,7 +153,7 @@ public static unsafe class AcquisitionPlanningInputBuilder
                 continue;
 
             var (inventoryNq, inventoryHq) = CraftingInventoryCounter.GetInventorySplitCounts(itemId);
-            var demand = plan.IngredientDemandsView.GetValueOrDefault(itemId);
+            var demand = boundaryPlan.IngredientDemands.GetValueOrDefault(itemId);
             var (missingQuantity, missingHq, missingNq) = ComputeMissingQuantities(
                 quantity,
                 demand.RequiredHQ,
@@ -181,6 +183,9 @@ public static unsafe class AcquisitionPlanningInputBuilder
         return result;
     }
 
+    private static bool IsCraftPrecraftUsable(Recipe recipe)
+        => ResolvePath(recipe.ItemResult.RowId, recipe)?.Capability.Status == AcquisitionCapabilityStatus.Usable;
+
     internal static (int Total, int HQ, int NQ) ComputeMissingQuantities(
         int requiredQuantity,
         int requiredHqQuantity,
@@ -196,15 +201,16 @@ public static unsafe class AcquisitionPlanningInputBuilder
         return (Math.Max(totalMissing, missingHq + missingNq), missingHq, missingNq);
     }
 
-    private static AcquisitionPath? ResolvePath(uint itemId, Recipe? selectedRecipe)
+    internal static AcquisitionPath? ResolvePath(uint itemId, Recipe? selectedRecipe)
     {
         if (selectedRecipe.HasValue)
         {
             var recipe = selectedRecipe.Value;
             var jobId = recipe.CraftType.RowId + 8;
-            var requiredLevel = recipe.RecipeLevelTable.Value.ClassJobLevel;
+            var requiredLevel = recipe.MinimumJobLevel();
             var actualLevel = ReadJobLevel(jobId);
             var gearsetKnown = TryHasGearset(jobId, out var gearsetAvailable);
+            var recipeUnlocked = recipe.Number == 0 || Dalamud.UnlockState.IsRecipeUnlocked(recipe);
             var capability = AcquisitionCapabilityResolver.Resolve(
                 AcquisitionPathKind.Craft,
                 new AcquisitionCapabilityEvidence
@@ -215,7 +221,7 @@ public static unsafe class AcquisitionPlanningInputBuilder
                     GearsetKnown = gearsetKnown,
                     GearsetAvailable = gearsetAvailable,
                     UnlockKnown = true,
-                    UnlockAvailable = true,
+                    UnlockAvailable = recipeUnlocked,
                     RouteKnown = true,
                     RouteAvailable = true,
                     AdditionalEvidence = new Dictionary<string, string>
@@ -237,40 +243,10 @@ public static unsafe class AcquisitionPlanningInputBuilder
             return ResolveGatherPath(itemId, gatherable, AcquisitionPathKind.Gather);
 
         if (GatherBuddy.GameData.Fishes.TryGetValue(itemId, out var fish))
-        {
-            // Fish folklore metadata is present, but the client-side folklore
-            // bitfield is not exposed through a stable public API. Treat such
-            // a route as unknown instead of claiming it is usable.
-            var folkloreRequired = !string.IsNullOrWhiteSpace(fish.Folklore);
-            var fishLog = GatherBuddy.FishLog;
-            var unlockKnown = fishLog != null;
-            var unlockAvailable = !fish.InLog
-                || unlockKnown && fishLog!.IsUnlocked(fish);
-            var capability = AcquisitionCapabilityResolver.Resolve(
-                AcquisitionPathKind.Fish,
-                new AcquisitionCapabilityEvidence
-                {
-                    JobId = 18,
-                    RequiredLevel = 1,
-                    ActualLevel = ReadJobLevel(18),
-                    GearsetKnown = TryHasGearset(18, out var gearsetAvailable),
-                    GearsetAvailable = gearsetAvailable,
-                    UnlockKnown = unlockKnown,
-                    UnlockAvailable = unlockAvailable,
-                    FolkloreRequired = folkloreRequired,
-                    FolkloreKnown = !folkloreRequired,
-                    FolkloreUnlocked = !folkloreRequired,
-                    RouteKnown = fish.Locations.Count > 0,
-                    RouteAvailable = fish.Locations.Count > 0,
-                });
-            return new AcquisitionPath
-            {
-                Kind = AcquisitionPathKind.Fish,
-                JobId = 18,
-                JobName = ResolveJobName(18),
-                Capability = capability,
-            };
-        }
+            return ResolveFishPath(fish);
+
+        if (ResolveReductionPath(itemId) is { } reductionPath)
+            return reductionPath;
 
         return new AcquisitionPath
         {
@@ -279,6 +255,122 @@ public static unsafe class AcquisitionPlanningInputBuilder
                 AcquisitionPathKind.Unknown,
                 "No craft, gather, or fish path is known for this dependency."),
         };
+    }
+
+    private static AcquisitionPath ResolveFishPath(Fish fish)
+    {
+        var folkloreRequired = !string.IsNullOrWhiteSpace(fish.Folklore);
+        var folkloreDivision = fish.FolkloreUnlockId == 0
+            ? null
+            : Dalamud.GameData.GetExcelSheet<NotebookDivision>().GetRowOrDefault(fish.FolkloreUnlockId);
+        var folkloreKnown = !folkloreRequired || folkloreDivision is not null;
+        var folkloreUnlocked = !folkloreRequired
+            || folkloreDivision is { } division && Dalamud.UnlockState.IsNotebookDivisionUnlocked(division);
+        var fishLog = GatherBuddy.FishLog;
+        var unlockKnown = fishLog != null;
+        var unlockAvailable = !fish.InLog
+            || unlockKnown && fishLog!.IsUnlocked(fish);
+        var capability = AcquisitionCapabilityResolver.Resolve(
+            AcquisitionPathKind.Fish,
+            new AcquisitionCapabilityEvidence
+            {
+                JobId = 18,
+                RequiredLevel = 1,
+                ActualLevel = ReadJobLevel(18),
+                GearsetKnown = TryHasGearset(18, out var gearsetAvailable),
+                GearsetAvailable = gearsetAvailable,
+                UnlockKnown = unlockKnown,
+                UnlockAvailable = unlockAvailable,
+                FolkloreRequired = folkloreRequired,
+                FolkloreKnown = folkloreKnown,
+                FolkloreUnlocked = folkloreUnlocked,
+                RouteKnown = fish.Locations.Count > 0,
+                RouteAvailable = fish.Locations.Count > 0,
+            });
+        return new AcquisitionPath
+        {
+            Kind = AcquisitionPathKind.Fish,
+            JobId = 18,
+            JobName = ResolveJobName(18),
+            Capability = capability,
+        };
+    }
+
+    private static AcquisitionPath? ResolveReductionPath(uint outputItemId)
+    {
+        var sourceItemIds = AetherialReductionSourceResolver.GetSourceItemIds(outputItemId);
+        if (sourceItemIds.Count == 0)
+            return null;
+
+        var sourcePaths = sourceItemIds
+            .Select(sourceItemId => (SourceItemId: sourceItemId, Path: ResolveDirectGatherPath(sourceItemId)))
+            .Where(candidate => candidate.Path != null)
+            .Select(candidate => (candidate.SourceItemId, Path: candidate.Path!))
+            .ToArray();
+        if (sourcePaths.Length == 0)
+            return new AcquisitionPath
+            {
+                Kind = AcquisitionPathKind.Reduction,
+                AlternativeSourceItemIds = sourceItemIds.ToArray(),
+                Capability = AcquisitionCapability.UnusablePath(
+                    AcquisitionPathKind.Reduction,
+                    "Aetherial reduction sources are known, but none has a gather or fish route."),
+            };
+
+        var selected = sourcePaths
+            .OrderBy(candidate => candidate.Path.Capability.Status switch
+            {
+                AcquisitionCapabilityStatus.Usable => 0,
+                AcquisitionCapabilityStatus.Unknown => 1,
+                _ => 2,
+            })
+            .ThenBy(candidate => candidate.SourceItemId)
+            .First();
+        var sourceCapability = selected.Path.Capability;
+        var reductionUnlocked = QuestManager.IsQuestComplete(67633);
+        var evidence = new AcquisitionCapabilityEvidence
+        {
+            JobId = sourceCapability.JobId,
+            RequiredLevel = sourceCapability.RequiredLevel,
+            ActualLevel = sourceCapability.ActualLevel,
+            GearsetKnown = sourceCapability.GearsetKnown,
+            GearsetAvailable = sourceCapability.GearsetAvailable,
+            UnlockKnown = sourceCapability.UnlockKnown,
+            UnlockAvailable = sourceCapability.UnlockAvailable && reductionUnlocked,
+            FolkloreRequired = sourceCapability.FolkloreRequired,
+            FolkloreKnown = sourceCapability.FolkloreKnown,
+            FolkloreUnlocked = sourceCapability.FolkloreUnlocked,
+            RequiredPerception = sourceCapability.RequiredPerception,
+            ActualPerception = sourceCapability.ActualPerception,
+            PerceptionKnown = sourceCapability.PerceptionKnown,
+            RouteKnown = sourceCapability.RouteKnown,
+            RouteAvailable = sourceCapability.RouteAvailable,
+            AdditionalEvidence = new Dictionary<string, string>
+            {
+                ["reductionOutputItemId"] = outputItemId.ToString(),
+                ["reductionSourceItemIds"] = string.Join(",", sourceItemIds),
+                ["selectedReductionSourceItemId"] = selected.SourceItemId.ToString(),
+                ["aetherialReductionUnlocked"] = reductionUnlocked.ToString(),
+            },
+        };
+        return new AcquisitionPath
+        {
+            Kind = AcquisitionPathKind.Reduction,
+            JobId = selected.Path.JobId,
+            JobName = selected.Path.JobName,
+            SourceItemId = selected.SourceItemId,
+            AlternativeSourceItemIds = sourceItemIds.ToArray(),
+            Capability = AcquisitionCapabilityResolver.Resolve(AcquisitionPathKind.Reduction, evidence),
+        };
+    }
+
+    private static AcquisitionPath? ResolveDirectGatherPath(uint itemId)
+    {
+        if (GatherBuddy.GameData.Gatherables.TryGetValue(itemId, out var gatherable))
+            return ResolveGatherPath(itemId, gatherable, AcquisitionPathKind.Gather);
+        return GatherBuddy.GameData.Fishes.TryGetValue(itemId, out var fish)
+            ? ResolveFishPath(fish)
+            : null;
     }
 
     private static AcquisitionPath ResolveGatherPath(uint itemId, Gatherable gatherable, AcquisitionPathKind kind)
@@ -293,13 +385,28 @@ public static unsafe class AcquisitionPlanningInputBuilder
         var actualLevel = ReadJobLevel(jobId);
         var gearsetAvailable = false;
         var gearsetKnown = jobId != 0 && TryHasGearset(jobId, out gearsetAvailable);
-        var folkloreRequired = gatherable.NodeList.Any(node =>
-            node.FolkloreId != 0 || !string.IsNullOrWhiteSpace(node.Folklore));
-        // Gatherable unlock state is not exposed by a stable client API. A
-        // normal node is safe to treat as unlocked; a gated/folklore node is
-        // explicitly unknown so acquisition can fail closed or choose a
-        // purchase source instead of starting an impossible gather route.
-        var unlockKnown = !folkloreRequired;
+        var requiredPerception = (int)gatherable.GatheringData.PerceptionReq;
+        var actualPerception = 0;
+        var perceptionKnown = requiredPerception == 0
+            || gearsetAvailable && GearsetStatsReader.TryReadGearsetPerception(jobId, out actualPerception);
+        var folkloreNodes = gatherable.NodeList
+            .Where(node => node.FolkloreId != 0 || !string.IsNullOrWhiteSpace(node.Folklore))
+            .ToList();
+        var folkloreRequired = gatherable.NodeList.Count > 0
+            && folkloreNodes.Count == gatherable.NodeList.Count;
+        var folkloreKnown = !folkloreRequired;
+        var folkloreUnlocked = !folkloreRequired;
+        if (folkloreRequired)
+        {
+            var notebookDivisions = Dalamud.GameData.GetExcelSheet<NotebookDivision>();
+            folkloreUnlocked = folkloreNodes.Any(node =>
+                node.FolkloreUnlockId != 0
+             && notebookDivisions.GetRowOrDefault(node.FolkloreUnlockId) is { } division
+             && Dalamud.UnlockState.IsNotebookDivisionUnlocked(division));
+            folkloreKnown = folkloreUnlocked || folkloreNodes.All(node =>
+                node.FolkloreUnlockId != 0
+             && notebookDivisions.GetRowOrDefault(node.FolkloreUnlockId) is not null);
+        }
         var capability = AcquisitionCapabilityResolver.Resolve(
             kind,
             new AcquisitionCapabilityEvidence
@@ -309,11 +416,14 @@ public static unsafe class AcquisitionPlanningInputBuilder
                 ActualLevel = actualLevel,
                 GearsetKnown = gearsetKnown,
                 GearsetAvailable = gearsetAvailable,
-                UnlockKnown = unlockKnown,
-                UnlockAvailable = unlockKnown,
+                UnlockKnown = true,
+                UnlockAvailable = true,
                 FolkloreRequired = folkloreRequired,
-                FolkloreKnown = !folkloreRequired,
-                FolkloreUnlocked = !folkloreRequired,
+                FolkloreKnown = folkloreKnown,
+                FolkloreUnlocked = folkloreUnlocked,
+                RequiredPerception = requiredPerception,
+                ActualPerception = actualPerception,
+                PerceptionKnown = perceptionKnown,
                 RouteKnown = gatherable.Locations.Count > 0,
                 RouteAvailable = gatherable.Locations.Count > 0,
             });
@@ -551,12 +661,7 @@ public static unsafe class AcquisitionPlanningInputBuilder
     }
 
     private static int ReadJobLevel(uint jobId)
-    {
-        if (jobId == 0)
-            return 0;
-        var playerState = PlayerState.Instance();
-        return playerState == null ? 0 : playerState->ClassJobLevels[(int)jobId];
-    }
+        => CraftingJobLevelReader.ReadOrDefault(jobId);
 
     private static long? ReadGilBalance()
     {

@@ -13,7 +13,8 @@ public sealed record DonatelloExecutionOptions(
     bool MinimizeSteps = false,
     uint MaxStellarSteadyHandUses = 0,
     uint MaxMaterialMiracleUses = 0,
-    uint MinimumStepsBeforeMaterialMiracle = 0);
+    uint MinimumStepsBeforeMaterialMiracle = 0,
+    bool MaximizeQualityAtCostOfTime = false);
 
 public record class CraftState
     {

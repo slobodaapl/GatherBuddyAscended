@@ -206,7 +206,7 @@ public sealed class UniversalisService : IDisposable
     {
         if (!el.TryGetProperty(prop, out var value))
             return 0f;
-        if (value.TryGetSingle(out var number))
+        if (value.ValueKind == JsonValueKind.Number && value.TryGetSingle(out var number))
             return number;
         return value.ValueKind == JsonValueKind.String
             && float.TryParse(value.GetString(), NumberStyles.Float, CultureInfo.InvariantCulture, out number)
@@ -219,7 +219,7 @@ public sealed class UniversalisService : IDisposable
         {
             if (!el.TryGetProperty(prop, out var value))
                 continue;
-            if (value.TryGetInt32(out var integer))
+            if (value.ValueKind == JsonValueKind.Number && value.TryGetInt32(out var integer))
                 return integer;
             if (value.ValueKind == JsonValueKind.String
                 && int.TryParse(value.GetString(), NumberStyles.Integer, CultureInfo.InvariantCulture, out integer))
@@ -234,7 +234,7 @@ public sealed class UniversalisService : IDisposable
         {
             if (!el.TryGetProperty(prop, out var value))
                 continue;
-            if (value.TryGetInt64(out var integer))
+            if (value.ValueKind == JsonValueKind.Number && value.TryGetInt64(out var integer))
                 return integer;
             if (value.ValueKind == JsonValueKind.String
                 && long.TryParse(value.GetString(), NumberStyles.Integer, CultureInfo.InvariantCulture, out integer))
@@ -247,7 +247,7 @@ public sealed class UniversalisService : IDisposable
     {
         if (!el.TryGetProperty(prop, out var value))
             return 0;
-        if (value.TryGetUInt64(out var integer))
+        if (value.ValueKind == JsonValueKind.Number && value.TryGetUInt64(out var integer))
             return integer;
         return value.ValueKind == JsonValueKind.String
             && ulong.TryParse(value.GetString(), NumberStyles.Integer, CultureInfo.InvariantCulture, out integer)

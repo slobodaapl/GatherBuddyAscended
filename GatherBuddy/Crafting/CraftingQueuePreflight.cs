@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using FFXIVClientStructs.FFXIV.Client.Game.UI;
 using FFXIVClientStructs.FFXIV.Client.UI.Misc;
 using Lumina.Excel.Sheets;
 
@@ -70,8 +69,7 @@ internal static unsafe class CraftingQueuePreflight
             issues.Add($"No saved gearset for {GetJobName(jobId)}, required by {DescribeRecipe(dependency.Item, dependency.Recipe)}.");
         }
 
-        var playerState = PlayerState.Instance();
-        if (playerState == null)
+        if (!requiredJobs.All(jobId => CraftingJobLevelReader.TryRead(jobId, out _)))
         {
             failure = "Cannot start crafting: player job levels are unavailable; retry when the game state is ready.";
             return false;
@@ -80,13 +78,19 @@ internal static unsafe class CraftingQueuePreflight
         foreach (var entry in recipes)
         {
             var jobId = entry.Recipe.CraftType.RowId + 8;
-            var requiredLevel = entry.Recipe.RecipeLevelTable.Value.ClassJobLevel;
-            var actualLevel = playerState->ClassJobLevels[(int)jobId];
-            if (actualLevel >= requiredLevel)
-                continue;
-            var issue = $"{GetJobName(jobId)} is level {actualLevel}, but {DescribeRecipe(entry.Item, entry.Recipe)} requires level {requiredLevel}.";
-            if (!issues.Contains(issue))
-                issues.Add(issue);
+            var requiredLevel = entry.Recipe.MinimumJobLevel();
+            CraftingJobLevelReader.TryRead(jobId, out var actualLevel);
+            if (actualLevel < requiredLevel)
+            {
+                var issue = $"{GetJobName(jobId)} is level {actualLevel}, but {DescribeRecipe(entry.Item, entry.Recipe)} requires level {requiredLevel}.";
+                if (!issues.Contains(issue))
+                    issues.Add(issue);
+            }
+
+            // Cosmic mission recipes are supplied by the active mission and do not
+            // appear in the player's persistent recipe-unlock book.
+            if (entry.Recipe.Number != 0 && !Dalamud.UnlockState.IsRecipeUnlocked(entry.Recipe))
+                issues.Add($"The recipe for {DescribeRecipe(entry.Item, entry.Recipe)} is not unlocked.");
         }
 
         if (issues.Count == 0)

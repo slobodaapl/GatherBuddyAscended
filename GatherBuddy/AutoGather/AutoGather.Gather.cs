@@ -153,8 +153,13 @@ namespace GatherBuddy.AutoGather
             {
                 // Since it's possible that we are not gathering the top item in the list,
                 // we need to remember what we are going to gather inside MasterpieceAddon
-                CurrentCollectableRotation = new CollectableRotation(MatchConfigPreset(slot.Item), slot.Item,
-                    _activeItemList.FirstOrDefault(x => x.Item == slot.Item).Quantity, slot.GatherChance);
+                var target = _activeItemList.FirstOrDefault(x => x.Item == slot.Item);
+                CurrentCollectableRotation = new CollectableRotation(
+                    MatchConfigPreset(slot.Item),
+                    slot.Item,
+                    target.Quantity,
+                    slot.GatherChance,
+                    target.CompletionItemId);
             }
 
             EnqueueActionWithDelay(slot.Gather);
@@ -172,7 +177,7 @@ namespace GatherBuddy.AutoGather
         /// </summary>
         /// <returns>UseSkills: True if the selected item is in the gathering list; false if we gather a collectable or some unneeded junk
         /// Slot: ItemSlot of item to gather</returns>
-        private (bool UseSkills, ItemSlot Slot) GetItemSlotToGather(GatherTarget gatherTarget)
+        private (bool UseSkills, ItemSlot Slot) GetItemSlotToGather(GatherTarget gatherTarget, bool selectedTargetOnly = false)
         {
             System.Diagnostics.Debug.Assert(gatherTarget == default || gatherTarget.Gatherable != null && gatherTarget.Node != null);
 
@@ -183,7 +188,7 @@ namespace GatherBuddy.AutoGather
                 .Where(CheckItemOvercap)
                 .ToList();
 
-            if (GatherBuddy.Config.AutoGatherConfig.AlwaysGatherMaps && available.Any(i => i.Item.IsTreasureMap) && DiscipleOfLand.NextTreasureMapAllowance < GatherBuddy.Time.ServerTime.DateTime)
+            if (!selectedTargetOnly && GatherBuddy.Config.AutoGatherConfig.AlwaysGatherMaps && available.Any(i => i.Item.IsTreasureMap) && DiscipleOfLand.NextTreasureMapAllowance < GatherBuddy.Time.ServerTime.DateTime)
             {
                 return (false, available.First(i => i.Item.IsTreasureMap));
             }
@@ -193,18 +198,21 @@ namespace GatherBuddy.AutoGather
                 : null;
 
             //Gather crystals when using The Giving Land
-            if (HasGivingLandBuff && (target == null || !target.Item.IsCrystal))
+            if (!selectedTargetOnly && HasGivingLandBuff && (target == null || !target.Item.IsCrystal))
             {
                 var crystal = GetAnyCrystalInNode();
                 if (crystal != null)
                     return (true, crystal);
             }
 
-            if (target != null && target.Item.GetTotalCount() < gatherTarget.Quantity)
+            if (target != null && gatherTarget.NeedsGathering)
             {
                 //The target item is found in the node, would not overcap and we need to gather more of it
                 return (!target.IsCollectable, target);
             }
+
+            if (selectedTargetOnly)
+                throw new NoGatherableItemsInNodeException();
 
             //Items in the gathering list
             var gatherList = ItemsToGather
@@ -253,8 +261,9 @@ namespace GatherBuddy.AutoGather
                 }
             }
 
-            //Check if we should and can abandon the node
-            if (GatherBuddy.Config.AutoGatherConfig.AbandonNodes)
+            // Only abandon nodes selected by AutoGather. A default target means the user opened a node
+            // manually while no list item was available.
+            if (gatherTarget != default && GatherBuddy.Config.AutoGatherConfig.AbandonNodes)
                 throw new NoGatherableItemsInNodeException();
 
             if (target != null)

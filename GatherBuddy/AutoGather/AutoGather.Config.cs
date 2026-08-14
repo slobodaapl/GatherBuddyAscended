@@ -36,6 +36,7 @@ namespace GatherBuddy.AutoGather
         public bool GoHomeWhenDone { get; set; } = true;
         public bool ShowAutoHomeChatWarning { get; set; } = true;
         public bool UseSkillsForFallbackItems { get; set; } = false;
+        public bool AssistManualGathering { get; set; } = true;
         public bool AbandonNodes { get; set; } = false;
         public bool AlwaysExhaustTimedCollectableNodes { get; set; } = true;
         public uint ExecutionDelay { get; set; } = 0;

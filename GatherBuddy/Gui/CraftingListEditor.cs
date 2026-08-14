@@ -87,8 +87,12 @@ public class CraftingListEditor
     private bool _pendingMaterialsRefreshFromInventory;
     private AcquisitionPlanningResult? _acquisitionPlanningResult;
     private MarketplaceBuyListDefinition? _managedMarketplaceProjection;
+    private IReadOnlyDictionary<uint, string> _marketplacePurchaseReasons = new Dictionary<uint, string>();
     private DateTime _lastAcquisitionRefresh = DateTime.MinValue;
+    private bool _acquisitionEstimateDirty = true;
+    private bool _acquisitionEstimateLoading;
     private string _acquisitionStatus = string.Empty;
+    private static readonly TimeSpan AcquisitionEstimateTtl = TimeSpan.FromMinutes(15);
     private const double InventoryRefreshIntervalSeconds = 0.5;
     private const double RetainerSnapshotRetryIntervalSeconds = 1.0;
     private const double InventoryChangeDebounceSeconds = 0.2;
@@ -201,6 +205,7 @@ public class CraftingListEditor
     {
         Volatile.Write(ref _queueCache, null);
         Interlocked.Increment(ref _queueGenerationVersion);
+        _acquisitionEstimateDirty = true;
     }
 
     private void PublishMaterialCache(MaterialCacheSnapshot snapshot)
@@ -248,6 +253,7 @@ public class CraftingListEditor
         _cachedInventorySplitCounts.Clear();
         _inventoryRefreshTimes.Clear();
         InvalidateRetainerSnapshot();
+        _acquisitionEstimateDirty = true;
     }
 
     internal void RefreshFromExternalListChange()
@@ -264,6 +270,7 @@ public class CraftingListEditor
             _editingDescription = _list.Description;
         _acquisitionPlanningResult = null;
         _managedMarketplaceProjection = null;
+        _marketplacePurchaseReasons = new Dictionary<uint, string>();
         _acquisitionStatus = string.Empty;
     }
 
@@ -304,7 +311,7 @@ public class CraftingListEditor
         var availableWidth = ImGui.GetContentRegionAvail().X;
         var availableHeight = ImGui.GetContentRegionAvail().Y;
         
-        var leftPaneWidth = availableWidth * 0.4f;
+        var leftPaneWidth = Math.Min(availableWidth * 0.4f, VulcanUiScaling.Scaled(640f));
         var rightPaneWidth = availableWidth - leftPaneWidth - VulcanUiScaling.Scaled(8f);
         
         using (ImRaii.PushColor(ImGuiCol.ChildBg, new Vector4(0.08f, 0.08f, 0.10f, 1.00f)))
@@ -557,13 +564,11 @@ public class CraftingListEditor
         }
 
 
-        var lineH   = ImGui.GetTextLineHeightWithSpacing();
-        var spacing = ImGui.GetStyle().ItemSpacing.Y;
-        var frameH  = ImGui.GetFrameHeightWithSpacing();
-        var footerRows = 12 + (_list.QuickSynthAll ? 2 : 0) + (_list.SkipIfEnough ? 1 : 0)
-            + (_list.AutoPurchaseBlockedDependencies ? 8 : 0);
-        var bottomH = frameH * footerRows + spacing * 2;
-        var queueH  = Math.Max(ImGui.GetContentRegionAvail().Y - bottomH, lineH * 3);
+        var lineH = ImGui.GetTextLineHeightWithSpacing();
+        var queueH = Math.Clamp(
+            ImGui.GetContentRegionAvail().Y * 0.35f,
+            lineH * 3,
+            VulcanUiScaling.Scaled(300f));
 
         ImGui.BeginChild("QueueList", new Vector2(-1, queueH), false);
 
@@ -594,8 +599,7 @@ public class CraftingListEditor
 
         ImGui.EndChild();
 
-        ImGui.BeginChild("QueueFooter", new Vector2(-1, 0), false,
-            ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse);
+        ImGui.BeginChild("QueueFooter", new Vector2(-1, 0), false);
 
         ImGui.Separator();
         ImGui.Spacing();
@@ -766,12 +770,6 @@ public class CraftingListEditor
                 SaveAcquisitionSettings();
             }
 
-            if (ImGui.TreeNode("Estimates##acquisitionEstimates"))
-            {
-                DrawAcquisitionEstimates();
-                ImGui.TreePop();
-            }
-
             var hasMaximumGilSpend = _list.MaximumGilSpend.HasValue;
             var automaticEstimate = _acquisitionPlanningResult?.PreferredEstimate?.TotalGil
                 ?? _acquisitionPlanningResult?.MinimumGilEstimate?.TotalGil
@@ -805,9 +803,26 @@ public class CraftingListEditor
                     ImGui.TextColored(ImGuiColors.DalamudGrey3, $"Minimum estimate: {minimumEstimate:N0} Gil");
             }
 
+            if (ImGui.TreeNode("Estimates##acquisitionEstimates"))
+            {
+                DrawAcquisitionEstimates();
+                ImGui.TreePop();
+            }
+
             ImGui.Unindent();
         }
-
+        var buttonHeight = VulcanUiScaling.Scaled(22f);
+        var acquisitionStatusText = string.IsNullOrWhiteSpace(_acquisitionStatus)
+            ? string.Empty
+            : $"Preview: {_acquisitionStatus}";
+        var acquisitionStatusHeight = acquisitionStatusText.Length == 0
+            ? 0f
+            : ImGui.CalcTextSize(acquisitionStatusText, false, ImGui.GetContentRegionAvail().X).Y;
+        var footerButtonHeight = ImGui.GetStyle().ItemSpacing.Y + buttonHeight * 2f;
+        if (acquisitionStatusText.Length > 0)
+            footerButtonHeight += ImGui.GetStyle().ItemSpacing.Y + acquisitionStatusHeight;
+        var buttonStartY = ImGui.GetWindowHeight() - ImGui.GetStyle().WindowPadding.Y - footerButtonHeight;
+        ImGui.SetCursorPosY(Math.Max(ImGui.GetCursorPosY(), buttonStartY));
 
         ImGui.Spacing();
 
@@ -824,7 +839,7 @@ public class CraftingListEditor
             else if (warnings > 0)
                 ImGui.PushStyleColor(ImGuiCol.Button, new Vector4(0.55f, 0.40f, 0.05f, 1f));
 
-            if (ImGui.Button("Start Gather/Crafting", VulcanUiScaling.Scaled(-1f, 22f)))
+            if (ImGui.Button("Start Gather/Crafting", new Vector2(-1f, buttonHeight)))
             {
                 if (hardFails > 0)
                     ImGui.OpenPopup("ConfirmFailedMacros##startCraft");
@@ -832,8 +847,12 @@ public class CraftingListEditor
                     OnStartCrafting?.Invoke(_list);
             }
 
-            if (!string.IsNullOrWhiteSpace(_acquisitionStatus))
-                ImGui.TextColored(ImGuiColors.DalamudOrange, $"Preview: {_acquisitionStatus}");
+            if (acquisitionStatusText.Length > 0)
+            {
+                ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.DalamudOrange);
+                ImGui.TextWrapped(acquisitionStatusText);
+                ImGui.PopStyleColor();
+            }
 
             if (hardFails > 0 || warnings > 0)
             {
@@ -863,18 +882,18 @@ public class CraftingListEditor
 
         var hSpacing = ImGui.GetStyle().ItemSpacing.X;
         var thirdW = (ImGui.GetContentRegionAvail().X - hSpacing * 2f) / 3f;
-        if (ImGui.Button("Generate Gather List##gatherList", new Vector2(thirdW, VulcanUiScaling.Scaled(22f))))
+        if (ImGui.Button("Generate Gather List##gatherList", new Vector2(thirdW, buttonHeight)))
         {
             var materials = new Dictionary<uint, int>(GetCachedMaterials());
             CraftingGatherBridge.CreatePersistentGatherList($"{_list.Name}...Auto-Generated", materials);
         }
         ImGui.SameLine();
         var matsBtnLabel = GatherBuddy.CraftingMaterialsWindow?.IsOpen == true ? "Hide Materials" : "View Materials";
-        if (ImGui.Button($"{matsBtnLabel}##viewMats", new Vector2(thirdW, VulcanUiScaling.Scaled(22f))) && GatherBuddy.CraftingMaterialsWindow != null)
+        if (ImGui.Button($"{matsBtnLabel}##viewMats", new Vector2(thirdW, buttonHeight)) && GatherBuddy.CraftingMaterialsWindow != null)
             GatherBuddy.CraftingMaterialsWindow.IsOpen = !GatherBuddy.CraftingMaterialsWindow.IsOpen;
         ImGui.SameLine();
         var treeBtnLabel = GatherBuddy.CraftingTreeWindow?.IsOpen == true ? "Hide Tree" : "View Tree";
-        if (ImGui.Button($"{treeBtnLabel}##viewTree", VulcanUiScaling.Scaled(-1f, 22f)) && GatherBuddy.CraftingTreeWindow != null)
+        if (ImGui.Button($"{treeBtnLabel}##viewTree", new Vector2(-1f, buttonHeight)) && GatherBuddy.CraftingTreeWindow != null)
         {
             GatherBuddy.CraftingTreeWindow.SetEditor(this);
             GatherBuddy.CraftingTreeWindow.IsOpen = !GatherBuddy.CraftingTreeWindow.IsOpen;
@@ -884,7 +903,10 @@ public class CraftingListEditor
     }
 
     private void SaveAcquisitionSettings()
-        => GatherBuddy.CraftingListManager.SaveList(_list);
+    {
+        _acquisitionEstimateDirty = true;
+        GatherBuddy.CraftingListManager.SaveList(_list);
+    }
 
     private void RefreshAcquisitionEstimate()
     {
@@ -892,19 +914,29 @@ public class CraftingListEditor
         {
             _acquisitionPlanningResult = null;
             _managedMarketplaceProjection = null;
+            _marketplacePurchaseReasons = new Dictionary<uint, string>();
             _acquisitionStatus = string.Empty;
+            _acquisitionEstimateLoading = false;
             return;
         }
 
-        if ((DateTime.UtcNow - _lastAcquisitionRefresh).TotalSeconds < 1)
+        var now = DateTime.UtcNow;
+        if (!_acquisitionEstimateDirty
+            && !_acquisitionEstimateLoading
+            && now - _lastAcquisitionRefresh < AcquisitionEstimateTtl)
             return;
-        _lastAcquisitionRefresh = DateTime.UtcNow;
+        if ((now - _lastAcquisitionRefresh).TotalSeconds < 1)
+            return;
+        _lastAcquisitionRefresh = now;
 
         try
         {
             var evaluation = CraftingAcquisitionService.Evaluate(CraftingExecutionPlan.Create(_list));
+            _acquisitionEstimateDirty = false;
+            _acquisitionEstimateLoading = evaluation.IsLoading;
             _acquisitionStatus = evaluation.Status;
             _acquisitionPlanningResult = evaluation.Planning;
+            _marketplacePurchaseReasons = BuildMarketplacePurchaseReasons(evaluation);
             _managedMarketplaceProjection = evaluation.Planning == null
                 ? null
                 : GatherBuddy.MarketplaceBuyListManager?.CreateManagedList(
@@ -920,9 +952,12 @@ public class CraftingListEditor
         }
         catch (Exception ex)
         {
+            _acquisitionEstimateDirty = false;
+            _acquisitionEstimateLoading = false;
             _acquisitionStatus = $"Acquisition estimate unavailable: {ex.Message}";
             _acquisitionPlanningResult = null;
             _managedMarketplaceProjection = null;
+            _marketplacePurchaseReasons = new Dictionary<uint, string>();
             GatherBuddy.Log.Warning($"[CraftingListEditor] Acquisition estimate failed: {ex.Message}");
         }
     }
@@ -949,6 +984,11 @@ public class CraftingListEditor
             });
             foreach (var blocker in result.Blockers)
             {
+                if (blocker.ItemId == 0 && string.IsNullOrWhiteSpace(blocker.ItemName))
+                {
+                    ImGui.TextWrapped(blocker.Reason);
+                    continue;
+                }
                 var itemLabel = string.IsNullOrWhiteSpace(blocker.ItemName)
                     ? $"Item {blocker.ItemId}"
                     : blocker.ItemName;
@@ -961,11 +1001,15 @@ public class CraftingListEditor
         {
             var maximum = _list.MaximumGilSpend;
             var exceedsMaximum = maximum.HasValue && result.PreferredEstimate.TotalGil > maximum.Value;
-            ImGui.TextColored(
-                exceedsMaximum ? ImGuiColors.DalamudOrange : ImGuiColors.DalamudYellow,
-                exceedsMaximum
-                    ? $"Preferred estimate: {result.PreferredEstimate.TotalGil:N0} Gil (over max {maximum.GetValueOrDefault():N0}; fallback will relax preferences)"
-                    : $"Preferred estimate: {result.PreferredEstimate.TotalGil:N0} Gil");
+            var preferenceExplanation = "influenced by Prefer market, Prefer HQ, and Prefer vendors";
+            var preferredEstimateText = exceedsMaximum
+                ? $"Preferred estimate: {result.PreferredEstimate.TotalGil:N0} Gil (over max {maximum.GetValueOrDefault():N0}; fallback will relax preferences; {preferenceExplanation})"
+                : $"Preferred estimate: {result.PreferredEstimate.TotalGil:N0} Gil ({preferenceExplanation})";
+            ImGui.PushStyleColor(
+                ImGuiCol.Text,
+                exceedsMaximum ? ImGuiColors.DalamudOrange : ImGuiColors.DalamudYellow);
+            ImGui.TextWrapped(preferredEstimateText);
+            ImGui.PopStyleColor();
         }
         if (result.MinimumGilEstimate != null)
             ImGui.TextColored(ImGuiColors.DalamudGrey3, $"Minimum-Gil estimate: {result.MinimumGilEstimate.TotalGil:N0} Gil");
@@ -993,7 +1037,8 @@ public class CraftingListEditor
                 });
                 ImGui.SameLine();
             }
-            ImGui.Text($"{name}: {currency.Required:N0}/{(currency.Available == long.MaxValue ? "?" : currency.Available.ToString("N0"))}");
+            var available = currency.Available == long.MaxValue ? "?" : currency.Available.ToString("N0");
+            ImGui.Text($"{name}: {available} / {currency.Required:N0}");
         }
 
         DrawManagedMarketplaceProjection();
@@ -1006,9 +1051,52 @@ public class CraftingListEditor
             return;
 
         ImGui.Separator();
-        ImGui.TextColored(ImGuiColors.DalamudGrey3, "Managed marketplace targets (read-only)");
+        ImGui.TextColored(ImGuiColors.DalamudGrey3, "Items to purchase from the Marketboard");
         foreach (var entry in projection.Entries)
-            ImGui.Text($"{entry.ItemName}: {entry.TargetQuantity:N0}");
+        {
+            var reason = _marketplacePurchaseReasons.GetValueOrDefault(entry.ItemId);
+            ImGui.Text(string.IsNullOrWhiteSpace(reason)
+                ? $"{entry.ItemName} ×{entry.TargetQuantity:N0}"
+                : $"{entry.ItemName} ×{entry.TargetQuantity:N0} ({reason})");
+        }
+    }
+
+    private static IReadOnlyDictionary<uint, string> BuildMarketplacePurchaseReasons(
+        CraftingAcquisitionService.Evaluation evaluation)
+    {
+        var marketItemIds = evaluation.Planning?.SelectedPlan?.Transactions
+            .Where(transaction => transaction.SourceKind == AcquisitionSourceKind.Market)
+            .Select(transaction => transaction.ItemId)
+            .Distinct()
+            .ToArray() ?? [];
+        if (marketItemIds.Length == 0)
+            return new Dictionary<uint, string>();
+
+        return marketItemIds.ToDictionary(
+            itemId => itemId,
+            itemId =>
+            {
+                var selectedPath = evaluation.Snapshot.Input.Dependencies
+                    .FirstOrDefault(dependency => dependency.ItemId == itemId)
+                    ?.SelectedPath;
+                if (selectedPath is
+                    {
+                        Kind: AcquisitionPathKind.Gather or AcquisitionPathKind.Fish or AcquisitionPathKind.Reduction,
+                        Capability: { Status: not AcquisitionCapabilityStatus.Usable } capability,
+                    })
+                    return capability.Reason.Contains("folklore", StringComparison.OrdinalIgnoreCase)
+                        ? "folklore required"
+                        : capability.Reason;
+
+                var vendorOffers = evaluation.Snapshot.Input.VendorOffers
+                    .Where(offer => offer.EffectiveOutputs.Any(output => output.ItemId == itemId && output.Quantity > 0))
+                    .ToArray();
+                if (vendorOffers.Length == 0)
+                    return "no vendor source";
+                return vendorOffers.Any(offer => offer.IsAvailable)
+                    ? "market selected by estimate"
+                    : "vendor unavailable";
+            });
     }
 
     private static uint ResolveGilIconId()
@@ -1522,7 +1610,8 @@ public class CraftingListEditor
 
         var crafterIcon     = CraftingRowIcons.GetCrafterIcon(row.Recipe);
         var innerSpacing    = ImGui.GetStyle().ItemInnerSpacing.X;
-        var selectableWidth = Math.Max(50f, ImGui.GetContentRegionAvail().X - 16f - innerSpacing);
+        var crafterIconSize = VulcanUiScaling.Scaled(16f);
+        var selectableWidth = Math.Max(50f, ImGui.GetContentRegionAvail().X - crafterIconSize - innerSpacing);
 
         ImGui.PushStyleColor(ImGuiCol.Text, textColor);
         var isSelected = _selectedQueueIndex == row.QueueIndex;
@@ -1537,7 +1626,7 @@ public class CraftingListEditor
         if (!isPopupOpen)
         {
             ImGui.SameLine(0, innerSpacing);
-            CraftingRowIcons.DrawIconsRightAligned(new[] { crafterIcon });
+            CraftingRowIcons.DrawIconsRightAligned(new[] { crafterIcon }, crafterIconSize);
             return;
         }
 
@@ -1747,13 +1836,13 @@ public class CraftingListEditor
 
         var isSelected = _selectedRecipeIndices.Contains(row.ListIndex);
         const float qtyTextWidth = 50f;
-        const float sourceIconSize = 16f;
         var innerSpacing = ImGui.GetStyle().ItemInnerSpacing.X;
         var frameHeight = ImGui.GetFrameHeight();
+        var crafterIconSize = frameHeight;
         var rowStartY = ImGui.GetCursorPosY();
         var qtyTotalWidth = qtyTextWidth + 2 * (frameHeight + innerSpacing);
         var iconBtnSize = new Vector2(frameHeight, frameHeight);
-        var selectableWidth = Math.Max(50f, ImGui.GetContentRegionAvail().X - qtyTotalWidth - 2 * frameHeight - 3 * innerSpacing - sourceIconSize - innerSpacing);
+        var selectableWidth = Math.Max(50f, ImGui.GetContentRegionAvail().X - qtyTotalWidth - 3 * frameHeight - 4 * innerSpacing - crafterIconSize - innerSpacing);
         var crafterIcon = CraftingRowIcons.GetCrafterIcon(row.Recipe);
         ImGui.PushStyleColor(ImGuiCol.Text, row.TextColor);
         using var selectableAlign = ImRaii.PushStyle(ImGuiStyleVar.SelectableTextAlign, new Vector2(0f, 0.5f));
@@ -1786,8 +1875,8 @@ public class CraftingListEditor
         }
 
         ImGui.SameLine(0, innerSpacing);
-        ImGui.SetCursorPosY(rowStartY + Math.Max(0f, (frameHeight - sourceIconSize) * 0.5f));
-        CraftingRowIcons.DrawIconsRightAligned(new[] { crafterIcon }, sourceIconSize);
+        ImGui.SetCursorPosY(rowStartY);
+        CraftingRowIcons.DrawIconsRightAligned(new[] { crafterIcon }, crafterIconSize);
 
         ImGui.SameLine(0, innerSpacing);
         ImGui.SetCursorPosY(rowStartY);
@@ -1809,6 +1898,17 @@ public class CraftingListEditor
         }
         if (ImGui.IsItemHovered())
             ImGui.SetTooltip("Click +/- to adjust quantity by 1.\nHold Ctrl: ±10\nHold Shift: ±100");
+
+        ImGui.SameLine(0, innerSpacing);
+        if (ImGuiUtil.DrawDisabledButton(
+                FontAwesomeIcon.Cog.ToIconString() + $"##craft_settings_{row.ListIndex}",
+                iconBtnSize,
+                "Craft settings for this recipe.",
+                false,
+                true))
+        {
+            _craftSettingsPopup.OpenForListItem(item, _list, row.ItemName);
+        }
 
         ImGui.SameLine(0, innerSpacing);
         var skipIcon = item.Options.Skipping ? FontAwesomeIcon.Check : FontAwesomeIcon.Ban;

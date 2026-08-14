@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using GatherBuddy.Plugin;
+using Lumina.Excel.Sheets;
 
 namespace GatherBuddy.Crafting;
 
@@ -28,6 +29,9 @@ public sealed class CraftingExecutionPlan
     public long? MaximumGilSpend { get; }
     public bool ReturnToHomeWorldBeforeCrafting { get; }
     public bool AllowMaterialAcquisition => !_directCraft;
+    public bool UsesMissionProvidedMaterials => _directCraft
+        && OriginalRecipes.Count > 0
+        && OriginalRecipes.All(item => RecipeManager.GetRecipe(item.RecipeId) is { Number: 0 });
     public CraftingListPlan ResolvedPlan { get; private set; } = null!;
 
     internal List<CraftingListItem> Queue { get; private set; } = [];
@@ -110,6 +114,17 @@ public sealed class CraftingExecutionPlan
         => ApplyResolvedPlan(_directCraft
             ? CraftingListPlanner.BuildDirect(_planningSnapshot)
             : _planningSnapshot.CreatePlan(false, _acquiredAvailability));
+
+    internal CraftingListPlan CreateAcquisitionBoundaryPlan(Func<Recipe, bool> canCraftPrecraft)
+    {
+        ArgumentNullException.ThrowIfNull(canCraftPrecraft);
+        return CraftingListPlanner.Build(
+            _planningSnapshot,
+            new CraftingListPlannerOptions(
+                UseRetainerCraftableAvailability: _useRetainerCraftableAvailability,
+                AcquiredAvailability: _acquiredAvailability,
+                CanCraftPrecraft: canCraftPrecraft));
+    }
 
     /// <summary>
     /// Registers verified quantities purchased for blocked precraft

@@ -155,20 +155,17 @@ public static class VendorShopResolver
 
             GatherBuddy.Log.Debug($"[VendorShopResolver] AllaganTools DataShare: {(hasCompleteDataShare ? "ready" : hasAnyDataShare ? "partial" : "not available")} ({dataShareAvailability})");
 
-            if (!hasCompleteDataShare)
-            {
-                var (lGil, lSpecial, lGc, lInclusion) = BuildNpcShopMapsFromLumina();
-                gilMap       = UseFallbackIfUnavailable(gilMap, lGil);
-                specialMap   = UseFallbackIfUnavailable(specialMap, lSpecial);
-                gcMap        = UseFallbackIfUnavailable(gcMap, lGc);
-                inclusionMap = UseFallbackIfUnavailable(inclusionMap, lInclusion);
-                GatherBuddy.Log.Debug($"[VendorShopResolver] Using Lumina fallback for missing shop maps ({dataShareAvailability})");
-            }
+            var (luminaGilMap, luminaSpecialMap, luminaGcMap, luminaInclusionMap) = BuildNpcShopMapsFromLumina();
+            gilMap       = MergeNpcShopMaps(gilMap, luminaGilMap);
+            specialMap   = MergeNpcShopMaps(specialMap, luminaSpecialMap);
+            gcMap        = MergeNpcShopMaps(gcMap, luminaGcMap);
+            inclusionMap = MergeNpcShopMaps(inclusionMap, luminaInclusionMap);
+            GatherBuddy.Log.Debug($"[VendorShopResolver] Merged current Lumina shop routes with AllaganTools DataShare ({dataShareAvailability})");
 
-            gilMap       ??= [];
-            specialMap   ??= [];
-            gcMap        ??= [];
-            inclusionMap ??= [];
+            foreach (var (npcId, shopId) in ExtraSpecialShops)
+                AddToMap(specialMap, shopId, npcId);
+            foreach (var (npcId, shopId) in ExtraGilShops)
+                AddToMap(gilMap, shopId, npcId);
 
             var directSpecialMap = CloneNpcMap(specialMap);
             var inclusionRoutes  = BuildSpecialShopInclusionRoutes();
@@ -267,10 +264,18 @@ public static class VendorShopResolver
         Dictionary<uint, HashSet<uint>>? inclusionMap)
         => $"gil={(HasShopNpcMapData(gilMap) ? "ready" : "missing")}, special={(HasShopNpcMapData(specialMap) ? "ready" : "missing")}, gc={(HasShopNpcMapData(gcMap) ? "ready" : "missing")}, inclusion={(HasShopNpcMapData(inclusionMap) ? "ready" : "missing")}";
 
-    private static Dictionary<uint, HashSet<uint>> UseFallbackIfUnavailable(
-        Dictionary<uint, HashSet<uint>>? preferredMap,
-        Dictionary<uint, HashSet<uint>> fallbackMap)
-        => HasShopNpcMapData(preferredMap) ? preferredMap! : fallbackMap;
+    private static Dictionary<uint, HashSet<uint>> MergeNpcShopMaps(
+        Dictionary<uint, HashSet<uint>>? dataShareMap,
+        Dictionary<uint, HashSet<uint>> luminaMap)
+    {
+        var result = dataShareMap == null
+            ? new Dictionary<uint, HashSet<uint>>()
+            : CloneNpcMap(dataShareMap);
+        foreach (var (shopId, npcIds) in luminaMap)
+            foreach (var npcId in npcIds)
+                AddToMap(result, shopId, npcId);
+        return result;
+    }
 
     private static bool HasShopNpcMapData(Dictionary<uint, HashSet<uint>>? map)
         => map is { Count: > 0 };
@@ -880,12 +885,10 @@ public static class VendorShopResolver
 
             foreach (var entry in shop.Item)
             {
-                var receiveRows = entry.ReceiveItems
-                    .Where(received => received.Item.RowId != 0 || received.ReceiveCount != 0)
-                    .ToList();
-                if (receiveRows.Count == 0
-                 || receiveRows.Any(received => received.Item.RowId == 0 || received.ReceiveCount == 0)
-                 || receiveRows.Any(received => !itemSheet.TryGetRow(received.Item.RowId, out _)))
+                if (!TryNormalizeSpecialShopReceivedItems(
+                        entry.ReceiveItems.Select(received => (received.Item.RowId, (uint)received.ReceiveCount)),
+                        out var receivedOutputs)
+                 || receivedOutputs.Any(received => !itemSheet.TryGetRow(received.ItemId, out _)))
                     continue;
 
                 var requiredQuestIds = new[] { shop.Quest.RowId, entry.Quest.RowId }
@@ -913,9 +916,9 @@ public static class VendorShopResolver
                     alliedSocietyByCurrency);
                 var addedListing = false;
 
-                foreach (var received in receiveRows)
+                foreach (var received in receivedOutputs)
                 {
-                    var itemId = received.Item.RowId;
+                    var itemId = received.ItemId;
                     if (!itemSheet.TryGetRow(itemId, out var item))
                         continue;
                     var routedNpcs = npcs
@@ -926,15 +929,6 @@ public static class VendorShopResolver
                             AlliedRequirementKnown = npc.AlliedRequirementKnown || alliedSocietyId != 0,
                         })
                         .ToList();
-                    var receivedOutputs = receiveRows
-                        .GroupBy(output => output.Item.RowId)
-                        .Select(output => new VendorReceivedItem(
-                            output.Key,
-                            checked((uint)output.Aggregate(0UL, (total, received) => checked(total + received.ReceiveCount)))))
-                        .ToArray();
-                    if (receivedOutputs.Length == 0)
-                        continue;
-
                     entries.Add(new VendorShopEntry(
                         itemId, item.Name.ExtractText(), (ushort)item.Icon,
                         selectedCost.Amount, selectedCost.CurrencyItemId, selectedCost.CurrencyName, routedNpcs,
@@ -957,6 +951,28 @@ public static class VendorShopResolver
             return cmp != 0 ? cmp : string.Compare(a.ItemName, b.ItemName, StringComparison.OrdinalIgnoreCase);
         });
         return deduped;
+    }
+
+    internal static bool TryNormalizeSpecialShopReceivedItems(
+        IEnumerable<(uint ItemId, uint Quantity)> fixedSlots,
+        out VendorReceivedItem[] receivedItems)
+    {
+        var activeSlots = fixedSlots
+            .Where(slot => slot.ItemId != 0)
+            .ToArray();
+        if (activeSlots.Length == 0 || activeSlots.Any(slot => slot.Quantity == 0))
+        {
+            receivedItems = [];
+            return false;
+        }
+
+        receivedItems = activeSlots
+            .GroupBy(slot => slot.ItemId)
+            .Select(group => new VendorReceivedItem(
+                group.Key,
+                checked((uint)group.Aggregate(0UL, (total, slot) => checked(total + slot.Quantity)))))
+            .ToArray();
+        return receivedItems.Length > 0;
     }
 
     public static Dictionary<uint, uint> BuildUniqueAlliedSocietyCurrencyMap(

@@ -107,6 +107,7 @@ public class RecipeCraftSettingsPopup
                 UseAllNQ = existing.UseAllNQ,
                 SelectedMacroId = existing.SelectedMacroId,
                 SolverOverride = existing.SolverOverride,
+                MaximizeQualityAtCostOfTime = existing.MaximizeQualityAtCostOfTime,
             };
         }
         else
@@ -150,6 +151,7 @@ public class RecipeCraftSettingsPopup
                 : MacroOverrideMode.Inherit,
             SelectedMacroId = cs?.SelectedMacroId,
             SolverOverride = cs?.SolverOverride ?? SolverOverrideMode.Default,
+            MaximizeQualityAtCostOfTime = cs?.MaximizeQualityAtCostOfTime ?? false,
         };
         
         LoadConsumables();
@@ -188,6 +190,7 @@ public class RecipeCraftSettingsPopup
                 : MacroOverrideMode.Inherit,
             SelectedMacroId = cs?.SelectedMacroId,
             SolverOverride = cs?.SolverOverride ?? SolverOverrideMode.Default,
+            MaximizeQualityAtCostOfTime = cs?.MaximizeQualityAtCostOfTime ?? false,
         };
 
         LoadConsumables();
@@ -222,6 +225,7 @@ public class RecipeCraftSettingsPopup
             DrawMacroSelector();
             DrawMacroValidationStatus();
             DrawRaphaelValidationStatus();
+            DrawDonatelloOptimizationOption();
             DrawFoodSelector();
             DrawMedicineSelector();
             DrawManualSelector();
@@ -358,7 +362,17 @@ public class RecipeCraftSettingsPopup
             MacroMode = settings.MacroMode,
             SelectedMacroId = settings.MacroMode == MacroOverrideMode.Specific ? settings.SelectedMacroId : null,
             SolverOverride = settings.MacroMode == MacroOverrideMode.Specific ? settings.SolverOverride : SolverOverrideMode.Default,
+            MaximizeQualityAtCostOfTime = settings.MaximizeQualityAtCostOfTime,
         };
+    }
+
+    private void DrawDonatelloOptimizationOption()
+    {
+        var maximizeQuality = _editingSettings.MaximizeQualityAtCostOfTime;
+        if (ImGui.Checkbox("Maximize quality at cost of time", ref maximizeQuality))
+            _editingSettings.MaximizeQualityAtCostOfTime = maximizeQuality;
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("Allow each live Donatello replan up to 30 seconds. This may improve quality on difficult crafts, but crafting can pause while optimizing.");
     }
 
     private RaphaelAssessment GetRaphaelAssessment()

@@ -1,5 +1,7 @@
 bin/
 obj/
+/build/
+/.references/
 .vs/
 .idea/
 SecretKeys.generated.cs

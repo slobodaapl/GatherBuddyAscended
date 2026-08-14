@@ -58,7 +58,7 @@ namespace GatherBuddy.AutoGather
             ArtisanExporter              =  new Reflection.ArtisanExporter(plugin.AutoGatherListsManager);
             Dalamud.Chat.CheckMessageHandled += OnMessageHandled;
             Dalamud.ToastGui.QuestToast += OnQuestToast;
-            //Dalamud.AddonLifecycle.RegisterListener(AddonEvent.PreFinalize, "Gathering", OnGatheringFinalize);
+            Dalamud.AddonLifecycle.RegisterListener(AddonEvent.PreFinalize, "Gathering", OnManualGatheringFinalize);
             _plugin.FishRecorder.Parser.CaughtFish += OnFishCaught;
         }
         public Fish? LastCaughtFish { get; private set; }
@@ -79,7 +79,7 @@ namespace GatherBuddy.AutoGather
                 if (_currentAutoHookTarget?.Fish?.ItemId == arg1.ItemId)
                 {
                     var targetQuantity = _currentAutoHookTarget.Value.Quantity;
-                    var currentCount = arg1.GetInventoryCount();
+                    var currentCount = _currentAutoHookTarget.Value.CompletionCount;
                     
                     if (currentCount >= targetQuantity)
                     {
@@ -425,8 +425,11 @@ namespace GatherBuddy.AutoGather
 
             if (!Enabled)
             {
+                DoManualGatherAssist();
                 return;
             }
+
+            ResetManualGatherAssist();
 
             // If we are not gathering and _currentGatherTarget is set, we just finished gathering or left the node
             if (!IsGathering && _currentGatherTarget != null)
@@ -762,6 +765,15 @@ namespace GatherBuddy.AutoGather
                         DoMateriaExtraction();
                         return;
                     }
+                }
+
+                if (_activeItemList.HasCompletionSourceItems && HasReducibleItems(requireConfigured: false))
+                {
+                    if (IsFishing || IsGathering)
+                        QueueQuitFishingTasks();
+                    else
+                        ReduceItems(false);
+                    return;
                 }
 
                 if (FreeInventorySlots < 20 && HasReducibleItems())
@@ -2379,7 +2391,7 @@ namespace GatherBuddy.AutoGather
                     return true;
                 }
                 
-                foreach (var (item, _) in listsManager.ActiveItems)
+                foreach (var (item, _, _) in listsManager.ActiveItems)
                 {
                     if (item is not Gatherable gatherable)
                         continue;
@@ -2603,7 +2615,7 @@ namespace GatherBuddy.AutoGather
             _diadem?.Dispose();
             Dalamud.Chat.CheckMessageHandled -= OnMessageHandled;
             Dalamud.ToastGui.QuestToast -= OnQuestToast;
-            //Dalamud.AddonLifecycle.UnregisterListener(AddonEvent.PreFinalize, "Gathering", OnGatheringFinalize);
+            Dalamud.AddonLifecycle.UnregisterListener(AddonEvent.PreFinalize, "Gathering", OnManualGatheringFinalize);
         }
     }
 }

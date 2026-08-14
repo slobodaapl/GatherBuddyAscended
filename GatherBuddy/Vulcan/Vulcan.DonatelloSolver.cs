@@ -67,11 +67,12 @@ public sealed class DonatelloSolverDefinition : ISolverDefinition
 
 public sealed class DonatelloSolver : Solver
 {
+    internal const int DefaultLiveReplanDeadlineMillis = 2000;
     private readonly CraftState _craft;
     private List<VulcanSkill> _plan;
     private int _actionIndex;
     private StepState? _expectedState;
-    private Task<IReadOnlyList<VulcanSkill>>? _pendingSolve;
+    private Task<DonatelloNative.SolveResult>? _pendingSolve;
     private StepState? _pendingRoot;
     private List<VulcanSkill>? _pendingIncumbent;
     private StepState? _resumeRootAfterPending;
@@ -80,6 +81,7 @@ public sealed class DonatelloSolver : Solver
     private DateTime _pendingStartedAt;
     private bool _interruptRequested;
     private bool _progressFallback;
+    private int? _progressBoundaryActionCount;
     private readonly ProgressOnlySolver _progressOnlySolver = new();
 
     public DonatelloSolver(CachedRaphaelSolution initialSolution, CraftState craft)
@@ -153,7 +155,10 @@ public sealed class DonatelloSolver : Solver
         }
         _actionIndex++;
         _expectedState = expected;
-        return new(action, $"Donatello step {_actionIndex}/{_plan.Count}");
+        var phase = _progressBoundaryActionCount is int boundary && _actionIndex <= boundary
+            ? "progress"
+            : "quality";
+        return new(action, $"Donatello {phase} step {_actionIndex}/{_plan.Count}");
     }
 
     internal Recommendation ResumeFromLiveState(StepState step)
@@ -197,11 +202,22 @@ public sealed class DonatelloSolver : Solver
         _interruptRequested = false;
         _pendingInterrupt = DonatelloNative.CreateInterrupt();
         var interrupt = _pendingInterrupt;
+        var deadlineMillis = ResolveLiveReplanDeadlineMillis(
+            _craft,
+            GatherBuddy.Config.RaphaelSolverConfig.DonatelloOptimizationThresholdMs);
         _pendingSolve = Task.Run(() =>
         {
             try
             {
-                return DonatelloNative.Solve(_craft, liveRoot, interrupt, incumbent);
+                return DonatelloNative.SolveDetailed(
+                    _craft,
+                    liveRoot,
+                    GatherBuddy.Config.RaphaelSolverConfig.RaphaelAllowSpecialistActions,
+                    DonatelloNative.SolveMode.LiveAdaptive,
+                    interrupt,
+                    incumbent,
+                    softDeadlineMillis: deadlineMillis,
+                    hardDeadlineMillis: deadlineMillis);
             }
             finally
             {
@@ -210,25 +226,33 @@ public sealed class DonatelloSolver : Solver
         });
     }
 
+    internal static int ResolveLiveReplanDeadlineMillis(CraftState craft, int configuredDeadlineMillis)
+        => craft.DonatelloOptions?.MaximizeQualityAtCostOfTime == true
+            ? 30_000
+            : Math.Clamp(configuredDeadlineMillis, 10, 10_000);
+
     private void CompleteReplan()
     {
         var root = _pendingRoot!;
         var incumbent = _pendingIncumbent!;
         try
         {
-            var candidate = _pendingSolve!.GetAwaiter().GetResult().ToList();
+            var result = _pendingSolve!.GetAwaiter().GetResult();
+            var candidate = result.Actions.ToList();
             var incumbentScore = DonatelloPlanEvaluator.Evaluate(_craft, root, incumbent);
             var candidateScore = DonatelloPlanEvaluator.Evaluate(_craft, root, candidate);
-            var minimizeSteps = _craft.DonatelloOptions?.MinimizeSteps
-                ?? GatherBuddy.Config.RaphaelSolverConfig.DonatelloMinimizeSteps;
-            if (candidateScore.Completes && candidateScore.IsStrictlyBetterThan(incumbentScore, minimizeSteps))
+            if (candidateScore.Completes && candidateScore.IsStrictlyBetterThan(incumbentScore))
             {
                 _plan = candidate;
-                GatherBuddy.Log.Debug($"[Donatello] Adopted strict improvement: quality={candidateScore.Quality}, steps={candidateScore.Steps}");
+                _progressBoundaryActionCount = result.ProgressBoundary?.ActionCount;
+                GatherBuddy.Log.Debug(
+                    $"[Donatello] Adopted strict improvement: quality={candidateScore.Quality}, steps={candidateScore.Steps}, "
+                    + $"optimal={result.Optimal}, bound={result.QualityUpperBound}, elapsed={result.ElapsedMillis}ms");
             }
             else if (incumbentScore.Completes)
             {
                 _plan = incumbent;
+                _progressBoundaryActionCount = null;
                 GatherBuddy.Log.Debug("[Donatello] Retained incumbent; candidate did not prove a strict improvement");
             }
             else
@@ -260,6 +284,7 @@ public sealed class DonatelloSolver : Solver
     private void ActivateCompletionFallback(string reason)
     {
         _plan = [];
+        _progressBoundaryActionCount = null;
         _progressFallback = true;
         GatherBuddy.Log.Error($"[Donatello] {reason}; switching to completion fallback");
     }

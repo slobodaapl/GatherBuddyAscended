@@ -11,7 +11,7 @@ namespace GatherBuddy.Vulcan;
 internal static partial class DonatelloNative
 {
     private const string LibraryName = "donatello_ffi.dll";
-    internal const uint AbiVersion = 5;
+    internal const uint AbiVersion = 7;
     private static readonly JsonSerializerOptions RequestSerializerOptions = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
@@ -48,8 +48,47 @@ internal static partial class DonatelloNative
     {
         public bool Ok { get; set; }
         public List<uint>? ActionIds { get; set; }
+        public bool Optimal { get; set; }
+        public bool DeadlineReached { get; set; }
+        public int AchievedQuality { get; set; }
+        public int QualityUpperBound { get; set; }
+        public long ElapsedMillis { get; set; }
+        public ProgressBoundary? ProgressBoundary { get; set; }
+        public FinalStateSummary? FinalState { get; set; }
         public string? Error { get; set; }
     }
+
+    internal sealed class ProgressBoundary
+    {
+        public int ActionCount { get; set; }
+        public string Target { get; set; } = string.Empty;
+    }
+
+    internal sealed class FinalStateSummary
+    {
+        public int Cp { get; set; }
+        public int Durability { get; set; }
+        public int Progress { get; set; }
+        public int Quality { get; set; }
+        public bool Complete { get; set; }
+    }
+
+    internal enum SolveMode
+    {
+        OptimizeQuality = 0,
+        CompleteFastest = 1,
+        LiveAdaptive = 2,
+    }
+
+    internal sealed record SolveResult(
+        IReadOnlyList<VulcanSkill> Actions,
+        bool Optimal,
+        bool DeadlineReached,
+        int AchievedQuality,
+        int QualityUpperBound,
+        long ElapsedMillis,
+        ProgressBoundary? ProgressBoundary,
+        FinalStateSummary FinalState);
 
     public static IntPtr CreateInterrupt()
         => donatello_interrupt_create();
@@ -81,7 +120,7 @@ internal static partial class DonatelloNative
             craft,
             root,
             GatherBuddy.Config.RaphaelSolverConfig.RaphaelAllowSpecialistActions,
-            GatherBuddy.Config.RaphaelSolverConfig.RaphaelBackloadProgress,
+            SolveMode.OptimizeQuality,
             interrupt,
             incumbent);
 
@@ -89,18 +128,35 @@ internal static partial class DonatelloNative
         CraftState craft,
         StepState root,
         bool allowSpecialistActions,
-        bool backloadProgress,
+        SolveMode solveMode,
         IntPtr interrupt = default,
         IReadOnlyList<VulcanSkill>? incumbent = null)
+        => SolveDetailed(craft, root, allowSpecialistActions, solveMode, interrupt, incumbent).Actions;
+
+    internal static unsafe SolveResult SolveDetailed(
+        CraftState craft,
+        StepState root,
+        bool allowSpecialistActions,
+        SolveMode solveMode,
+        IntPtr interrupt = default,
+        IReadOnlyList<VulcanSkill>? incumbent = null,
+        int softDeadlineMillis = 0,
+        int hardDeadlineMillis = 0,
+        bool bypassSolutionCache = false,
+        bool? minimizeSteps = null)
     {
         if (donatello_abi_version() != AbiVersion)
             throw new InvalidOperationException("Unsupported Donatello native ABI version");
 
-        ConfigureCache(GatherBuddy.Config.RaphaelSolverConfig.DonatelloCacheMemoryMiB);
-        var fallbackMinimizeSteps = GatherBuddy.Config.RaphaelSolverConfig.DonatelloMinimizeSteps;
+        var raphaelConfig = GatherBuddy.Config?.RaphaelSolverConfig;
+        ConfigureCache(raphaelConfig?.DonatelloCacheMemoryMiB ?? 512);
+        var fallbackMinimizeSteps = minimizeSteps
+            ?? raphaelConfig?.DonatelloMinimizeSteps
+            ?? false;
 
         var bytes = Encoding.UTF8.GetBytes(SerializeRequest(
-            craft, root, allowSpecialistActions, backloadProgress, incumbent, fallbackMinimizeSteps));
+            craft, root, allowSpecialistActions, solveMode, incumbent, fallbackMinimizeSteps,
+            softDeadlineMillis, hardDeadlineMillis, bypassSolutionCache));
         IntPtr nativeResponse;
         fixed (byte* data = bytes)
             nativeResponse = interrupt == IntPtr.Zero
@@ -116,7 +172,16 @@ internal static partial class DonatelloNative
                 ?? throw new InvalidOperationException("Donatello native response was empty");
             if (!response.Ok || response.ActionIds == null)
                 throw new InvalidOperationException(response.Error ?? "Donatello solve failed");
-            return response.ActionIds.ConvertAll(id => (VulcanSkill)id);
+            return new SolveResult(
+                response.ActionIds.ConvertAll(id => (VulcanSkill)id),
+                response.Optimal,
+                response.DeadlineReached,
+                response.AchievedQuality,
+                response.QualityUpperBound,
+                response.ElapsedMillis,
+                response.ProgressBoundary,
+                response.FinalState
+                    ?? throw new InvalidOperationException("Donatello native response omitted final state"));
         }
         finally
         {
@@ -128,9 +193,12 @@ internal static partial class DonatelloNative
         CraftState craft,
         StepState root,
         bool allowSpecialistActions,
-        bool backloadProgress,
+        SolveMode solveMode,
         IReadOnlyList<VulcanSkill>? incumbent = null,
-        bool fallbackMinimizeSteps = false)
+        bool fallbackMinimizeSteps = false,
+        int softDeadlineMillis = 0,
+        int hardDeadlineMillis = 0,
+        bool bypassSolutionCache = false)
     {
         var maxStellarSteadyHandUses = craft.DonatelloOptions?.MaxStellarSteadyHandUses ?? 0;
         var remainingStellarSteadyHandUses = maxStellarSteadyHandUses > root.StellarSteadyHandsUsed
@@ -145,7 +213,7 @@ internal static partial class DonatelloNative
             MaxCp = craft.StatCP,
             MaxDurability = craft.CraftDurability,
             MaxProgress = craft.CraftProgress,
-            MaxQuality = craft.DonatelloOptions?.Objective == DonatelloSolveObjective.ProgressOnly
+            MaxQuality = solveMode == SolveMode.CompleteFastest
                 ? 0
                 : craft.CraftQualityMax,
             BaseProgress = Simulator.BaseProgress(craft),
@@ -153,17 +221,21 @@ internal static partial class DonatelloNative
             JobLevel = craft.StatLevel,
             Manipulation = craft.UnlockedManipulation,
             Specialist = craft.Specialist && allowSpecialistActions,
-            BackloadProgress = backloadProgress,
-            Objective = craft.DonatelloOptions?.Objective ?? DonatelloSolveObjective.MaximizeQuality,
-            MinimizeSteps = craft.DonatelloOptions?.MinimizeSteps ?? fallbackMinimizeSteps,
+            SolveMode = (int)solveMode,
+            MinimizeSteps = solveMode == SolveMode.CompleteFastest
+                ? false
+                : craft.DonatelloOptions?.MinimizeSteps ?? fallbackMinimizeSteps,
             StellarSteadyHandCharges = stellarSteadyHandCharges,
             IncumbentActionIds = incumbent?.Select(action => (uint)action).ToArray() ?? [],
+            SoftDeadlineMillis = Math.Max(0, softDeadlineMillis),
+            HardDeadlineMillis = Math.Max(0, hardDeadlineMillis),
+            BypassSolutionCache = bypassSolutionCache,
             Root = new
             {
                 Cp = root.RemainingCP,
                 root.Durability,
                 root.Progress,
-                Quality = craft.DonatelloOptions?.Objective == DonatelloSolveObjective.ProgressOnly
+                Quality = solveMode == SolveMode.CompleteFastest
                     ? 0
                     : root.Quality,
                 InnerQuiet = root.IQStacks,

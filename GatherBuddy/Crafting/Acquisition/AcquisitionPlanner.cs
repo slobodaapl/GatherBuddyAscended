@@ -766,7 +766,9 @@ public static class AcquisitionPlanner
                         choice.IsHq,
                         sourceOrdinal),
                     ItemId = choice.OfferItemId,
-                    ItemName = choice.OfferItemName,
+                    ItemName = string.IsNullOrWhiteSpace(dependency.ItemName)
+                        ? choice.OfferItemName
+                        : dependency.ItemName,
                     SelectedRecipeId = dependency.SelectedPath?.RecipeId ?? 0,
                     SourceKind = choice.Kind,
                     SourceId = choice.SourceId,
@@ -834,6 +836,23 @@ public static class AcquisitionPlanner
         public int SpecialCurrencyVendorCount { get; private set; }
         public int SpecialCurrencyMarketCount { get; private set; }
         public long TotalTaxGil { get; private set; }
+        public int MarketTransactionCount
+            => Transactions.Count(transaction => transaction.SourceKind == AcquisitionSourceKind.Market);
+        public HashSet<uint> MarketWorldIds
+            => Transactions
+                .Where(transaction => transaction.SourceKind == AcquisitionSourceKind.Market)
+                .Select(transaction => transaction.WorldId)
+                .ToHashSet();
+        public bool HasCoProductTransactions
+            => Transactions.Any(transaction => transaction.Outputs is { Count: > 0 }
+                && transaction.Outputs.Any(output => output.ItemId != transaction.ItemId));
+        public string TransactionStateSignature
+            => string.Join("|", Transactions
+                .OrderBy(transaction => transaction.SourceKind)
+                .ThenBy(transaction => transaction.SourceId, StringComparer.Ordinal)
+                .ThenBy(transaction => transaction.WorldId)
+                .ThenBy(transaction => transaction.IsHq)
+                .Select(transaction => $"{transaction.SourceKind}:{transaction.SourceId}:{transaction.WorldId}:{transaction.IsHq}:{transaction.PurchaseUnits}"));
         public int WorldCount => Transactions
             .Where(transaction => transaction.SourceKind == AcquisitionSourceKind.Market)
             .Select(transaction => transaction.WorldId)
@@ -984,7 +1003,6 @@ public static class AcquisitionPlanner
         private readonly AcquisitionPlanningInput _input;
         private readonly AcquisitionPlanningSettings _settings;
         private readonly IReadOnlyList<IReadOnlyList<Candidate>> _candidateSets;
-        private readonly CandidatePlan _current = new();
         private readonly HashSet<uint> _unknownCurrencyIds = new();
         private long _states;
 
@@ -1006,23 +1024,33 @@ public static class AcquisitionPlanner
 
         public void Run()
         {
-            Visit(0);
-        }
-
-        private void Visit(int index)
-        {
-            if (++_states > MaxGlobalSearchStates)
+            var frontier = new List<CandidatePlan> { new() };
+            foreach (var candidateSet in _candidateSets)
             {
-                LimitExceeded = true;
-                return;
+                var next = new List<CandidatePlan>();
+                foreach (var partial in frontier)
+                foreach (var candidate in candidateSet)
+                {
+                    if (++_states > MaxGlobalSearchStates)
+                    {
+                        LimitExceeded = true;
+                        return;
+                    }
+
+                    var combined = partial.Clone();
+                    combined.Add(candidate);
+                    if (!FitsPartialBalances(combined))
+                        continue;
+                    InsertPareto(next, combined);
+                }
+
+                if (next.Count == 0)
+                    return;
+                frontier = next;
             }
 
-            if (index >= _candidateSets.Count)
+            foreach (var complete in frontier)
             {
-                var complete = _current.Clone();
-                if (!FitsBalances(complete))
-                    return;
-
                 if (MinimumPlan == null || CompareMinimum(complete, MinimumPlan) < 0)
                     MinimumPlan = complete;
                 if (PreferredPlan == null || ComparePreferred(complete, PreferredPlan) < 0)
@@ -1030,19 +1058,51 @@ public static class AcquisitionPlanner
                 if ((_settings.MaximumGilSpend == null || complete.GilCost <= _settings.MaximumGilSpend.Value)
                     && (PlanWithinBudget == null || ComparePreferred(complete, PlanWithinBudget) < 0))
                     PlanWithinBudget = complete;
-                return;
+            }
+        }
+
+        private static void InsertPareto(List<CandidatePlan> frontier, CandidatePlan candidate)
+        {
+            for (var i = frontier.Count - 1; i >= 0; i--)
+            {
+                var existing = frontier[i];
+                if (Dominates(existing, candidate))
+                    return;
+                if (Dominates(candidate, existing))
+                    frontier.RemoveAt(i);
             }
 
-            foreach (var candidate in _candidateSets[index])
-            {
-                var snapshot = _current.Clone();
-                _current.Add(candidate);
-                if (FitsPartialBalances(_current))
-                    Visit(index + 1);
-                _current.Restore(snapshot);
-                if (LimitExceeded)
-                    return;
-            }
+            frontier.Add(candidate);
+        }
+
+        private static bool Dominates(CandidatePlan left, CandidatePlan right)
+        {
+            if ((left.HasCoProductTransactions || right.HasCoProductTransactions)
+                && !string.Equals(left.TransactionStateSignature, right.TransactionStateSignature, StringComparison.Ordinal))
+                return false;
+            if (left.NonHqQuantity > right.NonHqQuantity
+                || left.SpecialCurrencyVendorCount > right.SpecialCurrencyVendorCount
+                || left.SpecialCurrencyMarketCount > right.SpecialCurrencyMarketCount
+                || left.MarketTransactionCount > right.MarketTransactionCount
+                || left.Transactions.Count > right.Transactions.Count
+                || left.Overbuy > right.Overbuy
+                || !left.MarketWorldIds.IsSubsetOf(right.MarketWorldIds))
+                return false;
+
+            foreach (var currencyId in left.CurrencyCosts.Keys.Concat(right.CurrencyCosts.Keys).Distinct())
+                if (left.CurrencyCosts.GetValueOrDefault(currencyId) > right.CurrencyCosts.GetValueOrDefault(currencyId))
+                    return false;
+
+            return left.NonHqQuantity < right.NonHqQuantity
+                || left.SpecialCurrencyVendorCount < right.SpecialCurrencyVendorCount
+                || left.SpecialCurrencyMarketCount < right.SpecialCurrencyMarketCount
+                || left.MarketTransactionCount < right.MarketTransactionCount
+                || left.Transactions.Count < right.Transactions.Count
+                || left.Overbuy < right.Overbuy
+                || left.MarketWorldIds.Count < right.MarketWorldIds.Count
+                || left.CurrencyCosts.Keys.Concat(right.CurrencyCosts.Keys).Distinct().Any(currencyId =>
+                    left.CurrencyCosts.GetValueOrDefault(currencyId) < right.CurrencyCosts.GetValueOrDefault(currencyId))
+                || string.CompareOrdinal(left.Signature, right.Signature) <= 0;
         }
 
         private bool FitsPartialBalances(CandidatePlan plan)
@@ -1059,9 +1119,6 @@ public static class AcquisitionPlanner
             }
             return true;
         }
-
-        private bool FitsBalances(CandidatePlan plan)
-            => FitsPartialBalances(plan);
 
         private int ComparePreferred(CandidatePlan left, CandidatePlan right)
         {

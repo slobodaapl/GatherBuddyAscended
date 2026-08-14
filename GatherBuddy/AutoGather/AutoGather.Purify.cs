@@ -10,14 +10,17 @@ namespace GatherBuddy.AutoGather
 {
     public partial class AutoGather
     {
-        private bool HasReducibleItems()
+        private bool HasReducibleItems(bool requireConfigured = true)
         {
-            if (!GatherBuddy.Config.AutoGatherConfig.DoReduce || Dalamud.Conditions[ConditionFlag.Mounted])
+            if (requireConfigured && !GatherBuddy.Config.AutoGatherConfig.DoReduce
+             || Dalamud.Conditions[ConditionFlag.Mounted])
                 return false;
 
             if (!QuestManager.IsQuestComplete(67633))
             {
-                if (!_autoRetainerMultiModeEnabled && string.IsNullOrEmpty(_originalCharacterNameWorld))
+                if (requireConfigured
+                 && !_autoRetainerMultiModeEnabled
+                 && string.IsNullOrEmpty(_originalCharacterNameWorld))
                 {
                     GatherBuddy.Config.AutoGatherConfig.DoReduce = false;
                     Communicator.PrintError(

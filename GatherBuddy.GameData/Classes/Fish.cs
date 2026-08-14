@@ -72,7 +72,8 @@ public partial class Fish : IComparable<Fish>, IGatherable
 
     public FishRestrictions FishRestrictions { get; set; }
 
-    public string Folklore { get; init; }
+    public string Folklore         { get; init; }
+    public uint   FolkloreUnlockId { get; init; }
 
     public Weather UmbralWeather => CurrentWeather.Length > 0 && CurrentWeather[0].IsUmbral ? CurrentWeather[0] : Weather.Invalid;
 
@@ -100,7 +101,9 @@ public partial class Fish : IComparable<Fish>, IGatherable
         FishRestrictions = (note is { TimeRestriction: 1 } ? FishRestrictions.Time : FishRestrictions.None)
           | (note is { WeatherRestriction            : 1 } ? FishRestrictions.Weather : FishRestrictions.None);
         Name     = MultiString.FromItem(gameData, ItemData.RowId);
-        Folklore = MultiString.ParseSeStringLumina(fishRow.GatheringSubCategory.ValueNullable?.FolkloreBook);
+        var subCategory = fishRow.GatheringSubCategory.ValueNullable;
+        Folklore         = MultiString.ParseSeStringLumina(subCategory?.FolkloreBook);
+        FolkloreUnlockId = subCategory is { } category ? (uint)category.Division : 0;
         Size     = SpearfishSize.None;
         Speed    = SpearfishSpeed.None;
         BiteType = BiteType.Unknown;

@@ -27,6 +27,9 @@ public class AutoGatherList
     public ReadOnlyDictionary<IGatherable, bool> EnabledItems
         => enabledItems.AsReadOnly();
 
+    public ReadOnlyDictionary<IGatherable, uint> CompletionItemIds
+        => completionItemIds.AsReadOnly();
+
     public string Name        { get; set; } = string.Empty;
     public string Description { get; set; } = string.Empty;
     public string FolderPath  { get; set; } = string.Empty;
@@ -39,6 +42,7 @@ public class AutoGatherList
     private Dictionary<IGatherable, uint>      quantities         = [];
     private Dictionary<IGatherable, ILocation> preferredLocations = [];
     private Dictionary<IGatherable, bool>      enabledItems       = [];
+    private Dictionary<IGatherable, uint>      completionItemIds  = [];
 
     public AutoGatherList Clone()
         => new()
@@ -47,6 +51,7 @@ public class AutoGatherList
             quantities         = new(quantities),
             preferredLocations = new(preferredLocations),
             enabledItems       = new(enabledItems),
+            completionItemIds  = new(completionItemIds),
             Name               = Name,
             Description        = Description,
             FolderPath         = FolderPath,
@@ -56,7 +61,7 @@ public class AutoGatherList
             RemoveCompletedItems = RemoveCompletedItems
         };
 
-    public bool Add(IGatherable item, uint quantity = 1)
+    public bool Add(IGatherable item, uint quantity = 1, uint completionItemId = 0)
     {
         if (quantities.ContainsKey(item))
             return false;
@@ -64,6 +69,8 @@ public class AutoGatherList
         items.Add(item);
         quantities[item]   = NormalizeQuantity(item, quantity);
         enabledItems[item] = true;
+        if (completionItemId != 0 && completionItemId != item.ItemId)
+            completionItemIds[item] = completionItemId;
         return true;
     }
 
@@ -73,6 +80,7 @@ public class AutoGatherList
         enabledItems.Remove(item);
         quantities.Remove(item);
         preferredLocations.Remove(item);
+        completionItemIds.Remove(item);
         items.RemoveAt(index);
     }
 
@@ -86,6 +94,7 @@ public class AutoGatherList
         enabledItems.Remove(old, out var enabled);
         if (old is Gatherable gatherable)
             preferredLocations.Remove(gatherable);
+        completionItemIds.Remove(old);
         items[index]       = item;
         quantities[item]   = NormalizeQuantity(item, quantity);
         enabledItems[item] = enabled;
@@ -161,12 +170,13 @@ public class AutoGatherList
 
     public struct Config(AutoGatherList list)
     {
-        public const byte CurrentVersion = 6;
+        public const byte CurrentVersion = 7;
 
         public uint[]                 ItemIds            = list.Items.Select(i => i.ItemId).ToArray();
         public Dictionary<uint, uint> Quantities         = list.Quantities.ToDictionary(v => v.Key.ItemId, v => v.Value);
         public Dictionary<uint, uint> PrefferedLocations = list.PreferredLocations.ToDictionary(v => v.Key.ItemId, v => v.Value.Id);
         public Dictionary<uint, bool> EnabledItems       = list.EnabledItems.ToDictionary(v => v.Key.ItemId, v => v.Value);
+        public Dictionary<uint, uint> CompletionItemIds  = list.CompletionItemIds.ToDictionary(v => v.Key.ItemId, v => v.Value);
         public string                 Name               = list.Name;
         public string                 Description        = list.Description;
         public string                 FolderPath         = list.FolderPath;
@@ -189,7 +199,7 @@ public class AutoGatherList
             try
             {
                 var bytes = Functions.DecompressedBase64(data);
-                if (bytes.Length == 0 || (bytes[0] != CurrentVersion && bytes[0] != 5 && bytes[0] != 4))
+                if (bytes.Length == 0 || (bytes[0] != CurrentVersion && bytes[0] != 6 && bytes[0] != 5 && bytes[0] != 4))
                     return false;
 
                 var json = Encoding.UTF8.GetString(bytes.AsSpan()[1..]);
@@ -202,6 +212,7 @@ public class AutoGatherList
                     return false;
 
                 cfg.FolderPath ??= string.Empty;
+                cfg.CompletionItemIds ??= [];
                 return true;
             }
             catch (Exception)
@@ -236,6 +247,7 @@ public class AutoGatherList
             quantities         = new(cfg.ItemIds.Length),
             preferredLocations = new(cfg.PrefferedLocations.Count),
             enabledItems       = new(cfg.EnabledItems.Count),
+            completionItemIds  = new(cfg.CompletionItemIds?.Count ?? 0),
         };
         var changes = false;
         foreach (var itemId in cfg.ItemIds)
@@ -250,7 +262,10 @@ public class AutoGatherList
             else
                 continue;
 
-            if (list.Add(item, quantity = cfg.Quantities.GetValueOrDefault(item.ItemId)))
+            if (list.Add(
+                    item,
+                    quantity = cfg.Quantities.GetValueOrDefault(item.ItemId),
+                    cfg.CompletionItemIds?.GetValueOrDefault(item.ItemId) ?? 0))
             {
                 changes |= list.quantities[item] != quantity;
                 if (cfg.PrefferedLocations.TryGetValue(itemId, out var locId))

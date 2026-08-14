@@ -10,6 +10,13 @@ namespace GatherBuddy.Crafting;
 
 public static class RecipeExtensions
 {
+    /// <summary>
+    /// Returns the recipe's static minimum job level. Level-scaled mission recipes use the
+    /// recipe level table's class-job level as a scaling ceiling, not a minimum.
+    /// </summary>
+    public static int MinimumJobLevel(this Recipe recipe)
+        => recipe.Number == 0 ? 0 : recipe.RecipeLevelTable.Value.ClassJobLevel;
+
     public static List<(Item Item, int Amount)> Ingredients(this Recipe recipe)
     {
         var result = new List<(Item, int)>();
@@ -72,7 +79,7 @@ public static class RecipeManager
             var stats = GearsetStatsReader.ReadGearsetStatsForJob(jobId);
             if (stats == null)
                 continue;
-            jobScores[jobId] = (playerState->ClassJobLevels[(int)jobId], stats.Craftsmanship + stats.Control, stats.CP);
+            jobScores[jobId] = (CraftingJobLevelReader.ReadOrDefault(jobId), stats.Craftsmanship + stats.Control, stats.CP);
         }
 
         foreach (var (itemId, recipes) in _recipesByItemId.Value)
@@ -86,7 +93,7 @@ public static class RecipeManager
             {
                 var jobId = recipe.CraftType.RowId + 8;
                 if (!jobScores.TryGetValue(jobId, out var score)
-                 || score.Level < recipe.RecipeLevelTable.Value.ClassJobLevel)
+                 || score.Level < recipe.MinimumJobLevel())
                     continue;
 
                 if (!bestRecipe.HasValue || score.CompareTo(bestScore) > 0)

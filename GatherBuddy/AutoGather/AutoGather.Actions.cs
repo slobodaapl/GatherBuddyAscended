@@ -126,7 +126,7 @@ namespace GatherBuddy.AutoGather
         }
 
 
-        private unsafe void DoActionTasks(GatherTarget target)
+        private unsafe void DoActionTasks(GatherTarget target, bool selectedTargetOnly = false)
         {
             if (MasterpieceReader?.IsValid == true)
             {
@@ -145,7 +145,7 @@ namespace GatherBuddy.AutoGather
                 CurrentCollectableRotation = null;
                 if (GatheringAddon != null && GatheringWindowReader != null)
                 {
-                    DoGatherWindowActions(target);
+                    DoGatherWindowActions(target, selectedTargetOnly);
                 }
             }
         }
@@ -343,7 +343,7 @@ namespace GatherBuddy.AutoGather
             return null;
         }
 
-        private unsafe void DoGatherWindowActions(GatherTarget target)
+        private unsafe void DoGatherWindowActions(GatherTarget target, bool selectedTargetOnly = false)
         {
             System.Diagnostics.Debug.Assert(target == default || target.Gatherable != null);
 
@@ -357,7 +357,7 @@ namespace GatherBuddy.AutoGather
             LastIntegrity = GatheringWindowReader.IntegrityRemaining;
 
             //Use The Giving Land out of order to gather random crystals.
-            if (target != default && ShouldUseGivingLandOutOfOrder(target.Gatherable))
+            if (!selectedTargetOnly && target != default && ShouldUseGivingLandOutOfOrder(target.Gatherable))
             {
                 EnqueueActionWithDelay(() => UseAction(Actions.GivingLand));
                 return;
@@ -369,14 +369,14 @@ namespace GatherBuddy.AutoGather
                 LuckUsed = true;
             }
 
-            if (target != default && !HasGivingLandBuff && ShouldUseLuck(target.Gatherable))
+            if (!selectedTargetOnly && target != default && !HasGivingLandBuff && ShouldUseLuck(target.Gatherable))
             {
                 LuckUsed = true;
                 EnqueueActionWithDelay(() => UseAction(Actions.Luck));
                 return;
             }
 
-            var (useSkills, slot) = GetItemSlotToGather(target);
+            var (useSkills, slot) = GetItemSlotToGather(target, selectedTargetOnly);
             if (useSkills)
             {
                 var configPreset = MatchConfigPreset(slot.Item);

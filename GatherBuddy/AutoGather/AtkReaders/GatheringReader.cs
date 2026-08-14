@@ -50,8 +50,14 @@ public unsafe class GatheringReader : AtkReader
     public bool QuickGatheringInProgress
         => ReadBool(107).GetValueOrDefault();
 
-    private uint LastSelectedSlot
-        => ReadUInt(108).GetValueOrDefault();
+    public int LastSelectedSlotIndex
+    {
+        get
+        {
+            var slot = ReadUInt(108);
+            return slot is < 8 ? (int)slot.Value : -1;
+        }
+    }
 
     public int IntegrityRemaining
         => (int)ReadUInt(109).GetValueOrDefault();

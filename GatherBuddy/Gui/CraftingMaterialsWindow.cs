@@ -26,7 +26,6 @@ public class CraftingMaterialsWindow : Window
     private CraftingListEditor? _editor;
     private bool _matsOvercapPercent;
     private bool _matsShowPrecrafts;
-    private bool _matsPreferVendors;
     private bool _matsKeepFulfilled;
 
     private static readonly Vector4 AccentGather = new(0.45f, 1.00f, 0.45f, 1f);
@@ -88,7 +87,6 @@ public class CraftingMaterialsWindow : Window
     private CraftingListEditor? _cachedMaterialViewEditor;
     private long _cachedMaterialViewVersion = -1;
     private bool _cachedMaterialViewShowPrecrafts;
-    private bool _cachedMaterialViewPreferVendors;
     private bool _cachedMaterialViewKeepFulfilled;
     private bool _cachedMaterialViewShowRetainer;
     private bool _cachedMobDropInfoInitialized;
@@ -168,7 +166,6 @@ public class CraftingMaterialsWindow : Window
 
         var overcapCheckboxWidth = GetCheckboxWidth("150%");
         var precraftsCheckboxWidth = GetCheckboxWidth("Precrafts");
-        var preferVendorsCheckboxWidth = GetCheckboxWidth("Prefer Vendors");
         var keepFulfilledCheckboxWidth = GetCheckboxWidth("Keep Fulfilled");
         var refreshRetainersButtonWidth = GetSmallButtonWidth("Refresh Retainers");
 
@@ -181,14 +178,6 @@ public class CraftingMaterialsWindow : Window
         ImGui.Checkbox("Precrafts##precrafts", ref _matsShowPrecrafts);
         if (ImGui.IsItemHovered())
             ImGui.SetTooltip("Include intermediate craftable components and non-gear final craftables");
-        SameLineIfFits(preferVendorsCheckboxWidth);
-        ImGui.Checkbox("Prefer Vendors##preferVendors", ref _matsPreferVendors);
-        if (ImGui.IsItemHovered())
-            ImGui.SetTooltip(
-                "Default priority:\n" +
-                "  Gather > Fish > Scrip > Drops > Craft > Vendor > Tomes > Other\n\n" +
-                "When ON: Gil Vendor overrides Gather, Fish, Drops, and Craft\n" +
-                "for items also sold at a Gil shop.");
         SameLineIfFits(keepFulfilledCheckboxWidth);
         ImGui.Checkbox("Keep Fulfilled##keepFulfilled", ref _matsKeepFulfilled);
         if (ImGui.IsItemHovered())
@@ -252,7 +241,6 @@ public class CraftingMaterialsWindow : Window
         if (_cachedMaterialViewVersion != _editor.MaterialCacheVersion)
             return true;
         if (_cachedMaterialViewShowPrecrafts != _matsShowPrecrafts
-         || _cachedMaterialViewPreferVendors != _matsPreferVendors
          || _cachedMaterialViewKeepFulfilled != _matsKeepFulfilled
          || _cachedMaterialViewShowRetainer != showRetainer)
             return true;
@@ -316,7 +304,7 @@ public class CraftingMaterialsWindow : Window
                     return;
 
                 _cachedHasVisibleEntries = true;
-                switch (MaterialSourceClassifier.Classify(entry.ItemId, _matsPreferVendors))
+                switch (MaterialSourceClassifier.Classify(entry.ItemId))
                 {
                     case MaterialSource.Gatherable:
                     case MaterialSource.Fish:
@@ -384,7 +372,6 @@ public class CraftingMaterialsWindow : Window
         _cachedMaterialViewEditor = _editor;
         _cachedMaterialViewVersion = _editor?.MaterialCacheVersion ?? -1;
         _cachedMaterialViewShowPrecrafts = _matsShowPrecrafts;
-        _cachedMaterialViewPreferVendors = _matsPreferVendors;
         _cachedMaterialViewKeepFulfilled = _matsKeepFulfilled;
         _cachedMaterialViewShowRetainer = showRetainer;
         _cachedMobDropInfoInitialized = MobDropInfoCache.IsInitialized;

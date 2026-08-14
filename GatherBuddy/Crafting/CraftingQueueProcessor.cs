@@ -456,7 +456,8 @@ public class CraftingQueueProcessor : IDisposable
 
         _executionPlan.RefreshFromCurrentInventory();
         if (!CraftingQueuePreflight.TryValidate(_executionPlan, out var failure, validatePrecrafts: true)
-            || !CraftingQueuePreflight.TryValidateMaterials(_executionPlan, out failure))
+            || !_executionPlan.UsesMissionProvidedMaterials
+                && !CraftingQueuePreflight.TryValidateMaterials(_executionPlan, out failure))
         {
             FailQueue(failure);
             return;

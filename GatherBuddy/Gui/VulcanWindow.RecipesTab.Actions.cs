@@ -107,6 +107,7 @@ public partial class VulcanWindow
 
         var selectedMacroId = executionContext.SelectedMacroId;
         CraftingGameInterop.SetSelectedMacro(selectedMacroId);
+        CraftingGameInterop.SetDonatelloOptions(executionContext.DonatelloOptions);
         CraftingGameInterop.ReloadSolversForCraft(executionContext.EffectiveSolverMode, !executionContext.ForceProgressOnlyUnlockCraft);
         if (!string.IsNullOrEmpty(selectedMacroId))
             GatherBuddy.Log.Information($"[VulcanWindow] Using macro: {selectedMacroId}");
@@ -202,6 +203,7 @@ public partial class VulcanWindow
                 SelectedMacroId = settings.SelectedMacroId,
                 MacroMode = settings.MacroMode,
                 SolverOverride = settings.SolverOverride,
+                MaximizeQualityAtCostOfTime = settings.MaximizeQualityAtCostOfTime,
                 IngredientPreferences = new Dictionary<uint, int>(settings.IngredientPreferences),
             };
         }

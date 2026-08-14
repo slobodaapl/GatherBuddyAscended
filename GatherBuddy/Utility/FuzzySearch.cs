@@ -6,10 +6,14 @@ namespace GatherBuddy.Utility;
 internal static class FuzzySearch
 {
     internal static int? Score(string corpus, IReadOnlyList<string> queries)
+        => Score(corpus, queries, int.MaxValue);
+
+    internal static int? Score(string corpus, IReadOnlyList<string> queries, int maximumScore)
     {
         var score = 0;
-        foreach (var query in queries)
+        for (var queryIndex = 0; queryIndex < queries.Count; ++queryIndex)
         {
+            var query = queries[queryIndex];
             var maximumDistance = query.Length switch
             {
                 < 3 => 0,
@@ -17,6 +21,9 @@ internal static class FuzzySearch
                 < 10 => 2,
                 _ => 3,
             };
+            maximumDistance = System.Math.Min(maximumDistance, maximumScore - score);
+            if (maximumDistance < 0)
+                return null;
             var distance = DistanceToSubstring(corpus, query, maximumDistance);
             if (distance > maximumDistance)
                 return null;
@@ -28,9 +35,16 @@ internal static class FuzzySearch
 
     private static int DistanceToSubstring(string corpus, string query, int maximumDistance)
     {
-        var previousPrevious = new int[corpus.Length + 1];
-        var previous = new int[corpus.Length + 1];
-        var current = new int[corpus.Length + 1];
+        var rowLength = corpus.Length + 1;
+        var bufferLength = rowLength * 3;
+        Span<int> buffer = bufferLength <= 512
+            ? stackalloc int[bufferLength]
+            : new int[bufferLength];
+        var previousPrevious = buffer[..rowLength];
+        var previous = buffer.Slice(rowLength, rowLength);
+        var current = buffer.Slice(rowLength * 2, rowLength);
+        previousPrevious.Clear();
+        previous.Clear();
 
         for (var row = 1; row <= query.Length; row++)
         {
@@ -48,7 +62,10 @@ internal static class FuzzySearch
                     current[column] = System.Math.Min(current[column], previousPrevious[column - 2] + 1);
             }
 
-            (previousPrevious, previous, current) = (previous, current, previousPrevious);
+            var recycled = previousPrevious;
+            previousPrevious = previous;
+            previous = current;
+            current = recycled;
         }
 
         var best = query.Length;
