@@ -9,9 +9,9 @@ public class CraftingActionExecutor : IActionExecutor
 {
     public bool CanExecuteAction(VulcanSkill action, CraftState craft, StepState step, string outReason = "")
     {
-        if (action == VulcanSkill.None)
+        if (!action.IsExecutableAction())
         {
-            GatherBuddy.Log.Debug("[CraftingActionExecutor] Cannot execute VulcanSkill.None recommendation");
+            GatherBuddy.Log.Error($"[CraftingActionExecutor] Refusing unknown or non-executable action {action} ({(uint)action})");
             return false;
         }
 
@@ -29,11 +29,11 @@ public class CraftingActionExecutor : IActionExecutor
         {
             var playerJobId = (uint)(Dalamud.Objects.LocalPlayer?.ClassJob.RowId ?? 0);
             var actionId = action.ActionId(playerJobId);
-            if (actionId == 0)
+            if (actionId == 0 && action is VulcanSkill.MaterialMiracle or VulcanSkill.StellarSteadyHand)
                 actionId = (uint)action;
             if (actionId == 0)
             {
-                GatherBuddy.Log.Warning($"[CraftingActionExecutor] Invalid action: {action}");
+                GatherBuddy.Log.Error($"[CraftingActionExecutor] No mapped game action for {action} on job {playerJobId}");
                 return Task.FromResult(false);
             }
 

@@ -220,6 +220,15 @@ public partial class VulcanWindow
             if (ImGui.IsItemHovered())
                 ImGui.SetTooltip("May greatly increase solving time, but can reduce crafting time.");
 
+            var experimentalProgressPriority = raphaelConfig.DonatelloExperimentalProgressPriority;
+            if (ImGui.Checkbox("  EXPERIMENTAL: Progress-priority live replanning###DonatelloProgressPriority", ref experimentalProgressPriority))
+            {
+                raphaelConfig.DonatelloExperimentalProgressPriority = experimentalProgressPriority;
+                GatherBuddy.Config.Save();
+            }
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip("Disabled by default. Stages progress before quality during live Donatello replans. This is not the Progress Only solver and may produce inefficient rotations.");
+
             ImGui.Text("  Optimization threshold (ms): ");
             ImGui.SameLine();
             var optimizationThreshold = Math.Clamp(
@@ -369,6 +378,7 @@ public partial class VulcanWindow
                 {
                     config.PreferredRepairNPC = null;
                     config.PreferredRepairNPCDataId = 0;
+                    config.PreferredRepairNPCTerritoryType = 0;
                     GatherBuddy.Config.Save();
                 }
                 if (ImGui.IsItemHovered())
@@ -399,10 +409,14 @@ public partial class VulcanWindow
                             var territoryName = GetTerritoryName(npc.TerritoryType);
                             var npcLabel = $"{npc.Name} - {territoryName}";
                             
-                            if (ImGui.Selectable(npcLabel, currentNPC?.DataId == npc.DataId))
+                            if (ImGui.Selectable(
+                                    npcLabel,
+                                    currentNPC?.DataId == npc.DataId
+                                    && currentNPC.TerritoryType == npc.TerritoryType))
                             {
                                 config.PreferredRepairNPC = npc;
                                 config.PreferredRepairNPCDataId = npc.DataId;
+                                config.PreferredRepairNPCTerritoryType = npc.TerritoryType;
                                 GatherBuddy.Config.Save();
                             }
                         }

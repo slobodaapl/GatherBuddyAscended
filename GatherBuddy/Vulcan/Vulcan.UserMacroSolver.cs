@@ -130,7 +130,7 @@ public class UserMacroSolver : Solver
         }
 
         GatherBuddy.Log.Debug("[UserMacroSolver] All macro actions completed");
-        return new(VulcanSkill.None, "Macro complete");
+        return new(VulcanSkill.None, "Macro exhausted before craft completion", IsTerminalFailure: true);
     }
 
     private static VulcanSkill ConvertActionIdToSkill(uint actionId)

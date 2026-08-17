@@ -6,6 +6,11 @@ namespace GatherBuddy.Crafting;
 
 public static unsafe class SynthesisReader
 {
+    internal readonly record struct LiveCraftMetrics(
+        int MaxProgress,
+        int MaxQuality,
+        int MaxDurability);
+
     public static AtkUnitBase* GetSynthesisAddon()
     {
         var addon = Dalamud.GameGui.GetAddonByName("Synthesis");
@@ -34,12 +39,26 @@ public static unsafe class SynthesisReader
             return 0;
         return synthWindow->AtkValues[5].Int;
     }
+
+    public static int GetMaxProgress(AtkUnitBase* synthWindow)
+    {
+        if (synthWindow == null || synthWindow->AtkValuesCount < 7)
+            return 0;
+        return synthWindow->AtkValues[6].Int;
+    }
     
     public static int GetQuality(AtkUnitBase* synthWindow)
     {
         if (synthWindow == null || synthWindow->AtkValuesCount < 10)
             return 0;
         return synthWindow->AtkValues[9].Int;
+    }
+
+    public static int GetMaxQuality(AtkUnitBase* synthWindow)
+    {
+        if (synthWindow == null || synthWindow->AtkValuesCount < 18)
+            return 0;
+        return synthWindow->AtkValues[17].Int;
     }
     
     public static int GetDurability(AtkUnitBase* synthWindow)
@@ -48,6 +67,64 @@ public static unsafe class SynthesisReader
             return 0;
         return synthWindow->AtkValues[7].Int;
     }
+
+    public static int GetMaxDurability(AtkUnitBase* synthWindow)
+    {
+        if (synthWindow == null || synthWindow->AtkValuesCount < 9)
+            return 0;
+        return synthWindow->AtkValues[8].Int;
+    }
+
+    public static bool MatchesCraft(CraftState craft)
+    {
+        return TryReadLiveCraftMetrics(out var metrics)
+            && MatchesCraftMetrics(
+                craft,
+                metrics.MaxProgress,
+                metrics.MaxQuality,
+                metrics.MaxDurability);
+    }
+
+    internal static bool TryReadLiveCraftMetrics(out LiveCraftMetrics metrics)
+    {
+        var synthWindow = GetSynthesisAddon();
+        if (synthWindow == null || !synthWindow->IsVisible || synthWindow->AtkValuesCount < 18)
+        {
+            metrics = default;
+            return false;
+        }
+
+        Span<int> values = stackalloc int[18];
+        for (var index = 0; index < values.Length; ++index)
+            values[index] = synthWindow->AtkValues[index].Int;
+        metrics = ReadLiveCraftMetrics(values);
+        return metrics.MaxProgress > 0
+            && metrics.MaxQuality >= 0
+            && metrics.MaxDurability > 0;
+    }
+
+    internal static LiveCraftMetrics ReadLiveCraftMetrics(ReadOnlySpan<int> values)
+        => new(
+            values[6],
+            values[17],
+            values[8]);
+
+    internal static CraftState ApplyLiveCraftMetrics(CraftState craft, LiveCraftMetrics metrics)
+        => craft with
+        {
+            CraftProgress = metrics.MaxProgress,
+            CraftQualityMax = metrics.MaxQuality,
+            CraftDurability = metrics.MaxDurability,
+        };
+
+    internal static bool MatchesCraftMetrics(
+        CraftState craft,
+        int maxProgress,
+        int maxQuality,
+        int maxDurability)
+        => maxProgress == craft.CraftProgress
+            && maxQuality == craft.CraftQualityMax
+            && maxDurability == craft.CraftDurability;
     
     public static Condition GetCondition(AtkUnitBase* synthWindow)
     {
@@ -61,14 +138,17 @@ public static unsafe class SynthesisReader
         var synthWindow = GetSynthesisAddon();
         if (synthWindow == null || !synthWindow->IsVisible || synthWindow->AtkValuesCount < 16)
             return null;
+        var player = Dalamud.Objects.LocalPlayer;
+        if (player == null)
+            return null;
         
         var step = new StepState
         {
             Index = GetStepIndex(synthWindow),
             Progress = GetProgress(synthWindow),
-            Quality = GetQuality(synthWindow),
+            Quality = Simulator.ClampQuality(craft, GetQuality(synthWindow)),
             Durability = GetDurability(synthWindow),
-            RemainingCP = (int)(Dalamud.Objects.LocalPlayer?.CurrentCp ?? 0),
+            RemainingCP = (int)player.CurrentCp,
             Condition = GetCondition(synthWindow),
             TrainedPerfectionAvailable = previousStep?.TrainedPerfectionAvailable
                 ?? craft.StatLevel >= Simulator.MinLevel(VulcanSkill.TrainedPerfection),
@@ -77,7 +157,6 @@ public static unsafe class SynthesisReader
             MaterialMiracleCharges = craft.MissionHasMaterialMiracle
                 ? CraftingStateBuilder.GetDutyActionCharges((uint)VulcanSkill.MaterialMiracle)
                 : 0,
-            MaterialMiraclesUsed = previousStep?.MaterialMiraclesUsed ?? 0,
             StellarSteadyHandCharges = craft.MissionHasStellarSteadyHand
                 ? CraftingStateBuilder.GetDutyActionCharges((uint)VulcanSkill.StellarSteadyHand)
                 : 0,
@@ -85,6 +164,8 @@ public static unsafe class SynthesisReader
             CarefulObservationLeft = previousStep?.CarefulObservationLeft ?? (craft.Specialist ? 3 : 0),
             CrafterDelineationsLeft = previousStep?.CrafterDelineationsLeft ?? craft.CrafterDelineations,
             QuickInnoLeft = previousStep?.QuickInnoLeft ?? (craft.Specialist ? 1 : 0),
+            // Crafting combo state is action-derived; reconciliation advances it from each inferred outcome.
+            ComboAction = previousStep?.ComboAction ?? VulcanSkill.None,
             PrevComboAction = previousStep?.PrevComboAction ?? VulcanSkill.None,
             PrevActionFailed = previousStep?.PrevActionFailed ?? false
         };
@@ -96,7 +177,7 @@ public static unsafe class SynthesisReader
         
         return step;
     }
-    
+
     private static void ReadBuffsIntoStepState(StepState step)
     {
         var player = Dalamud.Objects.LocalPlayer;
@@ -142,9 +223,6 @@ public static unsafe class SynthesisReader
                     break;
                 case 3812:
                     step.ExpedienceLeft = status.Param;
-                    break;
-                case 4220:
-                    step.MaterialMiracleActive = true;
                     break;
                 case 4839:
                     step.StellarSteadyHandLeft = status.Param;

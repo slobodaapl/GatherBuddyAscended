@@ -868,10 +868,7 @@ public static class AcquisitionPlanner
             foreach (var transaction in candidate.Transactions)
             {
                 var existingIndex = Transactions.FindIndex(existing =>
-                    existing.SourceKind == transaction.SourceKind
-                    && string.Equals(existing.SourceId, transaction.SourceId, StringComparison.Ordinal)
-                    && existing.WorldId == transaction.WorldId
-                    && existing.IsHq == transaction.IsHq);
+                    CanMergeTransactions(existing, transaction));
                 if (existingIndex < 0)
                     Transactions.Add(transaction);
                 else
@@ -879,6 +876,68 @@ public static class AcquisitionPlanner
             }
 
             RecomputeTotals();
+        }
+
+        private static bool CanMergeTransactions(
+            AcquisitionTransaction existing,
+            AcquisitionTransaction incoming)
+        {
+            if (existing.SourceKind != incoming.SourceKind
+                || !string.Equals(existing.SourceId, incoming.SourceId, StringComparison.Ordinal)
+                || existing.WorldId != incoming.WorldId
+                || existing.IsHq != incoming.IsHq)
+            {
+                return false;
+            }
+
+            // Same-item demand may share one atomic source transaction. A
+            // vendor co-product alias may also have a different primary item
+            // ID, but only when its complete output and currency vectors are
+            // identical; unrelated items from the same source stay separate.
+            return existing.ItemId == incoming.ItemId
+                || AreEquivalentCoProductTransactions(existing, incoming);
+        }
+
+        private static bool AreEquivalentCoProductTransactions(
+            AcquisitionTransaction existing,
+            AcquisitionTransaction incoming)
+        {
+            if (existing.Outputs is not { Count: > 0 }
+                || incoming.Outputs is not { Count: > 0 }
+                || !existing.Outputs.Any(output => output.ItemId != existing.ItemId)
+                || !incoming.Outputs.Any(output => output.ItemId != incoming.ItemId))
+            {
+                return false;
+            }
+
+            var existingOutputs = existing.Outputs
+                .Select(output => (output.ItemId, output.Quantity))
+                .OrderBy(output => output.ItemId)
+                .ThenBy(output => output.Quantity);
+            var incomingOutputs = incoming.Outputs
+                .Select(output => (output.ItemId, output.Quantity))
+                .OrderBy(output => output.ItemId)
+                .ThenBy(output => output.Quantity);
+            if (!existingOutputs.SequenceEqual(incomingOutputs))
+                return false;
+
+            var existingUnits = Math.Max(1, existing.PurchaseUnits);
+            var incomingUnits = Math.Max(1, incoming.PurchaseUnits);
+            var existingCosts = existing.Costs
+                .Select(cost => (cost.CurrencyId, Amount: cost.Amount / existingUnits, cost.IsGil, cost.IsSpecialCurrency, cost.Group))
+                .OrderBy(cost => cost.CurrencyId)
+                .ThenBy(cost => cost.Amount)
+                .ThenBy(cost => cost.IsGil)
+                .ThenBy(cost => cost.IsSpecialCurrency)
+                .ThenBy(cost => cost.Group);
+            var incomingCosts = incoming.Costs
+                .Select(cost => (cost.CurrencyId, Amount: cost.Amount / incomingUnits, cost.IsGil, cost.IsSpecialCurrency, cost.Group))
+                .OrderBy(cost => cost.CurrencyId)
+                .ThenBy(cost => cost.Amount)
+                .ThenBy(cost => cost.IsGil)
+                .ThenBy(cost => cost.IsSpecialCurrency)
+                .ThenBy(cost => cost.Group);
+            return existingCosts.SequenceEqual(incomingCosts);
         }
 
         public void Restore(CandidatePlan snapshot)

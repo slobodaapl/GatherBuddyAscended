@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Linq;
 using FFXIVClientStructs.FFXIV.Client.Game;
 using FFXIVClientStructs.FFXIV.Client.Game.UI;
@@ -26,6 +27,7 @@ public static unsafe class GearsetStatsReader
     private const int SpecialistSlotIndex = 13;
     private const int BaseCp = 180;
     private const int MaxEquipSlotCategoryId = 22;
+    private static readonly ConcurrentDictionary<uint, string> LastReadFailureByJob = new();
 
     public static string RefreshGearsetFromCurrentEquipped(uint jobId)
     {
@@ -74,13 +76,14 @@ public static unsafe class GearsetStatsReader
         }
     }
 
-    private static GameStateBuilder.PlayerStats? ReadFromCurrentlyEquipped(uint jobId)
+    private static GameStateBuilder.PlayerStats? ReadFromCurrentlyEquipped(uint jobId, int jobLevel)
     {
         try
         {
             var craftsmanship = 0;
             var control = 0;
             var cp = BaseCp;
+            var splendorCosmic = false;
 
             var itemSheet = Dalamud.GameData.GetExcelSheet<Item>();
             var materiaSheet = Dalamud.GameData.GetExcelSheet<Materia>();
@@ -109,7 +112,9 @@ public static unsafe class GearsetStatsReader
                 bool isHQ = inventoryItem->Flags.HasFlag(InventoryItem.ItemFlags.HighQuality);
 
                 if (!itemSheet.TryGetRow(actualItemId, out var item))
-                    continue;
+                    return null;
+                if (i == 0)
+                    splendorCosmic = CraftingStateBuilder.IsSplendorCosmicTool(item.LevelEquip, item.Rarity);
                 var baseStats = new int[StatCount];
                 var meldStats = new int[StatCount];
 
@@ -118,15 +123,21 @@ public static unsafe class GearsetStatsReader
                 for (int m = 0; m < MateriaSlotCount; m++)
                 {
                     var materiaId = inventoryItem->Materia[m];
-                    if (materiaId == 0 || !materiaSheet.TryGetRow(materiaId, out var materia))
+                    if (materiaId == 0)
                         continue;
+                    if (!materiaSheet.TryGetRow(materiaId, out var materia))
+                        return null;
 
                     AccumulateMateriaStats(materia, inventoryItem->MateriaGrades[m], meldStats);
                 }
 
-                craftsmanship += CalculateEffectiveItemStat(item, CraftsmanshipParamId, baseStats[CraftsmanshipIndex], meldStats[CraftsmanshipIndex]);
-                control += CalculateEffectiveItemStat(item, ControlParamId, baseStats[ControlIndex], meldStats[ControlIndex]);
-                cp += CalculateEffectiveItemStat(item, CpParamId, baseStats[CpIndex], meldStats[CpIndex]);
+                if (!TryCalculateEffectiveSlotStat(i, item, CraftsmanshipParamId, baseStats[CraftsmanshipIndex], meldStats[CraftsmanshipIndex], out var itemCraftsmanship)
+                 || !TryCalculateEffectiveSlotStat(i, item, ControlParamId, baseStats[ControlIndex], meldStats[ControlIndex], out var itemControl)
+                 || !TryCalculateEffectiveSlotStat(i, item, CpParamId, baseStats[CpIndex], meldStats[CpIndex], out var itemCp))
+                    return null;
+                craftsmanship += itemCraftsmanship;
+                control += itemControl;
+                cp += itemCp;
             }
 
             var manipulation = IsManipulationUnlocked(jobId);
@@ -136,12 +147,12 @@ public static unsafe class GearsetStatsReader
                 Craftsmanship: craftsmanship,
                 Control: control,
                 CP: cp,
-            Level: 100,
-            Manipulation: manipulation,
-            Specialist: isSpecialist,
-            SplendorCosmic: false,
-            CrafterDelineations: CraftingSpecialistResources.GetCrafterDelineationCount()
-        );
+                Level: jobLevel,
+                Manipulation: manipulation,
+                Specialist: isSpecialist,
+                SplendorCosmic: splendorCosmic,
+                CrafterDelineations: CraftingSpecialistResources.GetCrafterDelineationCount()
+            );
         }
         catch (Exception ex)
         {
@@ -240,16 +251,47 @@ public static unsafe class GearsetStatsReader
         return statIndex >= 0;
     }
 
-    private static int CalculateEffectiveItemStat(Item item, uint paramId, int baseValue, int meldedValue)
+    private static bool TryCalculateEffectiveItemStat(Item item, uint paramId, int baseValue, int meldedValue, out int value)
     {
         var uncappedValue = baseValue + meldedValue;
         if (uncappedValue == 0)
-            return 0;
+        {
+            value = 0;
+            return true;
+        }
 
         if (!TryGetItemStatCap(item, paramId, baseValue, out var cap))
-            return uncappedValue;
+        {
+            value = 0;
+            return false;
+        }
 
-        return Math.Min(uncappedValue, cap);
+        value = Math.Min(uncappedValue, cap);
+        return true;
+    }
+
+    private static bool TryCalculateEffectiveSlotStat(
+        int slotIndex,
+        Item item,
+        uint paramId,
+        int baseValue,
+        int meldedValue,
+        out int value)
+    {
+        if (TryResolveUncappedSpecialistStat(slotIndex, baseValue, meldedValue, out value))
+            return true;
+
+        return TryCalculateEffectiveItemStat(item, paramId, baseValue, meldedValue, out value);
+    }
+
+    internal static bool TryResolveUncappedSpecialistStat(
+        int slotIndex,
+        int baseValue,
+        int meldedValue,
+        out int value)
+    {
+        value = baseValue + meldedValue;
+        return slotIndex == SpecialistSlotIndex;
     }
 
     private static bool TryGetItemStatCap(Item item, uint paramId, int baseValue, out int cap)
@@ -372,11 +414,14 @@ public static unsafe class GearsetStatsReader
                 AccumulateMateriaStats(materia, gearItem.MateriaGrades[materiaIndex], meldStats);
             }
 
-            perception += CalculateEffectiveItemStat(
-                item,
-                PerceptionParamId,
-                baseStats[PerceptionIndex],
-                meldStats[PerceptionIndex]);
+            if (!TryCalculateEffectiveItemStat(
+                    item,
+                    PerceptionParamId,
+                    baseStats[PerceptionIndex],
+                    meldStats[PerceptionIndex],
+                    out var itemPerception))
+                return false;
+            perception += itemPerception;
         }
 
         return true;
@@ -386,14 +431,21 @@ public static unsafe class GearsetStatsReader
     {
         try
         {
+            if (!CraftingJobLevelReader.TryRead(jobId, out var jobLevel) || jobLevel <= 0)
+            {
+                GatherBuddy.Log.Warning($"[GearsetStatsReader] Could not read the current level for job {jobId}.");
+                return null;
+            }
+
             var currentJob = Dalamud.Objects.LocalPlayer?.ClassJob.RowId ?? 0;
             
             if (currentJob == jobId)
             {
-                var equippedStats = ReadFromCurrentlyEquipped(jobId);
+                var equippedStats = ReadFromCurrentlyEquipped(jobId, jobLevel);
                 
                 if (equippedStats != null && equippedStats.Craftsmanship > 0)
                 {
+                    LastReadFailureByJob.TryRemove(jobId, out _);
                     return equippedStats;
                 }
             }
@@ -404,6 +456,8 @@ public static unsafe class GearsetStatsReader
 
             fixed (RaptureGearsetModule.GearsetEntry* entries = gearsetModule->Entries)
             {
+                var matchingGearsets = 0;
+                var failures = new System.Collections.Generic.List<string>();
                 for (int i = 0; i < 100; i++)
                 {
                     if ((entries[i].Flags & RaptureGearsetModule.GearsetFlag.Exists) == 0)
@@ -412,8 +466,21 @@ public static unsafe class GearsetStatsReader
                     if (entries[i].ClassJob != jobId)
                         continue;
 
-                    return CalculateStatsFromGearset(&entries[i], jobId);
+                    matchingGearsets++;
+                    var stats = CalculateStatsFromGearset(&entries[i], jobId, jobLevel, out var failureReason);
+                    if (stats != null && stats.Craftsmanship > 0)
+                    {
+                        LastReadFailureByJob.TryRemove(jobId, out _);
+                        return stats;
+                    }
+                    failures.Add($"gearset {i}: {failureReason}");
                 }
+
+                ReportReadFailure(
+                    jobId,
+                    matchingGearsets == 0
+                        ? "no saved gearset entry exists"
+                        : $"{matchingGearsets} saved gearset(s) found but none were readable ({string.Join("; ", failures)})");
             }
             return null;
         }
@@ -424,20 +491,26 @@ public static unsafe class GearsetStatsReader
         }
     }
 
-    private static GameStateBuilder.PlayerStats? CalculateStatsFromGearset(RaptureGearsetModule.GearsetEntry* gearset, uint jobId)
+    private static GameStateBuilder.PlayerStats? CalculateStatsFromGearset(
+        RaptureGearsetModule.GearsetEntry* gearset,
+        uint jobId,
+        int jobLevel,
+        out string failureReason)
     {
+        failureReason = string.Empty;
         try
         {
             var craftsmanship = 0;
             var control = 0;
             var cp = BaseCp;
+            var splendorCosmic = false;
 
             var itemSheet = Dalamud.GameData.GetExcelSheet<Item>();
             var materiaSheet = Dalamud.GameData.GetExcelSheet<Materia>();
 
             if (itemSheet == null || materiaSheet == null)
             {
-                GatherBuddy.Log.Debug("[GearsetStatsReader] Item or Materia sheet is null");
+                failureReason = "Item or Materia sheet is unavailable";
                 return null;
             }
 
@@ -450,7 +523,12 @@ public static unsafe class GearsetStatsReader
                 uint actualItemId = gearItem.ItemId % 1000000;
                 bool isHQ = gearItem.ItemId >= 1000000;
                 if (!itemSheet.TryGetRow(actualItemId, out var item))
-                    continue;
+                {
+                    failureReason = $"slot {i} references unknown item {actualItemId}";
+                    return null;
+                }
+                if (i == 0)
+                    splendorCosmic = CraftingStateBuilder.IsSplendorCosmicTool(item.LevelEquip, item.Rarity);
                 var baseStats = new int[StatCount];
                 var meldStats = new int[StatCount];
 
@@ -459,15 +537,27 @@ public static unsafe class GearsetStatsReader
                 for (int m = 0; m < MateriaSlotCount; m++)
                 {
                     var materiaId = gearItem.Materia[m];
-                    if (materiaId == 0 || !materiaSheet.TryGetRow(materiaId, out var materia))
+                    if (materiaId == 0)
                         continue;
+                    if (!materiaSheet.TryGetRow(materiaId, out var materia))
+                    {
+                        failureReason = $"slot {i} materia {m} references unknown materia {materiaId}";
+                        return null;
+                    }
 
                     AccumulateMateriaStats(materia, gearItem.MateriaGrades[m], meldStats);
                 }
 
-                craftsmanship += CalculateEffectiveItemStat(item, CraftsmanshipParamId, baseStats[CraftsmanshipIndex], meldStats[CraftsmanshipIndex]);
-                control += CalculateEffectiveItemStat(item, ControlParamId, baseStats[ControlIndex], meldStats[ControlIndex]);
-                cp += CalculateEffectiveItemStat(item, CpParamId, baseStats[CpIndex], meldStats[CpIndex]);
+                if (!TryCalculateEffectiveSlotStat(i, item, CraftsmanshipParamId, baseStats[CraftsmanshipIndex], meldStats[CraftsmanshipIndex], out var itemCraftsmanship)
+                 || !TryCalculateEffectiveSlotStat(i, item, ControlParamId, baseStats[ControlIndex], meldStats[ControlIndex], out var itemControl)
+                 || !TryCalculateEffectiveSlotStat(i, item, CpParamId, baseStats[CpIndex], meldStats[CpIndex], out var itemCp))
+                {
+                    failureReason = $"slot {i} item {actualItemId} has unavailable stat-cap data";
+                    return null;
+                }
+                craftsmanship += itemCraftsmanship;
+                control += itemControl;
+                cp += itemCp;
             }
 
             var manipulation = IsManipulationUnlocked(jobId);
@@ -477,18 +567,26 @@ public static unsafe class GearsetStatsReader
                 Craftsmanship: craftsmanship,
                 Control: control,
                 CP: cp,
-                Level: 100,
+                Level: jobLevel,
                 Manipulation: manipulation,
                 Specialist: isSpecialist,
-                SplendorCosmic: false,
+                SplendorCosmic: splendorCosmic,
                 CrafterDelineations: CraftingSpecialistResources.GetCrafterDelineationCount()
             );
         }
         catch (Exception ex)
         {
-            GatherBuddy.Log.Warning($"[GearsetStatsReader] Failed to calculate stats from gearset: {ex.Message}");
+            failureReason = ex.Message;
             return null;
         }
+    }
+
+    private static void ReportReadFailure(uint jobId, string reason)
+    {
+        if (LastReadFailureByJob.TryGetValue(jobId, out var previous) && previous == reason)
+            return;
+        LastReadFailureByJob[jobId] = reason;
+        GatherBuddy.Log.Warning($"[GearsetStatsReader] Failed to read stats for job {jobId}: {reason}");
     }
 
     private static bool IsManipulationUnlocked(uint jobId)
@@ -616,7 +714,8 @@ public static unsafe class GearsetStatsReader
             Level: baseStats.Level,
             Manipulation: baseStats.Manipulation,
             Specialist: baseStats.Specialist,
-            SplendorCosmic: baseStats.SplendorCosmic
+            SplendorCosmic: baseStats.SplendorCosmic,
+            CrafterDelineations: baseStats.CrafterDelineations
         );
     }
 }

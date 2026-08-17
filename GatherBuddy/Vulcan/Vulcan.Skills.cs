@@ -1,3 +1,5 @@
+using System;
+
 namespace GatherBuddy.Vulcan;
 
 public enum VulcanSkill
@@ -49,3 +51,10 @@ public enum VulcanSkill
         MaterialMiracle = 41269,
         StellarSteadyHand = 46843,
     }
+
+public static class VulcanSkillValidation
+{
+    public static bool IsExecutableAction(this VulcanSkill action)
+        => action is not (VulcanSkill.None or VulcanSkill.TouchCombo or VulcanSkill.TouchComboRefined)
+            && Enum.IsDefined(typeof(VulcanSkill), action);
+}

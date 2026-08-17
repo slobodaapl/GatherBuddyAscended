@@ -66,7 +66,8 @@ public static class DonatelloPlanEvaluator
     private static int Duration(VulcanSkill action) => action switch
     {
         VulcanSkill.WasteNot or VulcanSkill.WasteNot2 or VulcanSkill.Veneration
-            or VulcanSkill.Innovation or VulcanSkill.GreatStrides or VulcanSkill.Manipulation => 2,
+            or VulcanSkill.Innovation or VulcanSkill.GreatStrides or VulcanSkill.Manipulation
+            or VulcanSkill.StellarSteadyHand => 2,
         _ => 3,
     };
 }

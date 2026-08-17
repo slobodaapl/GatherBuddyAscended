@@ -590,7 +590,16 @@ namespace GatherBuddy.AutoGather
                 // Set the current gather target when entering a node
                 if (_currentGatherTarget == null)
                 {
-                    _currentGatherTarget = _activeItemList.CurrentOrDefault;
+                    var candidate = _activeItemList.CurrentOrDefault;
+                    if (candidate == default
+                     || Player.Job != 18 /* FSH */ && !ShouldAutoGatherOwnCurrentSession(candidate))
+                    {
+                        StopNavigation();
+                        DoManualGatherAssist();
+                        return;
+                    }
+
+                    _currentGatherTarget = candidate;
                 }
 
                 if (GatheringWindowReader != null || MasterpieceReader?.IsValid == true)
@@ -767,12 +776,16 @@ namespace GatherBuddy.AutoGather
                     }
                 }
 
-                if (_activeItemList.HasCompletionSourceItems && HasReducibleItems(requireConfigured: false))
+                if (_activeItemList.TryGetPendingReductionSource(out var reductionSourceItemId)
+                 && HasReducibleItems(requireConfigured: false))
                 {
                     if (IsFishing || IsGathering)
                         QueueQuitFishingTasks();
                     else
-                        ReduceItems(false);
+                        ReduceItems(
+                            false,
+                            () => _plugin.AutoGatherListsManager.SetActiveItems(true),
+                            reductionSourceItemId);
                     return;
                 }
 
@@ -853,19 +866,22 @@ namespace GatherBuddy.AutoGather
                     return;
                 }
 
-                var waitAtAetheryte = false;
+                var waitForNextTimed = false;
                 if (GatherBuddy.Config.AutoGatherConfig.TeleportToNextNode)
                 {
                     var nextTimed = _activeItemList.PeekNextTimed();
-                    waitAtAetheryte = nextTimed != default;
-                    if (waitAtAetheryte && nextTimed.Location.Territory.Id != currentTerritory)
+                    waitForNextTimed = nextTimed != default;
+                    if (waitForNextTimed
+                     && IsTimedTargetAvailable(nextTimed.Time)
+                     && nextTimed.Location.Territory.Id != currentTerritory)
                     {
-                        // Replace next target and fall through to teleport to its location.
+                        // The active-item cache can cross the grace boundary between refreshes.
+                        // Promote the target only after the live availability check agrees.
                         next = nextTimed;
                     }
                 }
 
-                if (!waitAtAetheryte && GatherBuddy.Config.AutoGatherConfig.GoHomeWhenIdle)
+                if (!waitForNextTimed && GatherBuddy.Config.AutoGatherConfig.GoHomeWhenIdle)
                     if (GoHome("gathering is idle"))
                         return;
 
@@ -920,7 +936,9 @@ namespace GatherBuddy.AutoGather
                         _plugin.Ipc.AutoGatherWaiting();
                     }
 
-                    AutoStatus = "No available items to gather";
+                    AutoStatus = waitForNextTimed
+                        ? "Waiting for next timed item"
+                        : "No available items to gather";
                     return;
                 }
             }
@@ -1879,7 +1897,12 @@ namespace GatherBuddy.AutoGather
                     if (TryWindmireJump(ref pos))
                         Navigate(pos, ShouldFly(pos), direct: true, nodeId: nextNode.BaseId);
                     else
-                        MoveToCloseNode(nextNode, next.Gatherable!, config);
+                        MoveToCloseNode(
+                            nextNode,
+                            next.Gatherable!,
+                            config,
+                            next.CompletionItemId,
+                            next.Time);
                 }
             }
             else
@@ -1958,7 +1981,15 @@ namespace GatherBuddy.AutoGather
                 
                 if (next.Gatherable != null)
                 {
-                    MoveToCloseNode(closestTargetableNode, next.Gatherable, config);
+                    if (ShouldWaitForUpcomingLegendaryGp(next, config, closestTargetableNode))
+                        return;
+
+                    MoveToCloseNode(
+                        closestTargetableNode,
+                        next.Gatherable,
+                        config,
+                        next.CompletionItemId,
+                        next.Time);
                 }
                 else if (next.Fish != null)
                 {

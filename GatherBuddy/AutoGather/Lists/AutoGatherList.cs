@@ -84,12 +84,27 @@ public class AutoGatherList
         items.RemoveAt(index);
     }
 
-    public bool Replace(int index, IGatherable item)
+    public bool Replace(int index, IGatherable item, uint completionItemId = 0)
     {
-        if (quantities.ContainsKey(item))
+        var old = items[index];
+        if (old != item && quantities.ContainsKey(item))
             return false;
 
-        var old = items[index];
+        if (old == item)
+        {
+            var oldCompletionItemId = completionItemIds.GetValueOrDefault(item);
+            if (completionItemId == item.ItemId)
+                completionItemId = 0;
+            if (oldCompletionItemId == completionItemId)
+                return false;
+
+            if (completionItemId == 0)
+                completionItemIds.Remove(item);
+            else
+                completionItemIds[item] = completionItemId;
+            return true;
+        }
+
         quantities.Remove(old, out var quantity);
         enabledItems.Remove(old, out var enabled);
         if (old is Gatherable gatherable)
@@ -98,6 +113,8 @@ public class AutoGatherList
         items[index]       = item;
         quantities[item]   = NormalizeQuantity(item, quantity);
         enabledItems[item] = enabled;
+        if (completionItemId != 0 && completionItemId != item.ItemId)
+            completionItemIds[item] = completionItemId;
 
         return true;
     }

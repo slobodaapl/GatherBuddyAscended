@@ -6,6 +6,7 @@ using GatherBuddy.Classes;
 using GatherBuddy.Plugin;
 using GatherBuddy.Time;
 using System;
+using System.Collections.Generic;
 using System.Linq;
 
 namespace GatherBuddy.AutoGather;
@@ -14,6 +15,15 @@ internal static class ManualGatherAssistPolicy
 {
     public static bool IsEnabled(AutoGatherConfig config)
         => config.DoGathering && config.AssistManualGathering;
+
+    public static bool ShouldAutoGatherOwnSession(
+        uint targetItemId,
+        IEnumerable<uint> targetNodeIds,
+        uint openedNodeId,
+        IEnumerable<uint> visibleItemIds)
+        => targetItemId != 0
+        && (openedNodeId != 0 && targetNodeIds.Contains(openedNodeId)
+         || visibleItemIds.Contains(targetItemId));
 }
 
 public partial class AutoGather
@@ -123,6 +133,22 @@ public partial class AutoGather
             return;
 
         RunManualGatherAction(target);
+    }
+
+    private bool ShouldAutoGatherOwnCurrentSession(GatherTarget target)
+    {
+        var openedNodeId = (Dalamud.Targets.Target ?? Dalamud.Targets.PreviousTarget)?.BaseId ?? 0;
+        IEnumerable<uint> targetNodeIds = target.Node is { } node
+            ? node.WorldPositions.Keys
+            : Array.Empty<uint>();
+        IEnumerable<uint> visibleItemIds = GatheringWindowReader is { } reader
+            ? reader.ItemSlots.Where(slot => !slot.IsEmpty).Select(slot => slot.Item.ItemId)
+            : Array.Empty<uint>();
+        return ManualGatherAssistPolicy.ShouldAutoGatherOwnSession(
+            target.Item?.ItemId ?? 0,
+            targetNodeIds,
+            openedNodeId,
+            visibleItemIds);
     }
 
     private void TryBeginManualGatherTarget(GatheringReader reader)

@@ -874,7 +874,7 @@ public partial class VulcanWindow
             ImGui.SetTooltip("Reduce the requested final-craft quantity by the number already in your inventory. Generated precrafts already reuse available items.");
 
         ImGui.SetCursorPosX(ImGui.GetCursorPosX() + detailInset);
-        ImGui.Checkbox("Quick Synth All##browserQuickSynthAll", ref _browserQuickSynthAll);
+        ImGui.Checkbox("Quick Synth##browserQuickSynthAll", ref _browserQuickSynthAll);
         if (ImGui.IsItemHovered())
             ImGui.SetTooltip("Force Quick Synthesis on every eligible generated precraft and the final craft.");
 
@@ -886,9 +886,9 @@ public partial class VulcanWindow
                 ImGui.SetTooltip("Use only NQ ingredients where the Quick Synth All override applies.");
 
             ImGui.SetCursorPosX(ImGui.GetCursorPosX() + detailInset + VulcanUiScaling.Scaled(20f));
-            ImGui.Checkbox("Precrafts Only##browserQuickSynthPrecraftsOnly", ref _browserQuickSynthAllPrecraftsOnly);
+            ImGui.Checkbox("Precrafts only##browserQuickSynthPrecraftsOnly", ref _browserQuickSynthAllPrecraftsOnly);
             if (ImGui.IsItemHovered())
-                ImGui.SetTooltip("Apply Quick Synth All and Prefer NQ only to generated precrafts; craft the selected final recipe normally.");
+                ImGui.SetTooltip("Apply Quick Synth and Prefer NQ only to generated precrafts; craft the selected final recipe normally.");
         }
 
         ImGui.SetCursorPosX(ImGui.GetCursorPosX() + detailInset);

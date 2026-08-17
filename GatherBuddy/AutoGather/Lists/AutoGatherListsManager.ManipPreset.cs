@@ -1,6 +1,8 @@
 using ElliLib.Filesystem;
+using FFXIVClientStructs.FFXIV.Client.Game;
 using GatherBuddy.AutoGather.Extensions;
 using GatherBuddy.Classes;
+using GatherBuddy.Crafting.Acquisition;
 using GatherBuddy.Enums;
 using GatherBuddy.Interfaces;
 using GatherBuddy.Plugin;
@@ -105,6 +107,11 @@ public partial class AutoGatherListsManager
         }
         
         if (!list.Enabled && !ValidateGatherablePerception(list))
+        {
+            return;
+        }
+
+        if (!list.Enabled && !ValidateReductionSelections(list))
         {
             return;
         }
@@ -329,6 +336,30 @@ public partial class AutoGatherListsManager
             return true;
         }
     }
+
+    private static bool ValidateReductionSelection(IGatherable item, uint completionItemId, bool requireUnlocked)
+    {
+        if (completionItemId == 0)
+            return true;
+
+        if (!AetherialReductionSourceResolver.IsSourceForOutput(completionItemId, item.ItemId))
+        {
+            Communicator.PrintError(
+                $"[Auto-Gather] Cannot use {item.Name[GatherBuddy.Language]} as reduction source for item {completionItemId}: no matching Aetherial Reduction relation exists.");
+            return false;
+        }
+
+        if (!requireUnlocked || QuestManager.IsQuestComplete(67633))
+            return true;
+
+        Communicator.PrintError(
+            $"[Auto-Gather] Cannot enable Aetherial Reduction for {item.Name[GatherBuddy.Language]}: the required quest is not complete.");
+        return false;
+    }
+
+    private static bool ValidateReductionSelections(AutoGatherList list)
+        => list.Items.All(item => !list.EnabledItems.GetValueOrDefault(item)
+            || ValidateReductionSelection(item, list.CompletionItemIds.GetValueOrDefault(item), true));
     
     private Dictionary<uint, uint>? GetCustomPresetBaitIds()
     {
@@ -405,7 +436,6 @@ public partial class AutoGatherListsManager
 
     public bool RemoveCompletedItemFromLists(IGatherable item)
     {
-        var totalCount = item.GetTotalCount();
         var removedAny = false;
         foreach (var list in _fileSystem.Select(kvp => kvp.Key))
         {
@@ -413,7 +443,11 @@ public partial class AutoGatherListsManager
                 continue;
             if (!list.EnabledItems.TryGetValue(item, out var itemEnabled) || !itemEnabled)
                 continue;
-            if (!list.Quantities.TryGetValue(item, out var quantity) || totalCount < quantity)
+            if (!list.Quantities.TryGetValue(item, out var quantity))
+                continue;
+
+            var totalCount = item.GetCompletionCount(list.CompletionItemIds.GetValueOrDefault(item));
+            if (totalCount < quantity)
                 continue;
 
             var index = list.Items.IndexOf(item);
@@ -450,7 +484,7 @@ public partial class AutoGatherListsManager
                 if (!list.Quantities.TryGetValue(item, out var quantity))
                     continue;
 
-                var totalCount = item.GetTotalCount();
+                var totalCount = item.GetCompletionCount(list.CompletionItemIds.GetValueOrDefault(item));
                 if (totalCount < quantity)
                     continue;
 
@@ -464,15 +498,22 @@ public partial class AutoGatherListsManager
         return removedAny;
     }
 
-    public void AddItem(AutoGatherList list, IGatherable item)
+    public void AddItem(AutoGatherList list, IGatherable item, uint completionItemId = 0)
     {
-        if (list.Add(item))
+        if (!ValidateReductionSelection(item, completionItemId, false))
+            return;
+
+        if (list.Add(item, completionItemId: completionItemId))
         {
             if (list.Enabled && !ValidateSingleFishBait(item))
             {
                 list.SetEnabled(item, false);
             }
             if (list.Enabled && !ValidateSingleGatherablePerception(item))
+            {
+                list.SetEnabled(item, false);
+            }
+            if (list.Enabled && !ValidateReductionSelection(item, completionItemId, true))
             {
                 list.SetEnabled(item, false);
             }
@@ -493,13 +534,18 @@ public partial class AutoGatherListsManager
             SetActiveItems();
     }
 
-    public void ChangeItem(AutoGatherList list, IGatherable item, int idx)
+    public void ChangeItem(AutoGatherList list, IGatherable item, int idx, uint completionItemId = 0)
     {
         if (idx < 0 || idx >= list.Items.Count)
             return;
 
-        if (list.Replace(idx, item))
+        if (!ValidateReductionSelection(item, completionItemId, false))
+            return;
+
+        if (list.Replace(idx, item, completionItemId))
         {
+            if (list.Enabled && !ValidateReductionSelection(item, completionItemId, true))
+                list.SetEnabled(item, false);
             Save();
             if (list.Enabled)
                 SetActiveItems();
@@ -527,6 +573,12 @@ public partial class AutoGatherListsManager
         {
             return;
         }
+
+        if (enabled && list.Enabled
+         && !ValidateReductionSelection(item, list.CompletionItemIds.GetValueOrDefault(item), true))
+        {
+            return;
+        }
         
         if (list.SetEnabled(item, enabled))
         {
@@ -550,6 +602,14 @@ public partial class AutoGatherListsManager
             }
 
             if (enabled && list.Enabled && !ValidateSingleGatherablePerception(item))
+            {
+                skipped++;
+                continue;
+            }
+
+
+            if (enabled && list.Enabled
+             && !ValidateReductionSelection(item, list.CompletionItemIds.GetValueOrDefault(item), true))
             {
                 skipped++;
                 continue;
@@ -583,13 +643,20 @@ public partial class AutoGatherListsManager
     {
         var item = source.Items[idx];
         var quantity = source.Quantities[item];
-        if (destination.Add(item, quantity))
+        var completionItemId = source.CompletionItemIds.GetValueOrDefault(item);
+        if (destination.Add(item, quantity, completionItemId))
         {
             destination.SetEnabled(item, source.EnabledItems[item]);
             destination.SetPreferredLocation(item, source.PreferredLocations.GetValueOrDefault(item));
         }
         else
         {
+            if (destination.CompletionItemIds.GetValueOrDefault(item) != completionItemId)
+            {
+                Communicator.PrintError(
+                    $"[Auto-Gather] Cannot merge {item.Name[GatherBuddy.Language]} list entries with different completion items.");
+                return;
+            }
             destination.SetQuantity(item, destination.Quantities[item] + quantity);
         }
         source.RemoveAt(idx);

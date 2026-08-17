@@ -15,6 +15,7 @@ public static class CraftingProcessor
     private static SolveRequest? _pendingRequest;
     private static SolveRequest? _queuedRequest;
     private static StepState? _recommendationStep;
+    private static string _faultReason = string.Empty;
 
     private sealed record SolveRequest(
         Solver Solver,
@@ -32,6 +33,8 @@ public static class CraftingProcessor
     public static Solver.Recommendation NextRecommendation => _nextRecommendation;
     public static string ActiveSolverName => _activeSolverName;
     public static bool IsActive => _activeSolver != null;
+    public static string FaultReason => _faultReason;
+    internal static Solver? ActiveSolver => _activeSolver;
 
     public static void Setup()
     {
@@ -41,11 +44,16 @@ public static class CraftingProcessor
 
     public static void Dispose()
     {
+        var solver = _activeSolver;
+        AbandonPendingWork();
+        if (solver is DonatelloSolver donatello
+            && !donatello.WaitForPendingSolve(TimeSpan.FromSeconds(5)))
+            GatherBuddy.Log.Error("[CraftingProcessor] Donatello did not stop within five seconds during plugin shutdown");
         _activeSolver = null;
         _nextRecommendation = new(VulcanSkill.None);
         _activeSolverName = "";
-        _queuedRequest = null;
         _recommendationStep = null;
+        _faultReason = string.Empty;
     }
 
     public static IEnumerable<ISolverDefinition.Desc> GetAvailableSolversForCraft(CraftState craft, bool includeUnsupported = false)
@@ -68,12 +76,17 @@ public static class CraftingProcessor
 
     public static void OnCraftStarted(CraftState craft, StepState initialStep, uint recipeId, bool isTrial)
     {
+        AbandonPendingWork();
+        _faultReason = string.Empty;
         GatherBuddy.Log.Debug($"[CraftingProcessor] OnCraftStarted: recipe={recipeId}, solvers available={_solverDefinitions.Count}");
         var bestSolver = FindBestSolver(craft);
         GatherBuddy.Log.Debug($"[CraftingProcessor] FindBestSolver result: {(bestSolver == null ? "null" : bestSolver.Value.Name)}");
         if (bestSolver == null || bestSolver.Value.UnsupportedReason.Length > 0)
         {
-            GatherBuddy.Log.Warning($"[CraftingProcessor] No solver available. Reason: {(bestSolver == null ? "null" : bestSolver.Value.UnsupportedReason)}");
+            _faultReason = bestSolver == null
+                ? "No crafting solver is available"
+                : $"No crafting solver is available: {bestSolver.Value.UnsupportedReason}";
+            GatherBuddy.Log.Error($"[CraftingProcessor] {_faultReason}");
             _activeSolver = null;
             _activeSolverName = "";
             return;
@@ -84,11 +97,63 @@ public static class CraftingProcessor
 
         if (_activeSolver == null)
         {
-            GatherBuddy.Log.Error($"[CraftingProcessor] Failed to create solver instance");
+            _faultReason = $"Failed to create {bestSolver.Value.Name}";
+            GatherBuddy.Log.Error($"[CraftingProcessor] {_faultReason}");
             return;
         }
 
         Submit(craft, initialStep, resume: false);
+    }
+
+    public static bool TryAdoptLiveCraft(
+        CraftState craft,
+        StepState liveStep,
+        bool allowDonatelloLiveRecovery,
+        out string failureReason)
+    {
+        AbandonPendingWork();
+        _faultReason = string.Empty;
+        Solver? solver = null;
+        var solverName = string.Empty;
+        if (allowDonatelloLiveRecovery)
+        {
+            if (DonatelloSolverDefinition.TryCreateLiveSolver(craft, out var donatello, out failureReason))
+            {
+                solver = donatello;
+                solverName = "Donatello (Live recovery from observed state)";
+            }
+            else
+            {
+                return false;
+            }
+        }
+
+        if (solver == null)
+        {
+            var bestSolver = FindBestSolver(craft);
+            if (bestSolver == null || bestSolver.Value.UnsupportedReason.Length > 0)
+            {
+                failureReason = bestSolver?.UnsupportedReason ?? "no solver is available";
+                return false;
+            }
+
+            solver = bestSolver.Value.CreateSolver(craft);
+            solverName = bestSolver.Value.Name;
+            if (solver is not (ProgressOnlySolver or StandardSolver))
+            {
+                failureReason = $"{bestSolver.Value.Name} cannot safely recover an unknown mid-craft action index";
+                return false;
+            }
+        }
+
+        _activeSolver = solver;
+        _activeSolverName = solverName;
+        _nextRecommendation = new(VulcanSkill.None, "Solver resuming live craft");
+        _recommendationStep = null;
+        _faultReason = string.Empty;
+        Submit(craft, liveStep, resume: solver is DonatelloSolver);
+        failureReason = string.Empty;
+        return true;
     }
 
     public static void OnCraftAdvanced(CraftState craft, StepState step, uint? recipeId)
@@ -110,11 +175,21 @@ public static class CraftingProcessor
 
     public static void OnCraftFinished(CraftState craft, StepState finalStep, uint? recipeId, bool cancelled)
     {
+        AbandonPendingWork();
         _activeSolver = null;
         _activeSolverName = "";
         _nextRecommendation = new(VulcanSkill.None);
-        _queuedRequest = null;
         _recommendationStep = null;
+        _faultReason = string.Empty;
+    }
+
+    private static void AbandonPendingWork()
+    {
+        if (_activeSolver is IDisposable disposable)
+            disposable.Dispose();
+        _pendingSolve = null;
+        _pendingRequest = null;
+        _queuedRequest = null;
     }
 
     public static void Update()
@@ -138,7 +213,8 @@ public static class CraftingProcessor
 
         if (outcome.Error != null)
         {
-            _nextRecommendation = new(VulcanSkill.None, "Solver failed");
+            _faultReason = $"{outcome.Request.SolverName} failed: {outcome.Error.Message}";
+            _nextRecommendation = new(VulcanSkill.None, _faultReason, IsTerminalFailure: true);
             _recommendationStep = outcome.Request.Step;
             GatherBuddy.Log.Error($"[CraftingProcessor] Background solver failed: {outcome.Error}");
         }
@@ -146,6 +222,13 @@ public static class CraftingProcessor
         {
             _nextRecommendation = outcome.Recommendation;
             _recommendationStep = outcome.Request.Step;
+            if (_nextRecommendation.IsTerminalFailure)
+            {
+                _faultReason = string.IsNullOrWhiteSpace(_nextRecommendation.Comment)
+                    ? $"{outcome.Request.SolverName} stopped without a usable action"
+                    : _nextRecommendation.Comment;
+                GatherBuddy.Log.Error($"[CraftingProcessor] {_faultReason}");
+            }
             GatherBuddy.Log.Debug($"[CraftingProcessor] Background recommendation: {_nextRecommendation.Action}");
         }
 
@@ -160,6 +243,8 @@ public static class CraftingProcessor
     {
         if (_activeSolver == null)
             return;
+        if (_faultReason.Length > 0)
+            return;
         if (!resume
             && _nextRecommendation.Action != VulcanSkill.None
             && _recommendationStep != null
@@ -167,13 +252,13 @@ public static class CraftingProcessor
             return;
         if (_pendingRequest is { } pending
             && ReferenceEquals(pending.Solver, _activeSolver)
-            && pending.Resume == resume
-            && Equivalent(pending.Step, step))
+            && Equivalent(pending.Step, step)
+            && (pending.Resume || !resume))
             return;
         if (_queuedRequest is { } queued
             && ReferenceEquals(queued.Solver, _activeSolver)
-            && queued.Resume == resume
-            && Equivalent(queued.Step, step))
+            && Equivalent(queued.Step, step)
+            && (queued.Resume || !resume))
             return;
 
         var request = new SolveRequest(
@@ -193,12 +278,12 @@ public static class CraftingProcessor
     private static void Start(SolveRequest request)
     {
         _pendingRequest = request;
-        _pendingSolve = Task.Run(() =>
+        _pendingSolve = Task.Run(async () =>
         {
             try
             {
-                var recommendation = request.Resume
-                    ? ((DonatelloSolver)request.Solver).ResumeFromLiveState(request.Step)
+                var recommendation = request.Solver is DonatelloSolver donatello
+                    ? await donatello.SolveUntilReadyAsync(request.Craft, request.Step, request.Resume).ConfigureAwait(false)
                     : request.Solver.Solve(request.Craft, request.Step);
                 return new SolveOutcome(request, recommendation, null);
             }
@@ -234,10 +319,8 @@ public static class CraftingProcessor
             && left.QuickInnoAvailable == right.QuickInnoAvailable
             && left.TrainedPerfectionAvailable == right.TrainedPerfectionAvailable
             && left.TrainedPerfectionActive == right.TrainedPerfectionActive
+            && left.ComboAction == right.ComboAction
             && left.PrevComboAction == right.PrevComboAction
-            && left.MaterialMiracleCharges == right.MaterialMiracleCharges
-            && left.MaterialMiracleActive == right.MaterialMiracleActive
-            && left.MaterialMiraclesUsed == right.MaterialMiraclesUsed
             && left.StellarSteadyHandCharges == right.StellarSteadyHandCharges
             && left.StellarSteadyHandLeft == right.StellarSteadyHandLeft
             && left.StellarSteadyHandsUsed == right.StellarSteadyHandsUsed

@@ -229,6 +229,14 @@ internal static class IntegrationAcceptanceTests
         require(!CraftingGatherBridge.IsGatheringItemComplete(1, requiredNqDemand, 0, 1)
                 && CraftingGatherBridge.IsGatheringItemComplete(1, requiredNqDemand, 1, 0),
             "gather completion must reject HQ-only stock for required NQ and accept NQ stock");
+        var absoluteGatherTargets = CraftingQueueProcessor.SelectRequiredGatherTargets(
+            new Dictionary<uint, int> { [1] = 60, [2] = 6, [3] = 30, [4] = 12 },
+            new Dictionary<uint, int> { [1] = 53, [2] = 3, [3] = 28 });
+        require(absoluteGatherTargets.Count == 3
+                && absoluteGatherTargets[1] == 60
+                && absoluteGatherTargets[2] == 6
+                && absoluteGatherTargets[3] == 30,
+            "craft-owned gathering must pass full required quantities to AutoGather while selecting only deficient items");
 
         var generations = new AcquisitionRunGenerationGate();
         require(generations.TryBeginRun(out var firstGeneration),

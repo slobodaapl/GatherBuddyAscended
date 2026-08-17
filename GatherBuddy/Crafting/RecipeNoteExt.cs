@@ -102,6 +102,14 @@ public static unsafe class RecipeNoteExt
             : null;
     }
 
+    public static uint? GetActiveCraftRecipeId()
+    {
+        var recipeNote = RecipeNote.Instance();
+        if (recipeNote == null)
+            return null;
+        return recipeNote->ActiveCraftRecipeId == 0 ? null : recipeNote->ActiveCraftRecipeId;
+    }
+
     public static Span<RecipeNoteIngredientEntry> GetIngredientsSpan(RecipeEntry* recipe)
         => recipe == null ? [] : recipe->IngredientsSpan;
 

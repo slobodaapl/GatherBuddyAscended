@@ -37,6 +37,7 @@ namespace GatherBuddy.Crafting.Acquisition;
 public sealed class NativeLiveAcquisitionEnvironment : ILiveAcquisitionEnvironment
 {
     public const uint MarketBoardDataId = 2_000_442;
+    private static readonly TimeSpan WorldTravelRetryCooldown = TimeSpan.FromSeconds(5);
 
     private readonly Func<AcquisitionTransaction, TimeSpan, CancellationToken, Task<LiveVendorPurchaseResult>>? _vendorPurchase;
     private readonly Func<VendorCurrencyGroup, uint, string, VendorCurrencyAvailability> _currencyAvailability;
@@ -198,16 +199,70 @@ public sealed class NativeLiveAcquisitionEnvironment : ILiveAcquisitionEnvironme
         if (!IsLifestreamAvailable || !CanVisitWorld(route.WorldId))
             return false;
 
+        var deadline = DateTime.UtcNow + timeout;
+        var nextAttemptUtc = DateTime.MinValue;
+        var attemptCount = 0;
         try
         {
-            RunOnFrameworkThread(() => Lifestream.TPAndChangeWorld?.Invoke(
-                route.WorldName,
-                false,
-                string.Empty,
-                false,
-                route.GatewayId == 0 ? null : (int)route.GatewayId,
-                true,
-                true), cancellationToken);
+            while (DateTime.UtcNow < deadline)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var now = DateTime.UtcNow;
+                var snapshot = RunOnFrameworkThread(() =>
+                {
+                    var lifestreamReady = Lifestream.Enabled
+                        && Lifestream.IsBusy != null
+                        && Lifestream.TPAndChangeWorld != null;
+                    var isBusy = lifestreamReady && Lifestream.IsBusy!();
+                    var currentWorldId = GetCurrentWorldIdNative();
+                    var canAttempt = currentWorldId != route.WorldId
+                        && lifestreamReady
+                        && !isBusy
+                        && !Functions.BetweenAreas()
+                        && GenericHelpers.IsScreenReady()
+                        && now >= nextAttemptUtc;
+                    if (canAttempt)
+                    {
+                        Lifestream.TPAndChangeWorld!(
+                            route.WorldName,
+                            false,
+                            string.Empty,
+                            false,
+                            route.GatewayId == 0 ? null : (int)route.GatewayId,
+                            true,
+                            true);
+                    }
+
+                    return new WorldTravelSnapshot(
+                        currentWorldId,
+                        isBusy,
+                        canAttempt);
+                }, cancellationToken);
+
+                if (snapshot.CurrentWorldId == route.WorldId && !snapshot.IsBusy)
+                    return true;
+
+                if (snapshot.Attempted)
+                {
+                    attemptCount++;
+                    nextAttemptUtc = DateTime.UtcNow + WorldTravelRetryCooldown;
+                    if (attemptCount == 1)
+                    {
+                        GatherBuddy.Log.Information(
+                            $"[Acquisition] Requested Lifestream travel to {route.WorldName} via {route.GatewayName}; current world {snapshot.CurrentWorldId}.");
+                    }
+                    else
+                    {
+                        GatherBuddy.Log.Debug(
+                            $"[Acquisition] Retrying Lifestream travel to {route.WorldName} via {route.GatewayName} (attempt {attemptCount}, current world {snapshot.CurrentWorldId}).");
+                    }
+                }
+
+                await Task.Delay(250, cancellationToken);
+            }
+
+            return RunOnFrameworkThread(() => GetCurrentWorldIdNative() == route.WorldId
+                && !(Lifestream.IsBusy?.Invoke() ?? false), cancellationToken);
         }
         catch (OperationCanceledException)
         {
@@ -218,18 +273,6 @@ public sealed class NativeLiveAcquisitionEnvironment : ILiveAcquisitionEnvironme
             GatherBuddy.Log.Warning($"[Acquisition] Lifestream world travel failed to start: {ex.Message}");
             return false;
         }
-
-        var deadline = DateTime.UtcNow + timeout;
-        while (DateTime.UtcNow < deadline)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            if (RunOnFrameworkThread(() => GetCurrentWorldIdNative() == route.WorldId
-                    && !(Lifestream.IsBusy?.Invoke() ?? false), cancellationToken))
-                return true;
-            await Task.Delay(250, cancellationToken);
-        }
-        return RunOnFrameworkThread(() => GetCurrentWorldIdNative() == route.WorldId
-            && !(Lifestream.IsBusy?.Invoke() ?? false), cancellationToken);
     }
 
     public async Task<bool> NavigateToMarketBoardAsync(
@@ -396,9 +439,9 @@ public sealed class NativeLiveAcquisitionEnvironment : ILiveAcquisitionEnvironme
 
     public Task<LiveVendorPurchaseResult> PurchaseVendorAsync(
         AcquisitionTransaction transaction,
-        TimeSpan timeout,
+        TimeSpan navigationTimeout,
         CancellationToken cancellationToken)
-        => _vendorPurchase?.Invoke(transaction, timeout, cancellationToken)
+        => _vendorPurchase?.Invoke(transaction, navigationTimeout, cancellationToken)
             ?? Task.FromResult(new LiveVendorPurchaseResult(
                 false,
                 false,
@@ -617,6 +660,8 @@ public sealed class NativeLiveAcquisitionEnvironment : ILiveAcquisitionEnvironme
             {
                 if (!IsVNavmeshAvailableNative())
                     return MarketBoardNavigationStep.Unavailable;
+                if (VNavmesh.Path.IsRunning() || VNavmesh.SimpleMove.PathfindInProgress())
+                    return MarketBoardNavigationStep.Continue;
                 VNavmesh.SimpleMove.PathfindAndMoveCloseTo?.Invoke(board.Position, false, 3f);
             }
             else
@@ -822,4 +867,9 @@ public sealed class NativeLiveAcquisitionEnvironment : ILiveAcquisitionEnvironme
     private readonly record struct NativePurchaseState(
         int InventoryCount,
         long GilBalance);
+
+    private readonly record struct WorldTravelSnapshot(
+        uint CurrentWorldId,
+        bool IsBusy,
+        bool Attempted);
 }

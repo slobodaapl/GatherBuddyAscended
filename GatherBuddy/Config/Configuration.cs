@@ -82,6 +82,7 @@ public partial class Configuration : IPluginConfiguration
     public VulcanMateriaConfig VulcanMateriaConfig { get; set; } = new();
     public VulcanRetainerBellConfig VulcanRetainerBellConfig { get; set; } = new();
     public int VulcanExecutionDelayMs { get; set; } = 300;
+    public bool ExpertConditionSamplingEnabled { get; set; } = false;
     public bool VulcanContextMenuEntries { get; set; } = true;
     public bool ShowRecipeBrowserTooltips { get; set; } = true;
     public ModifiableHotkey VulcanRecipesTabHotkey { get; set; } = new();
@@ -92,6 +93,7 @@ public partial class Configuration : IPluginConfiguration
     public Vector2 VendorTeamCraftImportWindowSize { get; set; } = new(520, 310);
     public string RecipeBrowserSettings { get; set; } = string.Empty;
     public string UserMacros             { get; set; } = string.Empty;
+    public CraftingRecoveryTicket? CraftingRecovery { get; set; }
     public bool   SkipMacroStepIfUnable { get; set; } = true;
     public bool   MacroFallbackEnabled  { get; set; } = true;
     public bool GoToInnBeforeCrafting { get; set; } = false;
@@ -546,4 +548,5 @@ public class VulcanRepairConfig
     public RepairNPCData? PreferredRepairNPC { get; set; } = null;
 
     public uint PreferredRepairNPCDataId { get; set; } = 0;
+    public uint PreferredRepairNPCTerritoryType { get; set; } = 0;
 }

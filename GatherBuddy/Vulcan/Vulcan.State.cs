@@ -12,9 +12,8 @@ public sealed record DonatelloExecutionOptions(
     DonatelloSolveObjective Objective = DonatelloSolveObjective.MaximizeQuality,
     bool MinimizeSteps = false,
     uint MaxStellarSteadyHandUses = 0,
-    uint MaxMaterialMiracleUses = 0,
-    uint MinimumStepsBeforeMaterialMiracle = 0,
-    bool MaximizeQualityAtCostOfTime = false);
+    bool MaximizeQualityAtCostOfTime = false,
+    bool? AllowSpecialistActions = null);
 
 public record class CraftState
     {
@@ -33,6 +32,7 @@ public record class CraftState
         public bool CraftCollectible;
         public bool CraftExpert;
         public bool IshgardExpert;
+        public byte CraftStars;
         public int CraftLevel; // Recipe.RecipeLevelTable.ClassJobLevel
         public int CraftDurability; // Recipe.RecipeLevelTable.Durability * Recipe.DurabilityFactor / 100
         public int CraftProgress; // Recipe.RecipeLevelTable.Difficulty * Recipe.DifficultyFactor / 100
@@ -92,16 +92,15 @@ public record class CraftState
         public bool QuickInnoAvailable;
         public bool TrainedPerfectionAvailable;
         public bool TrainedPerfectionActive;
+        public VulcanSkill ComboAction;
         public VulcanSkill PrevComboAction;
         public uint MaterialMiracleCharges;
-        public bool MaterialMiracleActive;
-        public uint MaterialMiraclesUsed;
         public uint StellarSteadyHandCharges;
         public int StellarSteadyHandLeft;
         public uint StellarSteadyHandsUsed;
         public int ObserveCounter;
 
-        public override string ToString() => $"#{Index} {Condition}: {Progress}/{Quality}/{Durability}/{RemainingCP}; {BuffsString()}; Prev={PrevComboAction}{(PrevActionFailed ? " (failed)" : "")}";
+        public override string ToString() => $"#{Index} {Condition}: {Progress}/{Quality}/{Durability}/{RemainingCP}; {BuffsString()}; Combo={ComboAction}, Prev={PrevComboAction}{(PrevActionFailed ? " (failed)" : "")}";
 
         public string BuffsString()
         {
@@ -122,7 +121,7 @@ public record class CraftState
                 sb.Append($", FA={FinalAppraisalLeft}");
             sb.Append($", CO={CarefulObservationLeft}, Delineations={CrafterDelineationsLeft}, HS={(HeartAndSoulActive ? "active" : HeartAndSoulAvailable ? "avail" : "none")}");
             sb.Append($", QuickInno:{QuickInnoAvailable}/{QuickInnoLeft}/{InnovationLeft}");
-            sb.Append($", MaterialMiracleActive:{MaterialMiracleActive} / {MaterialMiracleCharges}");
+            sb.Append($", MaterialMiracle:{MaterialMiracleCharges}");
             sb.Append($", StellarSteadyHand:{StellarSteadyHandLeft} / {StellarSteadyHandCharges}");
             return sb.ToString();
         }

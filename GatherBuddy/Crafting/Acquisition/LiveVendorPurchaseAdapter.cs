@@ -18,6 +18,9 @@ namespace GatherBuddy.Crafting.Acquisition;
 public sealed class LiveVendorPurchaseAdapter
 {
     private static readonly TimeSpan FrameworkDispatchTimeout = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan NavigationPollInterval = TimeSpan.FromMilliseconds(250);
+    private static readonly TimeSpan VendorExitRetryDelay = TimeSpan.FromMilliseconds(300);
+    private static readonly TimeSpan VendorExitTimeout = TimeSpan.FromSeconds(5);
 
     private readonly VendorPurchaseManager _manager;
     private readonly object _requestGate = new();
@@ -28,7 +31,7 @@ public sealed class LiveVendorPurchaseAdapter
 
     public async Task<LiveVendorPurchaseResult> PurchaseAsync(
         AcquisitionTransaction transaction,
-        TimeSpan timeout,
+        TimeSpan navigationTimeout,
         CancellationToken cancellationToken)
     {
         VendorShopEntry entry = null!;
@@ -67,9 +70,6 @@ public sealed class LiveVendorPurchaseAdapter
         var cleanupAttempted = false;
         try
         {
-            var currencyBefore = await OnFrameworkThreadAsync(
-                () => CaptureCurrencySnapshot(entry.CurrencyCosts),
-                cancellationToken);
             var start = await OnFrameworkThreadAsync(
                 () => TryStartPurchase(
                     generation,
@@ -94,56 +94,47 @@ public sealed class LiveVendorPurchaseAdapter
                     managerFailure,
                     requestSubmitted);
             }
-            var finished = await Task.WhenAny(completion.Task, Task.Delay(timeout, cancellationToken));
-            cancellationToken.ThrowIfCancellationRequested();
-            if (finished != completion.Task)
+            var lastNavigationProgressAt = DateTime.UtcNow;
+            var navigationProgress = await OnFrameworkThreadAsync(
+                GatherBuddy.VendorNavigator.CaptureProgressSnapshot,
+                cancellationToken);
+            while (!completion.Task.IsCompleted && _manager.IsNavigating)
             {
-                await StopOnFrameworkThreadAsync(cancellationToken);
-                cleanupAttempted = true;
-                var currencyAfter = await OnFrameworkThreadAsync(
-                    () => CaptureCurrencySnapshot(entry.CurrencyCosts),
+                var currentProgress = await OnFrameworkThreadAsync(
+                    GatherBuddy.VendorNavigator.CaptureProgressSnapshot,
                     cancellationToken);
-                var timedOutObserved = ObserveCurrencySpend(currencyBefore, currencyAfter);
-                var stoppedResult = completion.Task.IsCompletedSuccessfully
-                    ? completion.Task.Result
-                    : null;
-                var timedOutCompletedQuantity = stoppedResult == null
-                    ? 0
-                    : checked((int)stoppedResult.CompletedQuantity);
-                var timedOutResult = new LiveVendorPurchaseResult(
-                    true,
-                    false,
-                    transaction.ItemId,
-                    timedOutCompletedQuantity,
-                    timedOutObserved.NonGilSpent,
-                    timedOutObserved.GilSpent,
-                    stoppedResult == null
-                        ? $"Vendor purchase timed out for {transaction.ItemName}; final state is indeterminate."
-                        : $"Vendor purchase timed out for {transaction.ItemName} after {timedOutCompletedQuantity:N0} item(s); final state is indeterminate.",
-                    RequestSubmitted: requestSubmitted,
-                    IsHq: transaction.IsHq,
-                    GilBefore: currencyBefore.Balances.GetValueOrDefault(VendorShopResolver.GilCurrencyItemId),
-                    GilAfter: currencyAfter.Balances.GetValueOrDefault(VendorShopResolver.GilCurrencyItemId))
+                if (VendorNavigator.HasNavigationProgress(navigationProgress, currentProgress))
+                    lastNavigationProgressAt = DateTime.UtcNow;
+                navigationProgress = currentProgress;
+                if (DateTime.UtcNow - lastNavigationProgressAt >= navigationTimeout)
                 {
-                    OutputQuantities = stoppedResult?.OutputQuantities
-                        ?? new Dictionary<uint, int>(),
-                    CurrencyBalancesBefore = currencyBefore.Balances,
-                    CurrencyBalancesAfter = currencyAfter.Balances,
-                    CurrencyBalanceSources = currencyBefore.Sources,
-                    CurrencyBalanceSourcesAfter = currencyAfter.Sources,
-                };
-                return timedOutResult;
+                    await StopOnFrameworkThreadAsync(cancellationToken);
+                    cleanupAttempted = true;
+                    return Failure(
+                        transaction,
+                        $"Vendor navigation made no progress for {navigationTimeout.TotalSeconds:N0} seconds while acquiring {transaction.ItemName}.");
+                }
+
+                var finished = await Task.WhenAny(
+                    completion.Task,
+                    Task.Delay(NavigationPollInterval, cancellationToken));
+                cancellationToken.ThrowIfCancellationRequested();
+                if (finished == completion.Task)
+                    break;
             }
 
-            var result = await completion.Task;
-            var currencyAfterResult = await OnFrameworkThreadAsync(
-                () => CaptureCurrencySnapshot(entry.CurrencyCosts),
-                cancellationToken);
-            var observed = ObserveCurrencySpend(currencyBefore, currencyAfterResult);
+            // VendorPurchaseManager owns bounded shop-open, confirmation, and
+            // inventory-verification states. Do not apply the travel watchdog
+            // after navigation has completed.
+            var result = await completion.Task.WaitAsync(cancellationToken);
+            var exitFailure = await ExitVendorInteractionAsync(cancellationToken);
+            var nonGilSpent = result.CurrencySpent
+                .Where(pair => pair.Key != VendorShopResolver.GilCurrencyItemId)
+                .ToDictionary(pair => pair.Key, pair => pair.Value);
+            var gilSpent = result.CurrencySpent.GetValueOrDefault(VendorShopResolver.GilCurrencyItemId);
             var completedQuantity = checked((int)result.CompletedQuantity);
             var verified = result.State == VendorPurchaseManager.CompletionState.Completed
-                && completedQuantity >= transaction.Quantity
-                && observed.IsAuthoritative;
+                && completedQuantity >= transaction.Quantity;
             var purchaseResult = new LiveVendorPurchaseResult(
                 result.State is not VendorPurchaseManager.CompletionState.Failed
                     and not VendorPurchaseManager.CompletionState.Cancelled
@@ -151,21 +142,17 @@ public sealed class LiveVendorPurchaseAdapter
                 verified,
                 transaction.ItemId,
                 completedQuantity,
-                observed.NonGilSpent,
-                observed.GilSpent,
-                observed.IsAuthoritative
+                nonGilSpent,
+                gilSpent,
+                exitFailure == null
                     ? result.Message
-                    : $"{result.Message} {observed.FailureReason}",
+                    : $"{result.Message} {exitFailure}",
                 RequestSubmitted: requestSubmitted,
-                IsHq: transaction.IsHq,
-                GilBefore: currencyBefore.Balances.GetValueOrDefault(VendorShopResolver.GilCurrencyItemId),
-                GilAfter: currencyAfterResult.Balances.GetValueOrDefault(VendorShopResolver.GilCurrencyItemId))
+                IsHq: transaction.IsHq)
             {
+                InteractionClosed = exitFailure == null,
+                CurrencySpendIsAuthoritative = true,
                 OutputQuantities = result.OutputQuantities,
-                CurrencyBalancesBefore = currencyBefore.Balances,
-                CurrencyBalancesAfter = currencyAfterResult.Balances,
-                CurrencyBalanceSources = currencyBefore.Sources,
-                CurrencyBalanceSourcesAfter = currencyAfterResult.Sources,
             };
             return purchaseResult;
         }
@@ -195,6 +182,27 @@ public sealed class LiveVendorPurchaseAdapter
             if (!cleanupAttempted)
                 await TryStopOnFrameworkThreadAsync();
             _manager.PurchaseFinished -= Handle;
+        }
+    }
+
+    private static async Task<string?> ExitVendorInteractionAsync(CancellationToken cancellationToken)
+    {
+        var startedAt = DateTime.UtcNow;
+        var lastBlocker = string.Empty;
+        while (true)
+        {
+            lastBlocker = await OnFrameworkThreadAsync(
+                VendorInteractionHelper.GetVendorExitBlocker,
+                cancellationToken) ?? string.Empty;
+            if (lastBlocker.Length == 0)
+                return null;
+
+            await OnFrameworkThreadAsync(
+                () => VendorInteractionHelper.TryExitVendorInteraction(),
+                cancellationToken);
+            if (DateTime.UtcNow - startedAt >= VendorExitTimeout)
+                return $"Could not leave the vendor interaction: {lastBlocker}.";
+            await Task.Delay(VendorExitRetryDelay, cancellationToken);
         }
     }
 
@@ -328,47 +336,6 @@ public sealed class LiveVendorPurchaseAdapter
             cancellationRegistration.Dispose();
         }
     }
-
-    private static VendorCurrencyWalletSnapshot CaptureCurrencySnapshot(
-        IReadOnlyList<VendorCurrencyCost> costs)
-    {
-        if (!VendorCurrencyAvailabilityResolver.TryCaptureAuthoritative(costs, out var snapshot, out var failure))
-            throw new InvalidOperationException(failure);
-        return snapshot;
-    }
-
-    private static ObservedCurrencySpend ObserveCurrencySpend(
-        VendorCurrencyWalletSnapshot before,
-        VendorCurrencyWalletSnapshot after)
-    {
-        if (!VendorCurrencyAvailabilityResolver.TryCalculateSpend(before, after, out var spent, out var failure))
-        {
-            return new ObservedCurrencySpend(
-                false,
-                new Dictionary<uint, long>(),
-                0,
-                failure);
-        }
-
-        var nonGilSpent = new Dictionary<uint, long>();
-        foreach (var (currencyId, amount) in spent)
-        {
-            if (currencyId != VendorShopResolver.GilCurrencyItemId)
-                nonGilSpent[currencyId] = amount;
-        }
-
-        return new ObservedCurrencySpend(
-            true,
-            nonGilSpent,
-            spent.GetValueOrDefault(VendorShopResolver.GilCurrencyItemId),
-            string.Empty);
-    }
-
-    private readonly record struct ObservedCurrencySpend(
-        bool IsAuthoritative,
-        IReadOnlyDictionary<uint, long> NonGilSpent,
-        long GilSpent,
-        string FailureReason);
 
     private static bool TryResolve(
         AcquisitionTransaction transaction,

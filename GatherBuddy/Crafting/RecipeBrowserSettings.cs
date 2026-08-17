@@ -21,6 +21,13 @@ public enum SolverOverrideMode
     DonatelloSolver,
 }
 
+public enum SpecialistActionOverrideMode
+{
+    Inherit,
+    Allow,
+    Disallow,
+}
+
 public class RecipeCraftSettings
 {
     public ConsumableOverrideMode FoodMode { get; set; } = ConsumableOverrideMode.Inherit;
@@ -39,6 +46,7 @@ public class RecipeCraftSettings
     public MacroOverrideMode MacroMode { get; set; } = MacroOverrideMode.Inherit;
     public SolverOverrideMode SolverOverride { get; set; } = SolverOverrideMode.Default;
     public bool MaximizeQualityAtCostOfTime { get; set; }
+    public SpecialistActionOverrideMode SpecialistActionOverride { get; set; } = SpecialistActionOverrideMode.Inherit;
     [JsonIgnore] public DonatelloExecutionOptions? DonatelloOptions { get; set; }
 
     public bool HasAnySettings()
@@ -56,6 +64,7 @@ public class RecipeCraftSettings
             || !string.IsNullOrEmpty(SelectedMacroId)
             || SolverOverride != SolverOverrideMode.Default
             || MaximizeQualityAtCostOfTime
+            || SpecialistActionOverride != SpecialistActionOverrideMode.Inherit
             || DonatelloOptions != null;
     }
 
@@ -79,6 +88,7 @@ public class RecipeCraftSettings
             MacroMode = MacroMode,
             SolverOverride = SolverOverride,
             MaximizeQualityAtCostOfTime = MaximizeQualityAtCostOfTime,
+            SpecialistActionOverride = SpecialistActionOverride,
             DonatelloOptions = DonatelloOptions,
         };
     }
@@ -101,6 +111,7 @@ public class RecipeCraftSettings
         MacroMode = MacroOverrideMode.Inherit;
         SolverOverride = SolverOverrideMode.Default;
         MaximizeQualityAtCostOfTime = false;
+        SpecialistActionOverride = SpecialistActionOverrideMode.Inherit;
         DonatelloOptions = null;
     }
 }

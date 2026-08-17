@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Numerics;
+using Dalamud.Game.ClientState.Objects.Enums;
 using FFXIVClientStructs.FFXIV.Client.Game.UI;
 using GatherBuddy.SeFunctions;
 using Lumina.Data.Files;
@@ -31,25 +32,98 @@ public static class RepairNPCHelper
         var currentTerritory = Dalamud.ClientState.TerritoryType;
         var playerPosition = Dalamud.Objects.LocalPlayer?.Position ?? Vector3.Zero;
 
-        if (preferredNPC != null && TryBuildRoute(preferredNPC, currentTerritory, out var preferredRoute))
-            return preferredRoute;
+        var loadedNPC = FindNearestLoadedRepairNPC(playerPosition);
+        var loadedRoute = loadedNPC == null
+            ? (RepairNPCRoute?)null
+            : new RepairNPCRoute(loadedNPC, 0, 0);
 
-        var currentTerritoryNPC = RepairNPCs
-            .Where(npc => npc.TerritoryType == currentTerritory)
-            .OrderBy(npc => playerPosition == Vector3.Zero ? 0 : Vector3.DistanceSquared(playerPosition, npc.Position))
-            .FirstOrDefault();
-        if (currentTerritoryNPC != null)
-            return new RepairNPCRoute(currentTerritoryNPC, 0, 0);
+        var preferredRoute = preferredNPC != null
+            && TryBuildRoute(preferredNPC, currentTerritory, out var resolvedPreferredRoute)
+                ? resolvedPreferredRoute
+                : (RepairNPCRoute?)null;
 
-        var best = RepairNPCs
+        var routes = RepairNPCs
             .Select(npc => TryBuildRoute(npc, currentTerritory, out var route) ? route : (RepairNPCRoute?)null)
             .Where(route => route.HasValue)
             .Select(route => route!.Value)
+            .ToList();
+
+        return SelectBestRepairRoute(routes, loadedRoute, preferredRoute, currentTerritory, playerPosition);
+    }
+
+    internal static RepairNPCRoute? SelectBestRepairRoute(
+        IReadOnlyList<RepairNPCRoute> routes,
+        RepairNPCRoute? loadedRoute,
+        RepairNPCRoute? preferredRoute,
+        uint currentTerritory,
+        Vector3 playerPosition)
+    {
+        if (loadedRoute.HasValue)
+            return loadedRoute;
+
+        if (preferredRoute.HasValue)
+            return preferredRoute;
+
+        var currentTerritoryRoute = routes
+            .Where(route => route.NPC.TerritoryType == currentTerritory)
+            .OrderBy(route => playerPosition == Vector3.Zero
+                ? 0
+                : Vector3.DistanceSquared(playerPosition, route.NPC.Position))
+            .FirstOrDefault();
+        if (currentTerritoryRoute.NPC != null)
+            return currentTerritoryRoute;
+
+        var best = routes
             .OrderBy(route => route.TeleportCost)
             .ThenBy(route => route.NPC.TerritoryType)
             .ThenBy(route => route.NPC.DataId)
             .FirstOrDefault();
         return best.NPC != null ? best : null;
+    }
+
+    private static RepairNPCData? FindNearestLoadedRepairNPC(Vector3 playerPosition)
+    {
+        var eNpcBaseSheet = Dalamud.GameData.GetExcelSheet<ENpcBase>();
+        if (eNpcBaseSheet == null)
+            return null;
+
+        RepairNPCData? nearest = null;
+        var nearestDistance = float.MaxValue;
+        foreach (var obj in Dalamud.Objects.Where(obj => obj.ObjectKind == ObjectKind.EventNpc))
+        {
+            if (!eNpcBaseSheet.TryGetRow(obj.BaseId, out var eNpcBase))
+                continue;
+
+            var repairIndex = -1;
+            for (var i = 0; i < eNpcBase.ENpcData.Count; ++i)
+            {
+                if (eNpcBase.ENpcData[i].RowId != 720915)
+                    continue;
+                repairIndex = i;
+                break;
+            }
+
+            if (repairIndex < 0)
+                continue;
+
+            var distance = playerPosition == Vector3.Zero
+                ? 0
+                : Vector3.DistanceSquared(playerPosition, obj.Position);
+            if (distance >= nearestDistance)
+                continue;
+
+            nearestDistance = distance;
+            nearest = new RepairNPCData
+            {
+                DataId = obj.BaseId,
+                Name = obj.Name.TextValue,
+                TerritoryType = Dalamud.ClientState.TerritoryType,
+                Position = obj.Position,
+                RepairIndex = repairIndex,
+            };
+        }
+
+        return nearest;
     }
 
     public static unsafe uint FindCheapestAttunedAetheryte(uint territoryId, out uint teleportCost)
@@ -196,16 +270,45 @@ public static class RepairNPCHelper
         var config = GatherBuddy.Config.VulcanRepairConfig;
         if (config.PreferredRepairNPCDataId != 0)
         {
-            config.PreferredRepairNPC = RepairNPCs.FirstOrDefault(npc => npc.DataId == config.PreferredRepairNPCDataId);
+            config.PreferredRepairNPC = ResolvePreferredNPC(
+                RepairNPCs,
+                config.PreferredRepairNPCDataId,
+                config.PreferredRepairNPCTerritoryType);
             if (config.PreferredRepairNPC != null)
             {
                 GatherBuddy.Log.Information($"[RepairNPCHelper] Restored preferred repair NPC: {config.PreferredRepairNPC.Name}");
             }
             else
             {
-                GatherBuddy.Log.Warning($"[RepairNPCHelper] Could not find preferred repair NPC with DataId {config.PreferredRepairNPCDataId}");
+                GatherBuddy.Log.Warning(
+                    $"[RepairNPCHelper] Could not uniquely restore preferred repair NPC " +
+                    $"{config.PreferredRepairNPCDataId}/{config.PreferredRepairNPCTerritoryType}; using current-zone menders");
+                config.PreferredRepairNPCDataId = 0;
+                config.PreferredRepairNPCTerritoryType = 0;
             }
         }
+    }
+
+    internal static RepairNPCData? ResolvePreferredNPC(
+        IReadOnlyList<RepairNPCData> repairNPCs,
+        uint dataId,
+        uint territoryType)
+    {
+        if (dataId == 0)
+            return null;
+
+        if (territoryType != 0)
+            return repairNPCs.FirstOrDefault(npc => npc.DataId == dataId && npc.TerritoryType == territoryType);
+
+        RepairNPCData? match = null;
+        foreach (var npc in repairNPCs.Where(npc => npc.DataId == dataId))
+        {
+            if (match != null)
+                return null;
+            match = npc;
+        }
+
+        return match;
     }
 
     private static void BuildNPCInstancesFromLgbFiles(List<TerritoryType> territoryTypes, List<(uint DataId, uint TerritoryId, Vector3 Position)> instances)

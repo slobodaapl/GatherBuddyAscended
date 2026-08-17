@@ -19,6 +19,16 @@ namespace GatherBuddy.AutoGather
     {
         private CollectableRotation? CurrentCollectableRotation;
 
+        private static bool IsRareReductionTarget(uint completionItemId)
+        {
+            if (completionItemId == 0)
+                return false;
+
+            var itemSheet = Dalamud.GameData.GetExcelSheet<Item>();
+            return itemSheet?.TryGetRow(completionItemId, out var outputItem) == true
+                && outputItem.FilterGroup != 11;
+        }
+
         private unsafe bool HasCollectables()
         {
             if (!GatherBuddy.Config.CollectableConfig.AutoTurnInCollectables
@@ -69,9 +79,9 @@ namespace GatherBuddy.AutoGather
             private GatheringSolveRequest? pendingRequest;
 
             private static bool ShouldAbandonCompletedCollectable(Gatherable collectable)
-                => GatherBuddy.Config.AutoGatherConfig.AbandonNodes
-                && !(GatherBuddy.Config.AutoGatherConfig.AlwaysExhaustTimedCollectableNodes
-                  && collectable.NodeType is Enums.NodeType.Unspoiled or Enums.NodeType.Legendary or Enums.NodeType.Clouded);
+                => SpecialNodeExhaustionPolicy.ShouldAbandonCompleted(
+                    GatherBuddy.Config.AutoGatherConfig,
+                    collectable.NodeType);
 
             public bool TryGetNextAction(
                 GatheringMasterpieceReader masterpieceReader,
@@ -80,6 +90,18 @@ namespace GatherBuddy.AutoGather
                 action = null!;
                 try
                 {
+                    var terminalAction = CollectableTerminalActionPolicy.Resolve(
+                        masterpieceReader.CollectabilityCurrent,
+                        masterpieceReader.IntegrityCurrent,
+                        ShouldUseWise(masterpieceReader.IntegrityCurrent, masterpieceReader.IntegrityMax));
+                    if (terminalAction != CollectableTerminalAction.None)
+                    {
+                        action = terminalAction == CollectableTerminalAction.WiseToTheWorld
+                            ? Actions.Wise
+                            : Actions.Collect;
+                        return true;
+                    }
+
                     if (pendingSolve == null)
                     {
                         if (!SolverGate.Wait(0))
@@ -146,9 +168,14 @@ namespace GatherBuddy.AutoGather
 
                 var (targetScore, minScore) = GetCollectabilityScores(masterpieceReader);
                 var (rewards, unsupportedReason) = ResolveRewards(masterpieceReader);
-                var mode = config.ChooseBestActionsAutomatically
-                    ? config.CollectableSolver
-                    : CollectableSolverMode.Legacy;
+                var automatic = config.ChooseBestActionsAutomatically;
+                var mode = !automatic
+                    ? GatheringSolverMode.Legacy
+                    : item.ItemData.AetherialReduce > 0 && IsRareReductionTarget(completionItemId)
+                        ? GatheringSolverMode.MaximizeCollectability
+                        : config.CollectableSolver == CollectableSolverMode.ExpectedScrip
+                            ? GatheringSolverMode.ExpectedScrip
+                            : GatheringSolverMode.Legacy;
                 var scourGain = masterpieceReader.ScourGain;
                 if (Player.Status.Any(status => status.StatusId == Actions.Scrutiny.EffectId))
                     scourGain = Math.Max(1, scourGain / 2);
@@ -158,7 +185,6 @@ namespace GatherBuddy.AutoGather
                 var standard = Player.Status.Any(status => status.StatusId == 3911) ? 2
                     : Player.Status.Any(status => status.StatusId == 2418) ? 1
                     : 0;
-                var automatic = config.ChooseBestActionsAutomatically;
                 return new GatheringSolveRequest(
                     mode,
                     new GatheringSolverState(
@@ -212,7 +238,7 @@ namespace GatherBuddy.AutoGather
                         shouldUseFullRotation,
                         config.CollectableAlwaysUseSolidAge,
                         ShouldAbandonCompletedCollectable(item)),
-                    mode == CollectableSolverMode.ExpectedScrip ? unsupportedReason : null);
+                    mode == GatheringSolverMode.ExpectedScrip ? unsupportedReason : null);
             }
 
             private bool RequestStillMatchesLiveState(

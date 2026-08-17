@@ -4,6 +4,8 @@ using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
+using System.Threading;
+using GatherBuddy.Crafting;
 using Newtonsoft.Json;
 
 namespace GatherBuddy.Vulcan;
@@ -11,7 +13,8 @@ namespace GatherBuddy.Vulcan;
 internal static partial class DonatelloNative
 {
     private const string LibraryName = "donatello_ffi.dll";
-    internal const uint AbiVersion = 7;
+    internal const uint AbiVersion = 10;
+    private static readonly SemaphoreSlim NativeSolveGate = new(1, 1);
     private static readonly JsonSerializerOptions RequestSerializerOptions = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
@@ -119,7 +122,7 @@ internal static partial class DonatelloNative
         => Solve(
             craft,
             root,
-            GatherBuddy.Config.RaphaelSolverConfig.RaphaelAllowSpecialistActions,
+            CraftingContextResolver.ResolveSpecialistActionsAllowed(craft),
             SolveMode.OptimizeQuality,
             interrupt,
             incumbent);
@@ -148,44 +151,57 @@ internal static partial class DonatelloNative
         if (donatello_abi_version() != AbiVersion)
             throw new InvalidOperationException("Unsupported Donatello native ABI version");
 
-        var raphaelConfig = GatherBuddy.Config?.RaphaelSolverConfig;
-        ConfigureCache(raphaelConfig?.DonatelloCacheMemoryMiB ?? 512);
-        var fallbackMinimizeSteps = minimizeSteps
-            ?? raphaelConfig?.DonatelloMinimizeSteps
-            ?? false;
-
-        var bytes = Encoding.UTF8.GetBytes(SerializeRequest(
-            craft, root, allowSpecialistActions, solveMode, incumbent, fallbackMinimizeSteps,
-            softDeadlineMillis, hardDeadlineMillis, bypassSolutionCache));
-        IntPtr nativeResponse;
-        fixed (byte* data = bytes)
-            nativeResponse = interrupt == IntPtr.Zero
-                ? donatello_solve_json(data, (nuint)bytes.Length)
-                : donatello_solve_json_interruptible(data, (nuint)bytes.Length, interrupt);
-        if (nativeResponse == IntPtr.Zero)
-            throw new InvalidOperationException("Donatello native solver returned null");
+        NativeSolveGate.Wait();
         try
         {
-            var json = Marshal.PtrToStringUTF8(nativeResponse)
-                ?? throw new InvalidOperationException("Donatello native response was not UTF-8");
-            var response = JsonConvert.DeserializeObject<NativeResponse>(json)
-                ?? throw new InvalidOperationException("Donatello native response was empty");
-            if (!response.Ok || response.ActionIds == null)
-                throw new InvalidOperationException(response.Error ?? "Donatello solve failed");
-            return new SolveResult(
-                response.ActionIds.ConvertAll(id => (VulcanSkill)id),
-                response.Optimal,
-                response.DeadlineReached,
-                response.AchievedQuality,
-                response.QualityUpperBound,
-                response.ElapsedMillis,
-                response.ProgressBoundary,
-                response.FinalState
-                    ?? throw new InvalidOperationException("Donatello native response omitted final state"));
+            var raphaelConfig = GatherBuddy.Config?.RaphaelSolverConfig;
+            ConfigureCache(raphaelConfig?.DonatelloCacheMemoryMiB ?? 512);
+            var fallbackMinimizeSteps = minimizeSteps
+                ?? raphaelConfig?.DonatelloMinimizeSteps
+                ?? false;
+
+            var bytes = Encoding.UTF8.GetBytes(SerializeRequest(
+                craft, root, allowSpecialistActions, solveMode, incumbent, fallbackMinimizeSteps,
+                softDeadlineMillis, hardDeadlineMillis, bypassSolutionCache,
+                raphaelConfig?.DonatelloExperimentalProgressPriority == true));
+            IntPtr nativeResponse;
+            fixed (byte* data = bytes)
+                nativeResponse = interrupt == IntPtr.Zero
+                    ? donatello_solve_json(data, (nuint)bytes.Length)
+                    : donatello_solve_json_interruptible(data, (nuint)bytes.Length, interrupt);
+            if (nativeResponse == IntPtr.Zero)
+                throw new InvalidOperationException("Donatello native solver returned null");
+            try
+            {
+                var json = Marshal.PtrToStringUTF8(nativeResponse)
+                    ?? throw new InvalidOperationException("Donatello native response was not UTF-8");
+                var response = JsonConvert.DeserializeObject<NativeResponse>(json)
+                    ?? throw new InvalidOperationException("Donatello native response was empty");
+                if (!response.Ok || response.ActionIds == null)
+                    throw new InvalidOperationException(response.Error ?? "Donatello solve failed");
+                var invalidActionId = response.ActionIds.FirstOrDefault(
+                    id => !((VulcanSkill)id).IsExecutableAction());
+                if (invalidActionId != 0)
+                    throw new InvalidOperationException($"Donatello native response contained invalid action ID {invalidActionId}");
+                return new SolveResult(
+                    response.ActionIds.ConvertAll(id => (VulcanSkill)id),
+                    response.Optimal,
+                    response.DeadlineReached,
+                    response.AchievedQuality,
+                    response.QualityUpperBound,
+                    response.ElapsedMillis,
+                    response.ProgressBoundary,
+                    response.FinalState
+                        ?? throw new InvalidOperationException("Donatello native response omitted final state"));
+            }
+            finally
+            {
+                donatello_string_free(nativeResponse);
+            }
         }
         finally
         {
-            donatello_string_free(nativeResponse);
+            NativeSolveGate.Release();
         }
     }
 
@@ -198,7 +214,8 @@ internal static partial class DonatelloNative
         bool fallbackMinimizeSteps = false,
         int softDeadlineMillis = 0,
         int hardDeadlineMillis = 0,
-        bool bypassSolutionCache = false)
+        bool bypassSolutionCache = false,
+        bool experimentalProgressPriorityEnabled = false)
     {
         var maxStellarSteadyHandUses = craft.DonatelloOptions?.MaxStellarSteadyHandUses ?? 0;
         var remainingStellarSteadyHandUses = maxStellarSteadyHandUses > root.StellarSteadyHandsUsed
@@ -221,7 +238,16 @@ internal static partial class DonatelloNative
             JobLevel = craft.StatLevel,
             Manipulation = craft.UnlockedManipulation,
             Specialist = craft.Specialist && allowSpecialistActions,
+            AllowCarefulObservation = solveMode != SolveMode.CompleteFastest
+                && craft.Specialist
+                && allowSpecialistActions
+                && craft.DonatelloOptions?.MaximizeQualityAtCostOfTime == true
+                && root.Condition == Condition.Poor,
             SolveMode = (int)solveMode,
+            ProgressFirst = ResolveProgressFirst(
+                craft,
+                solveMode,
+                experimentalProgressPriorityEnabled),
             MinimizeSteps = solveMode == SolveMode.CompleteFastest
                 ? false
                 : craft.DonatelloOptions?.MinimizeSteps ?? fallbackMinimizeSteps,
@@ -250,7 +276,7 @@ internal static partial class DonatelloNative
                 Combo = Combo(root),
                 root.HeartAndSoulActive,
                 root.HeartAndSoulAvailable,
-                QuickInnovationAvailable = root.QuickInnoAvailable,
+                QuickInnovationAvailable = root.QuickInnoLeft > 0,
                 root.TrainedPerfectionActive,
                 root.TrainedPerfectionAvailable,
                 StellarSteadyHandCharges = stellarSteadyHandCharges,
@@ -264,7 +290,15 @@ internal static partial class DonatelloNative
         return System.Text.Json.JsonSerializer.Serialize(request, RequestSerializerOptions);
     }
 
-    private static int Combo(StepState root) => root.PrevComboAction switch
+    internal static bool ResolveProgressFirst(
+        CraftState craft,
+        SolveMode solveMode,
+        bool experimentalProgressPriorityEnabled)
+        => experimentalProgressPriorityEnabled
+            && solveMode == SolveMode.LiveAdaptive
+            && !craft.CraftExpert;
+
+    private static int Combo(StepState root) => root.ComboAction switch
     {
         VulcanSkill.BasicTouch => 1,
         VulcanSkill.StandardTouch or VulcanSkill.Observe => 2,

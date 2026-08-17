@@ -11,6 +11,7 @@ using GatherBuddy.Helpers;
 using GatherBuddy.Interfaces;
 using GatherBuddy.Plugin;
 using GatherBuddy.SeFunctions;
+using GatherBuddy.Time;
 using GatherBuddy.Utilities;
 using System;
 using System.Collections.Generic;
@@ -24,6 +25,8 @@ namespace GatherBuddy.AutoGather
 {
     public partial class AutoGather
     {
+        private const int RareReductionGatheringReserveSeconds = 60;
+
         private unsafe void EnqueueDismount()
         {
             TaskManager.Enqueue(StopNavigation);
@@ -76,7 +79,12 @@ namespace GatherBuddy.AutoGather
             return instance->IsMountUnlocked(mount);
         }
 
-        private void MoveToCloseNode(IGameObject gameObject, Gatherable targetItem, ConfigPreset config)
+        private void MoveToCloseNode(
+            IGameObject gameObject,
+            Gatherable targetItem,
+            ConfigPreset config,
+            uint completionItemId,
+            TimeInterval targetTime)
         {
             if (!Player.Available) return;
 
@@ -86,7 +94,19 @@ namespace GatherBuddy.AutoGather
 
             if (hSeparation < 3.5)
             {
-                var waitGP = targetItem.ItemData.IsCollectable && Player.Object.CurrentGp < config.CollectableMinGP;
+                var collectableMinGp = config.CollectableMinGP;
+                var maximizeReduction = config.ChooseBestActionsAutomatically
+                    && targetItem.ItemData.AetherialReduce > 0
+                    && IsRareReductionTarget(completionItemId);
+                var enoughWindowToWait = targetTime == TimeInterval.Always
+                    || (targetTime != TimeInterval.Invalid
+                     && targetTime != TimeInterval.Never
+                     && targetTime.End > GatherBuddy.Time.ServerTime.AddSeconds(RareReductionGatheringReserveSeconds));
+                var waitForMaximumGp = maximizeReduction && enoughWindowToWait;
+                if (waitForMaximumGp)
+                    collectableMinGp = Math.Max(collectableMinGp, (int)Player.Object.MaxGp);
+
+                var waitGP = targetItem.ItemData.IsCollectable && Player.Object.CurrentGp < collectableMinGp;
                 waitGP |= !targetItem.ItemData.IsCollectable && Player.Object.CurrentGp < config.GatherableMinGP;
 
                 if (Dalamud.Conditions[ConditionFlag.Mounted] && (waitGP || GetConsumablesWithCastTime(config) > 0))
@@ -102,7 +122,9 @@ namespace GatherBuddy.AutoGather
                 else if (waitGP)
                 {
                     StopNavigation();
-                    AutoStatus = "Waiting for GP to regenerate...";
+                    AutoStatus = waitForMaximumGp
+                        ? "Waiting for GP to maximize reduction collectability..."
+                        : "Waiting for GP to regenerate...";
                 }
                 else
                 {

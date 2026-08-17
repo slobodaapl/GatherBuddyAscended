@@ -210,7 +210,7 @@ public static class CraftingTimeEstimator
 
     private static int ResolveRaphaelActionCount(CraftState craft)
     {
-        var request = RaphaelSolveRequest.FromCraftState(craft, GatherBuddy.Config.RaphaelSolverConfig.RaphaelAllowSpecialistActions);
+        var request = RaphaelSolveRequest.FromCraftState(craft, CraftingContextResolver.ResolveSpecialistActionsAllowed(craft));
         var cacheKey = $"raphael/{request.GetKey()}";
         if (_actionCountCache.TryGetValue(cacheKey, out var cachedCount))
             return cachedCount;
@@ -232,7 +232,7 @@ public static class CraftingTimeEstimator
     {
         solution = null!;
 
-        var request = RaphaelSolveRequest.FromCraftState(craft, GatherBuddy.Config.RaphaelSolverConfig.RaphaelAllowSpecialistActions);
+        var request = RaphaelSolveRequest.FromCraftState(craft, CraftingContextResolver.ResolveSpecialistActionsAllowed(craft));
         if (!GatherBuddy.RaphaelSolveCoordinator.TryGetSolution(request, out var resolved) || resolved == null || resolved.ActionIds.Count == 0)
             return false;
 
@@ -258,7 +258,7 @@ public static class CraftingTimeEstimator
     private static string BuildStandardSolverConfigKey()
     {
         var config = GatherBuddy.Config.StandardSolverConfig;
-        return $"{(config.UseTricksGood ? 1 : 0)}/{(config.UseTricksExcellent ? 1 : 0)}/{config.MaxPercentage}/{(config.UseQualityStarter ? 1 : 0)}/{config.SolverCollectibleMode}/{config.MaxIQPrepTouch}/{(config.UseSpecialist ? 1 : 0)}/{(config.UseMaterialMiracle ? 1 : 0)}/{config.MinimumStepsBeforeMiracle}/{(config.MaterialMiracleMulti ? 1 : 0)}";
+        return $"{(config.UseTricksGood ? 1 : 0)}/{(config.UseTricksExcellent ? 1 : 0)}/{config.MaxPercentage}/{(config.UseQualityStarter ? 1 : 0)}/{config.SolverCollectibleMode}/{config.MaxIQPrepTouch}/{(config.UseSpecialist ? 1 : 0)}";
     }
 
     private static int BuildMacroFingerprint(UserMacro macro)

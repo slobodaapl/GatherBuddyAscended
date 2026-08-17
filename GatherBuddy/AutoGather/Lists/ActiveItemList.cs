@@ -62,11 +62,22 @@ namespace GatherBuddy.AutoGather.Lists
         public bool HasReachableItemsToGather
             => _gatherableItems.Any(NeedsGathering);
 
-        public bool HasCompletionSourceItems
-            => _listsManager.ActiveItems.Any(item =>
-                item.CompletionItemId != 0
-             && item.Item.GetInventoryCount() > 0
-             && NeedsGathering(item));
+        public bool TryGetPendingReductionSource(out uint sourceItemId)
+        {
+            foreach (var item in _listsManager.ActiveItems)
+            {
+                if (item.CompletionItemId == 0
+                 || item.Item.GetInventoryCount() <= 0
+                 || !NeedsGathering(item))
+                    continue;
+
+                sourceItemId = item.Item.ItemId;
+                return true;
+            }
+
+            sourceItemId = 0;
+            return false;
+        }
 
         public bool IsCloudedNodeConsumed
             => _consumedCloudedNode;
@@ -105,6 +116,15 @@ namespace GatherBuddy.AutoGather.Lists
                 .FirstOrDefault(x => IsAvailable(x.Time, _lastUpdateTime, _lastEndTime) && NeedsGathering(x));
         }
 
+        public bool TryGetCachedTarget(IGatherable item, uint completionItemId, out GatherTarget target)
+        {
+            target = _gatherableItems.FirstOrDefault(x =>
+                x.Item == item
+             && x.CompletionItemId == completionItemId
+             && NeedsGathering(x));
+            return target != default;
+        }
+
         /// <summary>
         /// Returns next timed item that is not up yet
         /// </summary>
@@ -112,7 +132,42 @@ namespace GatherBuddy.AutoGather.Lists
         public GatherTarget PeekNextTimed()
         {
             return _gatherableItems
-                .FirstOrDefault(x => !IsAvailable(x.Time, _lastUpdateTime, _lastEndTime) && x.Time != TimeInterval.Invalid);
+                .FirstOrDefault(x => NeedsGathering(x)
+                                  && !IsAvailable(x.Time, _lastUpdateTime, _lastEndTime)
+                                  && x.Time != TimeInterval.Invalid
+                                  && x.Time != TimeInterval.Never);
+        }
+
+        internal bool TryGetUpcomingLegendaryWindow(
+            GatherTarget current,
+            TimeStamp now,
+            out TimeInterval upcomingWindow)
+        {
+            upcomingWindow = default;
+            var currentNode = current.Node;
+            if (currentNode?.NodeType != NodeType.Legendary)
+                return false;
+
+            var candidate = _gatherableItems
+                .Where(x => NeedsGathering(x)
+                         && x.Node is { NodeType: NodeType.Legendary } node
+                         && node != currentNode
+                         && x.Location.Territory.Id == current.Location.Territory.Id
+                         && x.Location.GatheringType.ToGroup() == current.Location.GatheringType.ToGroup()
+                         && x.Time != TimeInterval.Invalid
+                         && x.Time != TimeInterval.Never
+                         && x.Time != TimeInterval.Always
+                         && x.Time.Start > now
+                         && x.Time.End > now
+                         && x.Time.Start < current.Time.End)
+                .OrderBy(x => x.Time.Start)
+                .FirstOrDefault();
+
+            if (candidate == default)
+                return false;
+
+            upcomingWindow = candidate.Time;
+            return true;
         }
 
         /// <summary>
@@ -176,7 +231,7 @@ namespace GatherBuddy.AutoGather.Lists
         private readonly record struct FishWindowPriority(bool Applicable, long EffectiveDuration, TimeStamp WindowEnd, TimeStamp WindowStart);
 
         private static bool IsAvailable(TimeInterval time, TimeStamp startTime, TimeStamp endTime)
-            => time.Start <= startTime && endTime < time.End;
+            => TimedTargetTravelPolicy.IsAvailable(time, startTime, endTime);
 
         private sealed class FishWindowPriorityComparer : IComparer<FishWindowPriority>
         {

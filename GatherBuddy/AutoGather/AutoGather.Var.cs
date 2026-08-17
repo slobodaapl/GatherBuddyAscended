@@ -178,6 +178,9 @@ namespace GatherBuddy.AutoGather
         internal IEnumerable<GatherTarget> ItemsToGather
             => _activeItemList;
 
+        internal bool TryGetCachedGatherTarget(IGatherable item, uint completionItemId, out GatherTarget target)
+            => _activeItemList.TryGetCachedTarget(item, completionItemId, out target);
+
         internal ReadOnlyDictionary<GatheringNode, TimeInterval> DebugVisitedTimedLocations
             => _activeItemList.DebugVisitedTimedLocations;
 
@@ -288,7 +291,11 @@ namespace GatherBuddy.AutoGather
             => GatherBuddy.Time.ServerTime.AddSeconds(GatherBuddy.Config.AutoGatherConfig.TimedNodeEarlyAbandonment);
 
         public static bool IsTimedTargetAvailable(TimeInterval time)
-            => time.Start <= TimedNodeStartTime && TimedNodeEndTime < time.End;
+            => TimedTargetTravelPolicy.CanStartTravel(
+                time,
+                GatherBuddy.Time.ServerTime,
+                GatherBuddy.Config.AutoGatherConfig.TimedNodePrecog,
+                GatherBuddy.Config.AutoGatherConfig.TimedNodeEarlyAbandonment);
 
         private ConfigPreset MatchConfigPreset(Gatherable? item)
             => _plugin.Interface.MatchConfigPreset(item);

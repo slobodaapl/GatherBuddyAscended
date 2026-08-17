@@ -6,12 +6,14 @@ using System.Linq;
 using System.Numerics;
 using System.Text.RegularExpressions;
 using Dalamud.Interface;
+using Dalamud.Utility;
 using GatherBuddy.AutoGather.Extensions;
 using GatherBuddy.AutoGather.Lists;
 using GatherBuddy.Classes;
 using GatherBuddy.Data;
 using GatherBuddy.Config;
 using GatherBuddy.Crafting;
+using GatherBuddy.Crafting.Acquisition;
 using GatherBuddy.CustomInfo;
 using GatherBuddy.Plugin;
 using Dalamud.Bindings.ImGui;
@@ -31,6 +33,11 @@ public partial class Interface
         public static string Label => "AutoGatherListItem";
     }
 
+    private sealed record AutoGatherSelection(
+        IGatherable Gatherable,
+        uint CompletionItemId,
+        string Name);
+
     private class AutoGatherListsCache : IDisposable
     {
         public AutoGatherListsCache()
@@ -47,9 +54,9 @@ public partial class Interface
 
         public readonly AutoGatherListFileSystemSelector Selector = new();
 
-        public  ReadOnlyCollection<IGatherable>     AllGatherables      { get; private set; }
-        public  ReadOnlyCollection<IGatherable>     FilteredGatherables { get; private set; }
-        public  ClippedSelectableCombo<IGatherable> GatherableSelector  { get; private set; }
+        public ReadOnlyCollection<AutoGatherSelection>     AllSelections      { get; private set; }
+        public ReadOnlyCollection<AutoGatherSelection>     FilteredSelections { get; private set; }
+        public ClippedSelectableCombo<AutoGatherSelection> GatherableSelector { get; private set; }
         private HashSet<IGatherable>                ExcludedGatherables = [];
 
         public void SetExcludedGatherbales(IEnumerable<IGatherable> exclude)
@@ -57,38 +64,67 @@ public partial class Interface
             var excludeSet = exclude.ToHashSet();
             if (!ExcludedGatherables.SetEquals(excludeSet))
             {
-                var newGatherables = AllGatherables.Except(excludeSet).ToList().AsReadOnly();
-                UpdateGatherables(newGatherables, excludeSet);
+                var newSelections = AllSelections
+                    .Where(selection => !excludeSet.Contains(selection.Gatherable))
+                    .ToList()
+                    .AsReadOnly();
+                UpdateGatherables(newSelections, excludeSet);
             }
         }
 
-        private static ReadOnlyCollection<IGatherable> GenAllGatherables()
+        private static ReadOnlyCollection<AutoGatherSelection> GenAllGatherables()
         {
-            var all = GatherBuddy.GameData.Gatherables.Values
+            var gatherables = GatherBuddy.GameData.Gatherables.Values
                 .Where(g => g.NodeList.SelectMany(l => l.WorldPositions.Values)
                     .SelectMany(p => p).Any())
                 .Cast<IGatherable>()
                 .Concat(GatherBuddy.GameData.Fishes.Values)
                 .GroupBy(g => g.ItemId)
                 .Select(g => g.First())
-                .OrderBy(g => g.Name[GatherBuddy.Language])
+                .ToDictionary(g => g.ItemId);
+            var all = gatherables.Values
+                .Select(g => new AutoGatherSelection(
+                    g,
+                    0,
+                    g.Name[GatherBuddy.Language].ToString()))
+                .ToList();
+
+            var itemSheet = Dalamud.GameData.GetExcelSheet<Lumina.Excel.Sheets.Item>();
+            foreach (var outputItemId in AetherialReductionSourceResolver.GetOutputItemIds())
+            {
+                var path = AcquisitionPlanningInputBuilder.ResolvePath(outputItemId, null);
+                if (path is not { Kind: AcquisitionPathKind.Reduction, SourceItemId: not 0 }
+                 || !gatherables.TryGetValue(path.SourceItemId, out var source)
+                 || source.ItemData.AetherialReduce == 0
+                 || itemSheet?.TryGetRow(outputItemId, out var outputItem) != true)
+                    continue;
+
+                all.Add(new AutoGatherSelection(
+                    source,
+                    outputItemId,
+                    outputItem.Name.ExtractText()));
+            }
+
+            return all
+                .GroupBy(selection => (selection.Gatherable.ItemId, selection.CompletionItemId))
+                .Select(group => group.First())
+                .OrderBy(selection => selection.Name)
                 .ToList()
                 .AsReadOnly();
-            return all;
         }
 
 
-        [MemberNotNull(nameof(FilteredGatherables)), MemberNotNull(nameof(GatherableSelector)), MemberNotNull(nameof(AllGatherables))]
+        [MemberNotNull(nameof(FilteredSelections)), MemberNotNull(nameof(GatherableSelector)), MemberNotNull(nameof(AllSelections))]
         private void UpdateGatherables()
-            => UpdateGatherables(AllGatherables = GenAllGatherables(), []);
+            => UpdateGatherables(AllSelections = GenAllGatherables(), []);
 
-        [MemberNotNull(nameof(FilteredGatherables)), MemberNotNull(nameof(GatherableSelector))]
-        private void UpdateGatherables(ReadOnlyCollection<IGatherable> newGatherables, HashSet<IGatherable> newExcluded)
+        [MemberNotNull(nameof(FilteredSelections)), MemberNotNull(nameof(GatherableSelector))]
+        private void UpdateGatherables(ReadOnlyCollection<AutoGatherSelection> newSelections, HashSet<IGatherable> newExcluded)
         {
             while (NewGatherableIdx > 0)
             {
-                var item = FilteredGatherables![NewGatherableIdx];
-                var idx  = newGatherables.IndexOf(item);
+                var item = FilteredSelections![NewGatherableIdx];
+                var idx  = newSelections.IndexOf(item);
                 if (idx < 0)
                     NewGatherableIdx--;
                 else
@@ -98,9 +134,9 @@ public partial class Interface
                 }
             }
 
-            FilteredGatherables = newGatherables;
+            FilteredSelections = newSelections;
             ExcludedGatherables = newExcluded;
-            GatherableSelector  = new("GatherablesSelector", string.Empty, 250, FilteredGatherables, g => g.Name[GatherBuddy.Language]);
+            GatherableSelector  = new("GatherablesSelector", string.Empty, 250, FilteredSelections, selection => selection.Name);
         }
 
         public void Dispose()
@@ -312,7 +348,7 @@ public partial class Interface
         var visibleItemIndices = new List<int>(list.Items.Count);
         for (var i = 0; i < list.Items.Count; ++i)
         {
-            var itemName = list.Items[i].Name[GatherBuddy.Language].ToString();
+            var itemName = GetAutoGatherListItemName(list, list.Items[i], true);
             if (filterKeywords.All(keyword => itemName.Contains(keyword, StringComparison.OrdinalIgnoreCase)))
                 visibleItemIndices.Add(i);
         }
@@ -336,9 +372,9 @@ public partial class Interface
         if (!box)
             return;
 
-        _autoGatherListsCache.SetExcludedGatherbales(list.Items.OfType<Gatherable>());
-        var gatherables = _autoGatherListsCache.FilteredGatherables;
-        var selector    = _autoGatherListsCache.GatherableSelector;
+        _autoGatherListsCache.SetExcludedGatherbales(list.Items);
+        var selections = _autoGatherListsCache.FilteredSelections;
+        var selector   = _autoGatherListsCache.GatherableSelector;
         int changeIndex = -1, changeItemIndex = -1, deleteIndex = -1;
 
         for (var visibleIdx = 0; visibleIdx < visibleItemIndices.Count; ++visibleIdx)
@@ -357,7 +393,7 @@ public partial class Interface
                 _plugin.AutoGatherListsManager.ChangeEnabled(list, item, enabled);
 
             ImGui.SameLine();
-            if (selector.Draw(item.Name[GatherBuddy.Language], out var newIdx))
+            if (selector.Draw(GetAutoGatherListItemName(list, item, true), out var newIdx))
             {
                 changeIndex     = i;
                 changeItemIndex = newIdx;
@@ -365,7 +401,8 @@ public partial class Interface
 
             ImGui.SameLine();
             ImGui.Text("Inventory: ");
-            var invTotal = item.GetTotalCount();
+            var completionItemId = list.CompletionItemIds.GetValueOrDefault(item);
+            var invTotal = item.GetCompletionCount(completionItemId);
             ImGui.SameLine(0f, ImGui.CalcTextSize($"0000 / ").X - ImGui.CalcTextSize($"{invTotal} / ").X);
             ImGui.Text($"{invTotal} / ");
             ImGui.SameLine(0, 3f);
@@ -380,7 +417,7 @@ public partial class Interface
 
             if (!filteringItems)
             {
-                using (var source = ImRaii.DragDropSource())
+                using (var source = ImRaii.DragDropSource(ImGuiDragDropFlags.SourceAllowNullId))
                 {
                     if (source.Success)
                     {
@@ -410,11 +447,21 @@ public partial class Interface
             _plugin.AutoGatherListsManager.RemoveItem(list, deleteIndex);
 
         if (changeIndex >= 0)
-            _plugin.AutoGatherListsManager.ChangeItem(list, gatherables[changeItemIndex], changeIndex);
+        {
+            var selection = selections[changeItemIndex];
+            _plugin.AutoGatherListsManager.ChangeItem(
+                list,
+                selection.Gatherable,
+                changeIndex,
+                selection.CompletionItemId);
+        }
 
         if (ImGuiUtil.DrawDisabledButton(FontAwesomeIcon.Plus.ToIconString(), IconButtonSize, "Add this item at the end of the list", false,
                 true))
-            _plugin.AutoGatherListsManager.AddItem(list, gatherables[_autoGatherListsCache.NewGatherableIdx]);
+        {
+            var selection = selections[_autoGatherListsCache.NewGatherableIdx];
+            _plugin.AutoGatherListsManager.AddItem(list, selection.Gatherable, selection.CompletionItemId);
+        }
 
         ImGui.SameLine();
         var allEnabled = list.Items.All(i => list.EnabledItems[i]);
@@ -429,8 +476,24 @@ public partial class Interface
         if (selector.Draw(_autoGatherListsCache.NewGatherableIdx, out var idx))
         {
             _autoGatherListsCache.NewGatherableIdx = idx;
-            _plugin.AutoGatherListsManager.AddItem(list, gatherables[_autoGatherListsCache.NewGatherableIdx]);
+            var selection = selections[_autoGatherListsCache.NewGatherableIdx];
+            _plugin.AutoGatherListsManager.AddItem(list, selection.Gatherable, selection.CompletionItemId);
         }
+    }
+
+    private static string GetAutoGatherListItemName(AutoGatherList list, IGatherable item, bool includeSource)
+    {
+        var completionItemId = list.CompletionItemIds.GetValueOrDefault(item);
+        if (completionItemId == 0)
+            return item.Name[GatherBuddy.Language].ToString();
+
+        var itemSheet = Dalamud.GameData.GetExcelSheet<Lumina.Excel.Sheets.Item>();
+        var outputName = itemSheet?.TryGetRow(completionItemId, out var outputItem) == true
+            ? outputItem.Name.ExtractText()
+            : $"Item {completionItemId}";
+        return includeSource
+            ? $"{outputName} ← {item.Name[GatherBuddy.Language]}"
+            : outputName;
     }
 
     private static bool DrawAutoGatherIconButton(string id, string iconText, Vector2 size, string tooltip, bool disabled = false)
@@ -513,4 +576,3 @@ public partial class Interface
         _autoGatherListsCache.Selector.DrawBaitBuyListResultPopup();
     }
 }
-

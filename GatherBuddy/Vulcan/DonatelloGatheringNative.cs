@@ -13,6 +13,13 @@ public enum CollectableSolverMode
     Legacy = 1,
 }
 
+internal enum GatheringSolverMode
+{
+    ExpectedScrip = 0,
+    Legacy = 1,
+    MaximizeCollectability = 2,
+}
+
 internal enum GatheringSolverAction
 {
     Scour,
@@ -84,7 +91,7 @@ internal sealed record GatheringLegacyOptions(
     bool AbandonWhenComplete);
 
 internal sealed record GatheringSolveRequest(
-    CollectableSolverMode Mode,
+    GatheringSolverMode Mode,
     GatheringSolverState State,
     IReadOnlyList<GatheringRewardTier> Rewards,
     GatheringActionModel Actions,
@@ -94,8 +101,9 @@ internal sealed record GatheringSolveRequest(
 
 internal sealed record GatheringDecision(
     GatheringSolverAction Action,
-    CollectableSolverMode SolverUsed,
-    double ExpectedScrip,
+    GatheringSolverMode SolverUsed,
+    double ExpectedReward,
+    double ExpectedPerfectCollects,
     double ExpectedTerminalGp,
     string? FallbackReason);
 

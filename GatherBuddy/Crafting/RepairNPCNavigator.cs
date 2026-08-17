@@ -23,10 +23,14 @@ public class RepairNPCNavigator
     private RepairNPCData? _targetNPC;
     private uint _targetAetheryteId;
     private DateTime _stateStartTime;
+    private DateTime _operationStartTime;
+    private DateTime _lastProgressTime;
+    private Vector3 _lastProgressPosition;
     private bool _teleportAttempted;
     private const double TeleportCooldown = 3.0;
     private const double ZoneLoadWait = 5.0;
-    private const double NavigationTimeout = 60.0;
+    private static readonly TimeSpan TotalNavigationTimeout = TimeSpan.FromMinutes(3);
+    private static readonly TimeSpan NoProgressTimeout = TimeSpan.FromSeconds(20);
 
     public bool IsComplete => _state == NavigationState.Arrived || _state == NavigationState.Failed;
     public bool IsFailed => _state == NavigationState.Failed;
@@ -39,6 +43,9 @@ public class RepairNPCNavigator
         _state = NavigationState.Idle;
         _teleportAttempted = false;
         _stateStartTime = DateTime.UtcNow;
+        _operationStartTime = _stateStartTime;
+        _lastProgressTime = _stateStartTime;
+        _lastProgressPosition = Dalamud.Objects.LocalPlayer?.Position ?? Vector3.Zero;
         
         GatherBuddy.Log.Information($"[RepairNPCNavigator] Starting navigation to {targetNPC.Name} in territory {targetNPC.TerritoryType}");
         
@@ -72,6 +79,27 @@ public class RepairNPCNavigator
 
         try
         {
+            var now = DateTime.UtcNow;
+            var playerPosition = Dalamud.Objects.LocalPlayer?.Position ?? Vector3.Zero;
+            if (playerPosition != Vector3.Zero
+                && (_lastProgressPosition == Vector3.Zero
+                    || Vector3.DistanceSquared(playerPosition, _lastProgressPosition) >= 1f))
+            {
+                _lastProgressPosition = playerPosition;
+                _lastProgressTime = now;
+            }
+            if (HasNavigationWatchdogExpired(
+                    now - _operationStartTime,
+                    now - _lastProgressTime,
+                    _state == NavigationState.Navigating))
+            {
+                GatherBuddy.Log.Error("[RepairNPCNavigator] Repair navigation stopped after making no progress");
+                if (_state == NavigationState.Navigating)
+                    VNavmesh.Path.Stop();
+                _state = NavigationState.Failed;
+                return;
+            }
+
             switch (_state)
             {
                 case NavigationState.Teleporting:
@@ -222,14 +250,6 @@ public class RepairNPCNavigator
             return;
         }
 
-        if ((DateTime.UtcNow - _stateStartTime).TotalSeconds > NavigationTimeout)
-        {
-            GatherBuddy.Log.Error($"[RepairNPCNavigator] Navigation timeout - still {distance:F1}m away");
-            VNavmesh.Path.Stop();
-            _state = NavigationState.Failed;
-            return;
-        }
-
         if (!VNavmesh.Path.IsRunning())
         {
             GatherBuddy.Log.Debug($"[RepairNPCNavigator] Path stopped, restarting navigation ({distance:F1}m remaining)");
@@ -245,6 +265,13 @@ public class RepairNPCNavigator
         }
     }
 
+    internal static bool HasNavigationWatchdogExpired(
+        TimeSpan totalElapsed,
+        TimeSpan noProgressElapsed,
+        bool activelyNavigating)
+        => totalElapsed >= TotalNavigationTimeout
+            || activelyNavigating && noProgressElapsed >= NoProgressTimeout;
+
     public void Stop()
     {
         if (_state == NavigationState.Navigating)
@@ -253,5 +280,8 @@ public class RepairNPCNavigator
         }
         _state = NavigationState.Idle;
         _targetNPC = null;
+        _operationStartTime = DateTime.MinValue;
+        _lastProgressTime = DateTime.MinValue;
+        _lastProgressPosition = Vector3.Zero;
     }
 }
