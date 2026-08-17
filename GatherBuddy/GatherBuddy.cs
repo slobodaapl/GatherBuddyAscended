@@ -526,9 +526,13 @@ public partial class GatherBuddy : IDalamudPlugin
 
         try
         {
-            CraftingGameInterop.Update();
-            CraftingGatherBridge.Update();
-            ArtisanShim?.Update();
+            var samplingExpertConditions = ExpertConditionSampler.Update();
+            if (!samplingExpertConditions)
+            {
+                CraftingGameInterop.Update();
+                CraftingGatherBridge.Update();
+                ArtisanShim?.Update();
+            }
             VendorNavigator.Update();
             VendorPurchaseManager.Update();
             VendorBuyListManager.Update();
@@ -624,6 +628,9 @@ public partial class GatherBuddy : IDalamudPlugin
         _disposeCompleted = true;
         Config?.SaveIfDirty(force: true);
         MarketboardService?.Dispose();
+        if (RaphaelSolveCoordinator != null
+            && !RaphaelSolveCoordinator.CancelAllPendingSolvesAndWait(TimeSpan.FromSeconds(5)))
+            Log.Error("[RaphaelSolveCoordinator] Native solver work did not stop within five seconds during plugin shutdown");
         RaphaelSolveCoordinator?.Save();
         if (Dalamud.Framework != null)
             Dalamud.Framework.Update -= Update;
@@ -636,6 +643,7 @@ public partial class GatherBuddy : IDalamudPlugin
         }
         ArtisanShim?.Dispose();
         ArtisanShim = null;
+        ExpertConditionSampler.Dispose();
         CraftingGameInterop.Dispose();
         FishRecorder?.Dispose();
         ContextMenu?.Dispose();

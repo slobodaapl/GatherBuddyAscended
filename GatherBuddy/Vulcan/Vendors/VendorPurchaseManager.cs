@@ -65,6 +65,9 @@ public sealed class VendorPurchaseManager : IDisposable
     {
         public IReadOnlyDictionary<uint, int> OutputQuantities { get; init; }
             = new Dictionary<uint, int>();
+
+        public IReadOnlyDictionary<uint, long> CurrencySpent { get; init; }
+            = new Dictionary<uint, long>();
     }
 
     private static readonly TimeSpan ActionThrottle       = TimeSpan.FromMilliseconds(400);
@@ -72,10 +75,11 @@ public sealed class VendorPurchaseManager : IDisposable
     private static readonly TimeSpan ShopOpenTimeout      = TimeSpan.FromSeconds(12);
     private static readonly TimeSpan ConfirmTimeout       = TimeSpan.FromSeconds(8);
     private static readonly TimeSpan PurchaseTimeout      = TimeSpan.FromSeconds(10);
+    private static readonly TimeSpan PurchaseNoProgressTimeout = TimeSpan.FromSeconds(30);
     private const           int      MaxInteractionTries  = 5;
     private const           uint     MaxPurchaseBatchSize = 99;
 
-    private State                  _state = State.Idle;
+    private volatile State         _state = State.Idle;
     private VendorPurchaseRequest? _request;
     private DateTime               _stateStartTime = DateTime.MinValue;
     private DateTime               _lastActionTime = DateTime.MinValue;
@@ -83,6 +87,7 @@ public sealed class VendorPurchaseManager : IDisposable
     private int                    _ownedCountBeforePurchase;
     private readonly Dictionary<uint, int> _ownedCountsBeforePurchase = new();
     private readonly Dictionary<uint, int> _completedOutputQuantities = new();
+    private readonly Dictionary<uint, long> _completedCurrencySpent = new();
     private VendorCurrencyWalletSnapshot? _currencyBalancesBeforePurchase;
     private uint                   _completedQuantity;
     private uint                   _currentBatchQuantity;
@@ -96,11 +101,17 @@ public sealed class VendorPurchaseManager : IDisposable
     private List<int>?             _inclusionRecoverySubPageCandidates;
     private int                    _inclusionRecoverySubPageCandidateIndex;
     private int                    _activeInclusionSubPageIndex;
+    private DateTime               _lastProgressTime = DateTime.MinValue;
+    private State                  _lastProgressState = State.Idle;
+    private uint                   _lastProgressQuantity;
 
     public event Action<PurchaseResult>? PurchaseFinished;
 
     public bool IsRunning
         => _state != State.Idle && _request != null;
+
+    public bool IsNavigating
+        => _state == State.WaitingForNavigation;
 
     public string StatusText
         => _statusText;
@@ -231,6 +242,7 @@ public sealed class VendorPurchaseManager : IDisposable
         _interactionAttempts = 0;
         _ownedCountBeforePurchase = CountItemOnCharacter(entry.ItemId);
         _completedOutputQuantities.Clear();
+        _completedCurrencySpent.Clear();
         CaptureOutputInventory();
         _completedQuantity = 0;
         _currentBatchQuantity = 0;
@@ -251,6 +263,9 @@ public sealed class VendorPurchaseManager : IDisposable
         _state = continueCurrentVendorInteraction
             ? State.OpeningShop
             : State.WaitingForNavigation;
+        _lastProgressTime = DateTime.UtcNow;
+        _lastProgressState = _state;
+        _lastProgressQuantity = 0;
 
         YesAlready.Lock();
         if (requestedQuantity > 1 && GetSinglePurchaseBatchReason(entry.ItemId) is { } singleBatchReason)
@@ -269,6 +284,20 @@ public sealed class VendorPurchaseManager : IDisposable
 
         try
         {
+            if (_state != _lastProgressState || _completedQuantity != _lastProgressQuantity)
+            {
+                _lastProgressState = _state;
+                _lastProgressQuantity = _completedQuantity;
+                _lastProgressTime = DateTime.UtcNow;
+            }
+            else if (HasPurchaseWatchdogExpired(
+                         _state == State.WaitingForNavigation,
+                         DateTime.UtcNow - _lastProgressTime))
+            {
+                Fail($"Vendor purchase made no progress for {PurchaseNoProgressTimeout.TotalSeconds:N0} seconds while {_statusText}.");
+                return;
+            }
+
             switch (_state)
             {
                 case State.WaitingForNavigation:       UpdateWaitingForNavigation();       break;
@@ -283,6 +312,9 @@ public sealed class VendorPurchaseManager : IDisposable
             Fail($"Vendor purchase failed for {_request.ItemName}: {ex.Message}");
         }
     }
+
+    internal static bool HasPurchaseWatchdogExpired(bool navigating, TimeSpan noProgressElapsed)
+        => !navigating && noProgressElapsed >= PurchaseNoProgressTimeout;
 
     public void Stop()
     {
@@ -303,6 +335,7 @@ public sealed class VendorPurchaseManager : IDisposable
             false)
         {
             OutputQuantities = CompletedOutputs(),
+            CurrencySpent = CompletedCurrencySpend(),
         };
         ResetState();
         PurchaseFinished?.Invoke(result);
@@ -515,6 +548,20 @@ public sealed class VendorPurchaseManager : IDisposable
             return true;
         }
 
+        if (!VendorCurrencyAvailabilityResolver.TryCalculateSpend(
+                _currencyBalancesBeforePurchase.Value,
+                currencyAfter,
+                out var currencySpent,
+                out currencyFailure))
+        {
+            Fail($"Vendor purchase for {_request.ItemName} could not record the exact currency delta: {currencyFailure}");
+            return true;
+        }
+
+        foreach (var (currencyId, amount) in currencySpent)
+            _completedCurrencySpent[currencyId] = checked(
+                _completedCurrencySpent.GetValueOrDefault(currencyId) + amount);
+
         foreach (var output in outputDeltas)
             _completedOutputQuantities[output.Key] = checked(
                 _completedOutputQuantities.GetValueOrDefault(output.Key) + output.Value);
@@ -569,6 +616,9 @@ public sealed class VendorPurchaseManager : IDisposable
 
     private IReadOnlyDictionary<uint, int> CompletedOutputs()
         => new Dictionary<uint, int>(_completedOutputQuantities);
+
+    private IReadOnlyDictionary<uint, long> CompletedCurrencySpend()
+        => new Dictionary<uint, long>(_completedCurrencySpent);
 
     private void UpdateWaitingForNavigation()
     {
@@ -1211,6 +1261,7 @@ public sealed class VendorPurchaseManager : IDisposable
             false)
         {
             OutputQuantities = CompletedOutputs(),
+            CurrencySpent = CompletedCurrencySpend(),
         };
         ResetState();
         PurchaseFinished?.Invoke(result);
@@ -1241,6 +1292,7 @@ public sealed class VendorPurchaseManager : IDisposable
             wasLimitedByScripReserve)
         {
             OutputQuantities = CompletedOutputs(),
+            CurrencySpent = CompletedCurrencySpend(),
         };
         ResetState();
         PurchaseFinished?.Invoke(result);
@@ -1263,6 +1315,7 @@ public sealed class VendorPurchaseManager : IDisposable
             wasLimitedByScripReserve)
         {
             OutputQuantities = CompletedOutputs(),
+            CurrencySpent = CompletedCurrencySpend(),
         };
         ResetState();
         PurchaseFinished?.Invoke(result);
@@ -1286,6 +1339,7 @@ public sealed class VendorPurchaseManager : IDisposable
             false)
         {
             OutputQuantities = CompletedOutputs(),
+            CurrencySpent = CompletedCurrencySpend(),
         };
         ResetState();
         PurchaseFinished?.Invoke(result);
@@ -1306,6 +1360,7 @@ public sealed class VendorPurchaseManager : IDisposable
         _ownedCountBeforePurchase = 0;
         _ownedCountsBeforePurchase.Clear();
         _completedOutputQuantities.Clear();
+        _completedCurrencySpent.Clear();
         _currencyBalancesBeforePurchase = null;
         _completedQuantity = 0;
         _currentBatchQuantity = 0;
@@ -1318,6 +1373,9 @@ public sealed class VendorPurchaseManager : IDisposable
         _inclusionRecoverySubPageCandidates = null;
         _inclusionRecoverySubPageCandidateIndex = 0;
         _activeInclusionSubPageIndex = 0;
+        _lastProgressTime = DateTime.MinValue;
+        _lastProgressState = State.Idle;
+        _lastProgressQuantity = 0;
         _statusText = string.Empty;
     }
 

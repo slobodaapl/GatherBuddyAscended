@@ -8,3 +8,4 @@ SecretKeys.generated.cs
 .vscode/
 /scripts/
 /build/
+/artifact/

@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using FFXIVClientStructs.FFXIV.Client.Game;
@@ -74,11 +75,33 @@ public static class CraftingContextResolver
     internal static DonatelloExecutionOptions? ResolveDonatelloOptions(RecipeCraftSettings? settings)
     {
         var options = settings?.DonatelloOptions;
-        if (settings?.MaximizeQualityAtCostOfTime != true)
+        var specialistOverride = settings?.SpecialistActionOverride switch
+        {
+            SpecialistActionOverrideMode.Allow => true,
+            SpecialistActionOverrideMode.Disallow => false,
+            _ => options?.AllowSpecialistActions,
+        };
+        if (settings?.MaximizeQualityAtCostOfTime != true && specialistOverride == options?.AllowSpecialistActions)
             return options;
 
-        return (options ?? new DonatelloExecutionOptions()) with { MaximizeQualityAtCostOfTime = true };
+        return (options ?? new DonatelloExecutionOptions()) with
+        {
+            MaximizeQualityAtCostOfTime = settings?.MaximizeQualityAtCostOfTime == true,
+            AllowSpecialistActions = specialistOverride,
+        };
     }
+
+    internal static bool ResolveSpecialistActionsAllowed(RecipeCraftSettings? settings)
+        => settings?.SpecialistActionOverride switch
+        {
+            SpecialistActionOverrideMode.Allow => true,
+            SpecialistActionOverrideMode.Disallow => false,
+            _ => GatherBuddy.Config.RaphaelSolverConfig.RaphaelAllowSpecialistActions,
+        };
+
+    internal static bool ResolveSpecialistActionsAllowed(CraftState craft)
+        => craft.DonatelloOptions?.AllowSpecialistActions
+            ?? GatherBuddy.Config.RaphaelSolverConfig.RaphaelAllowSpecialistActions;
 
     public static bool UsesSelectedMacro(CraftingExecutionContext executionContext)
         => !string.IsNullOrEmpty(executionContext.SelectedMacroId)
@@ -211,7 +234,7 @@ public static class CraftingContextResolver
         var validationContext = intent == CraftingSimulationIntent.ValidatorPreview
             ? BuildValidatorPreviewContext(executionContext.ConsumableSettings)
             : null;
-        var request = RaphaelSolveRequest.FromCraftState(craft, GatherBuddy.Config.RaphaelSolverConfig.RaphaelAllowSpecialistActions, validationContext);
+        var request = RaphaelSolveRequest.FromCraftState(craft, ResolveSpecialistActionsAllowed(craft), validationContext);
         context = new(executionContext, stats, craft, request);
         return true;
     }
@@ -298,6 +321,12 @@ public static class CraftingContextResolver
             var previewConsumables = ConsumableChecker.GetValidatorPreviewCraftStatConsumables(consumableSettings);
             if (stats != null && previewConsumables != null)
                 stats = GearsetStatsReader.ApplyConsumablesToStats(stats, previewConsumables);
+            stats = SelectValidatorPreviewStats(
+                requiredJob,
+                Dalamud.Objects.LocalPlayer?.ClassJob.RowId ?? 0,
+                previewConsumables != null,
+                stats,
+                CraftingStateBuilder.GetCurrentPlayerStats);
             return stats;
         }
 
@@ -325,6 +354,20 @@ public static class CraftingContextResolver
         if (gearsetStats != null && projected != null)
             gearsetStats = GearsetStatsReader.ApplyConsumablesToStats(gearsetStats, projected);
         return gearsetStats;
+    }
+
+    internal static GameStateBuilder.PlayerStats? SelectValidatorPreviewStats(
+        uint requiredJob,
+        uint currentJob,
+        bool hasConfiguredStatConsumables,
+        GameStateBuilder.PlayerStats? gearsetStats,
+        Func<GameStateBuilder.PlayerStats?> readCurrentStats)
+    {
+        if (gearsetStats != null)
+            return gearsetStats;
+        return currentJob == requiredJob && !hasConfiguredStatConsumables
+            ? readCurrentStats()
+            : null;
     }
 
     private static string BuildValidatorPreviewContext(RecipeCraftSettings? settings)

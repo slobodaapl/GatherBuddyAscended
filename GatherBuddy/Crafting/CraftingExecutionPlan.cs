@@ -11,6 +11,7 @@ public sealed class CraftingExecutionPlan
     private readonly CraftingListDefinition _planningSnapshot;
     private readonly bool _useRetainerCraftableAvailability;
     private readonly bool _directCraft;
+    private readonly List<CraftingListItem>? _recoveryQueue;
     private readonly Dictionary<uint, int> _acquiredDependencyCaps;
     private readonly HashSet<uint> _finalOutputItemIds;
     private readonly Dictionary<uint, AcquiredDependencyAvailability> _acquiredAvailability = new();
@@ -54,11 +55,13 @@ public sealed class CraftingExecutionPlan
         CraftingListDefinition planningSnapshot,
         bool useRetainerCraftableAvailability,
         CraftingListPlan resolvedPlan,
-        bool directCraft = false)
+        bool directCraft = false,
+        IReadOnlyList<CraftingListItem>? recoveryQueue = null)
     {
         _planningSnapshot = planningSnapshot;
         _useRetainerCraftableAvailability = useRetainerCraftableAvailability;
         _directCraft = directCraft;
+        _recoveryQueue = recoveryQueue?.Select(CloneRecoveryQueueItem).ToList();
         _acquiredDependencyCaps = new Dictionary<uint, int>(resolvedPlan.Precrafts);
         _finalOutputItemIds = resolvedPlan.OriginalRecipes
             .Select(item => RecipeManager.GetRecipe(item.RecipeId)?.ItemResult.RowId ?? 0u)
@@ -98,6 +101,50 @@ public sealed class CraftingExecutionPlan
             CraftingListPlanner.BuildDirect(planningSnapshot),
             directCraft: true);
     }
+
+    internal static CraftingExecutionPlan CreateRecovery(IReadOnlyList<CraftingListItem> remainingQueue)
+    {
+        ArgumentNullException.ThrowIfNull(remainingQueue);
+        if (remainingQueue.Count == 0)
+            throw new ArgumentException("Recovery queue cannot be empty.", nameof(remainingQueue));
+
+        var list = new CraftingListDefinition
+        {
+            ID = int.MinValue,
+            Name = "Recovered crafting automation",
+            SkipIfEnough = false,
+            SkipFinalIfEnough = false,
+            RetainerRestock = false,
+            AutoPurchaseBlockedDependencies = false,
+            ReturnToHomeWorldBeforeCrafting = false,
+            // The first queue entry is the already-open craft. Its ingredients
+            // were consumed before the reload and must not fail material preflight.
+            Recipes = remainingQueue.Skip(1).Select(CloneRecoveryQueueItem).ToList(),
+        };
+        var planningSnapshot = list.CreateRetainerPlanningSnapshot();
+        var resolvedPlan = CraftingListPlanner.BuildDirect(planningSnapshot);
+        var plan = new CraftingExecutionPlan(
+            planningSnapshot,
+            useRetainerCraftableAvailability: false,
+            resolvedPlan,
+            directCraft: true,
+            recoveryQueue: remainingQueue);
+        return plan;
+    }
+
+    private static CraftingListItem CloneRecoveryQueueItem(CraftingListItem item)
+        => new(item.RecipeId, 1)
+        {
+            Options = new ListItemOptions
+            {
+                Skipping = item.Options.Skipping,
+                NQOnly = item.Options.NQOnly,
+            },
+            IngredientPreferences = new Dictionary<uint, int>(item.IngredientPreferences),
+            ConsumableOverrides = item.ConsumableOverrides.Clone(),
+            IsOriginalRecipe = item.IsOriginalRecipe,
+            CraftSettings = item.CraftSettings?.Clone(),
+        };
 
     public bool MatchesList(int listId)
         => ListId == listId;
@@ -212,12 +259,20 @@ public sealed class CraftingExecutionPlan
         Precrafts = new Dictionary<uint, int>(resolvedPlan.Precrafts);
         RetainerConsumedCraftables = new Dictionary<uint, int>(resolvedPlan.RetainerConsumedCraftables);
         IngredientDemands = new Dictionary<uint, IngredientQualityDemand>(resolvedPlan.IngredientDemands);
-        OriginalRecipes = resolvedPlan.OriginalRecipes
-            .Select(item => new CraftingListItem(item.RecipeId, item.Quantity)
-            {
-                IsOriginalRecipe = true,
-            })
-            .ToList();
-        Queue = CraftingListQueueBuilder.CreateExpandedQueue(_planningSnapshot, resolvedPlan);
+        if (_recoveryQueue != null)
+        {
+            Queue = _recoveryQueue.Select(CloneRecoveryQueueItem).ToList();
+            OriginalRecipes = Queue.Select(CloneRecoveryQueueItem).ToList();
+        }
+        else
+        {
+            OriginalRecipes = resolvedPlan.OriginalRecipes
+                .Select(item => new CraftingListItem(item.RecipeId, item.Quantity)
+                {
+                    IsOriginalRecipe = true,
+                })
+                .ToList();
+            Queue = CraftingListQueueBuilder.CreateExpandedQueue(_planningSnapshot, resolvedPlan);
+        }
     }
 }

@@ -548,7 +548,7 @@ namespace GatherBuddy.Gui
                                 preset.CollectableSolver = (Vulcan.CollectableSolverMode)collectableSolver;
                                 selector.Save();
                             }
-                            ImGuiUtil.HoverTooltip("Expected scrip evaluates exact action outcome probabilities and reward tiers. Legacy retains the previous highest-tier rotation.");
+                            ImGuiUtil.HoverTooltip("Expected scrip evaluates exact action outcome probabilities and reward tiers. Legacy retains the previous highest-tier rotation. Non-crystal Aetherial Reduction targets automatically maximize collectability instead.");
                         }
                     }
 
@@ -913,4 +913,3 @@ namespace GatherBuddy.Gui
         }
     }
 }
-

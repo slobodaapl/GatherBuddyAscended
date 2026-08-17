@@ -49,6 +49,7 @@ public class RecipeCraftSettingsPopup
     
     private static readonly string[] OverrideModeLabels = { "Inherit", "None", "Specific" };
     private static readonly string[] MacroModeLabels    = { "Inherit", "Specific" };
+    private static readonly string[] SpecialistActionOverrideLabels = { "Inherit", "Allow", "Disallow" };
     
     private class IngredientData
     {
@@ -108,6 +109,7 @@ public class RecipeCraftSettingsPopup
                 SelectedMacroId = existing.SelectedMacroId,
                 SolverOverride = existing.SolverOverride,
                 MaximizeQualityAtCostOfTime = existing.MaximizeQualityAtCostOfTime,
+                SpecialistActionOverride = existing.SpecialistActionOverride,
             };
         }
         else
@@ -152,6 +154,7 @@ public class RecipeCraftSettingsPopup
             SelectedMacroId = cs?.SelectedMacroId,
             SolverOverride = cs?.SolverOverride ?? SolverOverrideMode.Default,
             MaximizeQualityAtCostOfTime = cs?.MaximizeQualityAtCostOfTime ?? false,
+            SpecialistActionOverride = cs?.SpecialistActionOverride ?? SpecialistActionOverrideMode.Inherit,
         };
         
         LoadConsumables();
@@ -191,6 +194,7 @@ public class RecipeCraftSettingsPopup
             SelectedMacroId = cs?.SelectedMacroId,
             SolverOverride = cs?.SolverOverride ?? SolverOverrideMode.Default,
             MaximizeQualityAtCostOfTime = cs?.MaximizeQualityAtCostOfTime ?? false,
+            SpecialistActionOverride = cs?.SpecialistActionOverride ?? SpecialistActionOverrideMode.Inherit,
         };
 
         LoadConsumables();
@@ -226,6 +230,7 @@ public class RecipeCraftSettingsPopup
             DrawMacroValidationStatus();
             DrawRaphaelValidationStatus();
             DrawDonatelloOptimizationOption();
+            DrawSpecialistActionOverride();
             DrawFoodSelector();
             DrawMedicineSelector();
             DrawManualSelector();
@@ -363,6 +368,7 @@ public class RecipeCraftSettingsPopup
             SelectedMacroId = settings.MacroMode == MacroOverrideMode.Specific ? settings.SelectedMacroId : null,
             SolverOverride = settings.MacroMode == MacroOverrideMode.Specific ? settings.SolverOverride : SolverOverrideMode.Default,
             MaximizeQualityAtCostOfTime = settings.MaximizeQualityAtCostOfTime,
+            SpecialistActionOverride = settings.SpecialistActionOverride,
         };
     }
 
@@ -372,7 +378,20 @@ public class RecipeCraftSettingsPopup
         if (ImGui.Checkbox("Maximize quality at cost of time", ref maximizeQuality))
             _editingSettings.MaximizeQualityAtCostOfTime = maximizeQuality;
         if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("Allow each live Donatello replan up to 30 seconds. This may improve quality on difficult crafts, but crafting can pause while optimizing.");
+            ImGui.SetTooltip("Allow each live Donatello replan up to 30 seconds and bounded Careful Observation condition rerolls when specialist actions are allowed. This may improve quality, but crafting can pause or take longer.");
+    }
+
+    private void DrawSpecialistActionOverride()
+    {
+        ImGui.AlignTextToFramePadding();
+        ImGui.Text("Specialist actions:");
+        ImGui.SameLine(SettingLabelWidth);
+        var mode = (int)_editingSettings.SpecialistActionOverride;
+        ImGui.SetNextItemWidth(OverrideModeWidth);
+        if (ImGui.Combo("##SpecialistActionOverride", ref mode, SpecialistActionOverrideLabels, SpecialistActionOverrideLabels.Length))
+            _editingSettings.SpecialistActionOverride = (SpecialistActionOverrideMode)mode;
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("Override the global specialist-action setting for this item. The current crafting job must still be a specialist.");
     }
 
     private RaphaelAssessment GetRaphaelAssessment()

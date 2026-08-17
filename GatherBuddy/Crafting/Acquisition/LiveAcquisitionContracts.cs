@@ -114,11 +114,19 @@ public sealed record LiveVendorPurchaseResult(
     long? GilBefore = null,
     long? GilAfter = null)
 {
+    public bool InteractionClosed { get; init; } = true;
+
+    /// <summary>
+    /// Currency spend was measured and validated around the shop transaction,
+    /// excluding navigation and other activity outside the purchase boundary.
+    /// </summary>
+    public bool CurrencySpendIsAuthoritative { get; init; }
+
     public IReadOnlyDictionary<uint, int> OutputQuantities { get; init; }
         = new Dictionary<uint, int>();
 
     /// <summary>
-    /// Authoritative wallet snapshots captured around the vendor request.
+    /// Authoritative wallet snapshots captured around the vendor purchase.
     /// Keys use the vendor currency item IDs, including
     /// <see cref="VendorShopResolver.GilCurrencyItemId"/> for Gil.
     /// </summary>
@@ -214,7 +222,7 @@ public interface ILiveAcquisitionEnvironment
 
     Task<LiveVendorPurchaseResult> PurchaseVendorAsync(
         AcquisitionTransaction transaction,
-        TimeSpan timeout,
+        TimeSpan navigationTimeout,
         CancellationToken cancellationToken);
 
     Task CloseMarketBoardAsync(CancellationToken cancellationToken);

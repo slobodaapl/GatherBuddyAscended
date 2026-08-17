@@ -386,7 +386,12 @@ public class CraftingListEditor
 
         Interlocked.Increment(ref _materialCacheVersion);
 
-        if (!graphAffected)
+        // Inventory changes alter dependency deficits even when the changed
+        // item is a leaf material rather than a final or precraft result.
+        // Keep acquisition estimates synchronized with manual purchases.
+        _acquisitionEstimateDirty = true;
+
+        if (!graphAffected && !planningList.SkipIfEnough)
             return;
 
         lock (_inventoryChangeLock)
@@ -405,14 +410,18 @@ public class CraftingListEditor
             {
                 if (IsTrackedInventoryContainer(complexEvent.SourceInventory))
                 {
-                    var sourceItemId = complexEvent.SourceEvent.Item.BaseItemId;
+                    var sourceItemId = complexEvent.SourceEvent.Item.BaseItemId != 0
+                        ? complexEvent.SourceEvent.Item.BaseItemId
+                        : complexEvent.SourceEvent.Item.ItemId;
                     if (sourceItemId > 0)
                         yield return sourceItemId;
                 }
 
                 if (IsTrackedInventoryContainer(complexEvent.TargetInventory))
                 {
-                    var targetItemId = complexEvent.TargetEvent.Item.BaseItemId;
+                    var targetItemId = complexEvent.TargetEvent.Item.BaseItemId != 0
+                        ? complexEvent.TargetEvent.Item.BaseItemId
+                        : complexEvent.TargetEvent.Item.ItemId;
                     if (targetItemId > 0)
                         yield return targetItemId;
                 }
@@ -421,25 +430,33 @@ public class CraftingListEditor
             }
             case InventoryItemAddedArgs addedEvent when IsTrackedInventoryContainer(addedEvent.Inventory):
             {
-                var itemId = addedEvent.Item.BaseItemId;
+                var itemId = addedEvent.Item.BaseItemId != 0
+                    ? addedEvent.Item.BaseItemId
+                    : addedEvent.Item.ItemId;
                 if (itemId > 0)
                     yield return itemId;
                 yield break;
             }
             case InventoryItemRemovedArgs removedEvent when IsTrackedInventoryContainer(removedEvent.Inventory):
             {
-                var itemId = removedEvent.Item.BaseItemId;
+                var itemId = removedEvent.Item.BaseItemId != 0
+                    ? removedEvent.Item.BaseItemId
+                    : removedEvent.Item.ItemId;
                 if (itemId > 0)
                     yield return itemId;
                 yield break;
             }
             case InventoryItemChangedArgs changedEvent when IsTrackedInventoryContainer(changedEvent.Inventory):
             {
-                var oldItemId = changedEvent.OldItemState.BaseItemId;
+                var oldItemId = changedEvent.OldItemState.BaseItemId != 0
+                    ? changedEvent.OldItemState.BaseItemId
+                    : changedEvent.OldItemState.ItemId;
                 if (oldItemId > 0)
                     yield return oldItemId;
 
-                var itemId = changedEvent.Item.BaseItemId;
+                var itemId = changedEvent.Item.BaseItemId != 0
+                    ? changedEvent.Item.BaseItemId
+                    : changedEvent.Item.ItemId;
                 if (itemId > 0 && itemId != oldItemId)
                     yield return itemId;
                 yield break;
@@ -449,7 +466,9 @@ public class CraftingListEditor
                 if (!IsTrackedInventoryContainer(inventoryEvent.Item.ContainerType))
                     yield break;
 
-                var itemId = inventoryEvent.Item.BaseItemId;
+                var itemId = inventoryEvent.Item.BaseItemId != 0
+                    ? inventoryEvent.Item.BaseItemId
+                    : inventoryEvent.Item.ItemId;
                 if (itemId > 0)
                     yield return itemId;
                 yield break;
@@ -650,7 +669,7 @@ public class CraftingListEditor
         }
 
         var quickSynthAll = _list.QuickSynthAll;
-        if (ImGui.Checkbox("Quick Synth All##qsa", ref quickSynthAll))
+        if (ImGui.Checkbox("Quick Synth##qsa", ref quickSynthAll))
         {
             _list.QuickSynthAll = quickSynthAll;
             GatherBuddy.CraftingListManager.SaveList(_list);
@@ -661,7 +680,7 @@ public class CraftingListEditor
             TriggerMaterialsRegeneration();
         }
         if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("Force Quick Synthesis on eligible items in this list. Additional override options appear below when enabled.");
+            ImGui.SetTooltip("Force Quick Synthesis on eligible items in this list. Additional options appear below when enabled.");
 
         if (_list.QuickSynthAll)
         {
@@ -682,7 +701,7 @@ public class CraftingListEditor
                 ImGui.SetTooltip("Enable the Quick Synthesis 'Synthesize NQ items only' toggle for affected crafts.");
 
             var quickSynthAllPrecraftsOnly = _list.QuickSynthAllPrecraftsOnly;
-            if (ImGui.Checkbox("Precrafts Only##qsapo", ref quickSynthAllPrecraftsOnly))
+            if (ImGui.Checkbox("Precrafts only##qsapo", ref quickSynthAllPrecraftsOnly))
             {
                 _list.QuickSynthAllPrecraftsOnly = quickSynthAllPrecraftsOnly;
                 GatherBuddy.CraftingListManager.SaveList(_list);
@@ -693,7 +712,7 @@ public class CraftingListEditor
                 TriggerMaterialsRegeneration();
             }
             if (ImGui.IsItemHovered())
-                ImGui.SetTooltip("Apply the Quick Synth All and Prefer NQ overrides only to generated precrafts, leaving final list items unchanged.");
+                ImGui.SetTooltip("Apply Quick Synth and Prefer NQ only to generated precrafts, leaving final list items unchanged.");
 
             ImGui.Unindent();
         }
@@ -2112,7 +2131,7 @@ public class CraftingListEditor
             if (!recipe.HasValue)
                 continue;
             var itemId = recipe.Value.ItemResult.RowId;
-            var quantity = recipeItem.Quantity * (int)recipe.Value.AmountResult;
+            var quantity = plan.Precrafts.GetValueOrDefault(itemId);
             if (quantity <= 0)
                 continue;
 

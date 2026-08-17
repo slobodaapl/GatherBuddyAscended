@@ -44,17 +44,29 @@ public static class CraftingGatherBridge
     private static CraftingQueueProcessor? _queueProcessorPendingDispose;
     private static PendingQueueStart? _pendingQueueStart;
     private static CollectableManager? _collectableManager;
+    private static CraftingAutomationOwner _activeAutomationOwner;
+    private static bool _restoringPersistedCraft;
+    private static Dictionary<uint, int> _restoredQueueCoverage = new();
+    private static bool _startupRecoveryResolved;
+    private static DateTime _startupRecoveryProbeStartedUtc;
+    private static DateTime _nextStartupRecoveryAttemptUtc;
 
     private sealed record PendingQueueStart(
         CraftingExecutionPlan ExecutionPlan,
         CraftingListConsumableSettings? ListConsumables,
-        int? EphemeralListId);
+        int? EphemeralListId,
+        CraftingAutomationOwner Owner,
+        bool RestoringPersistedCraft);
     
     public static bool PreserveListOnDisable { get; set; } = false;
 
     public static void Initialize(global::GatherBuddy.GatherBuddy plugin)
     {
         _plugin = plugin;
+        _startupRecoveryResolved = false;
+        _startupRecoveryProbeStartedUtc = DateTime.UtcNow;
+        _nextStartupRecoveryAttemptUtc = DateTime.MinValue;
+        CraftingGameInterop.CraftFinished += OnOwnedCraftFinished;
     }
 
     private static int RoundUpToBatchSize(int quantity, int batchSize)
@@ -254,6 +266,7 @@ public static class CraftingGatherBridge
     public static void Update()
     {
         TryFinalizePendingProcessorDisposal();
+        TryStartPersistedRecovery();
 
         if (_pendingQueueStart is { } pendingQueueStart)
         {
@@ -264,7 +277,9 @@ public static class CraftingGatherBridge
             StartQueueCore(
                 pendingQueueStart.ExecutionPlan,
                 pendingQueueStart.ListConsumables,
-                pendingQueueStart.EphemeralListId);
+                pendingQueueStart.EphemeralListId,
+                pendingQueueStart.Owner,
+                pendingQueueStart.RestoringPersistedCraft);
         }
 
         if (_isQueueMode && _queueProcessor != null)
@@ -306,6 +321,7 @@ public static class CraftingGatherBridge
                 _waitingForGatherComplete = false;
                 _waitingForJobSwitch = false;
                 _jobSwitchTime = DateTime.MinValue;
+                ClearRecoveryTicket();
                 DeleteEphemeralCraftingListSafely();
             }
         }
@@ -339,34 +355,71 @@ public static class CraftingGatherBridge
         CreateGatherListForMissingIngredients(missing);
     }
     
-    public static void StartQueueCraftAndGather(CraftingExecutionPlan executionPlan, CraftingListConsumableSettings? listConsumables = null, int? ephemeralListId = null)
+    public static void StartQueueCraftAndGather(
+        CraftingExecutionPlan executionPlan,
+        CraftingListConsumableSettings? listConsumables = null,
+        int? ephemeralListId = null,
+        CraftingAutomationOwner owner = CraftingAutomationOwner.GatherBuddy,
+        bool restoringPersistedCraft = false)
     {
-        if (!CraftingQueuePreflight.TryValidate(executionPlan, out var preflightFailure))
+        if (!CraftingQueuePreflight.TryValidate(
+                executionPlan,
+                out var preflightFailure,
+                validatePrecrafts: !executionPlan.AutoPurchaseBlockedDependencies,
+                listConsumables: listConsumables))
         {
-            GatherBuddy.Log.Warning($"[CraftingGatherBridge] Queue preflight failed: {preflightFailure.Replace('\n', ' ')}");
-            Dalamud.Chat.PrintError($"[GatherBuddy Ascended] {preflightFailure}");
+            if (restoringPersistedCraft)
+            {
+                GatherBuddy.Log.Debug(
+                    $"[CraftingRecovery] Waiting for recovery preflight: {preflightFailure.Replace('\n', ' ')}");
+            }
+            else
+            {
+                GatherBuddy.Log.Warning($"[CraftingGatherBridge] Queue preflight failed: {preflightFailure.Replace('\n', ' ')}");
+                Dalamud.Chat.PrintError($"[GatherBuddy Ascended] {preflightFailure}");
+            }
             return;
         }
 
+        if (!restoringPersistedCraft)
+            ClearRecoveryTicket();
         CleanupPreviousQueueBeforeStart();
         if (!_queueProcessorDrain.IsCompleted)
         {
-            _pendingQueueStart = new PendingQueueStart(executionPlan, listConsumables, ephemeralListId);
+            _pendingQueueStart = new PendingQueueStart(
+                executionPlan,
+                listConsumables,
+                ephemeralListId,
+                owner,
+                restoringPersistedCraft);
             GatherBuddy.Log.Information("[CraftingGatherBridge] Waiting for the previous queue's acquisition cleanup before starting the replacement queue");
             return;
         }
 
         TryFinalizePendingProcessorDisposal();
         _pendingQueueStart = null;
-        StartQueueCore(executionPlan, listConsumables, ephemeralListId);
+        StartQueueCore(executionPlan, listConsumables, ephemeralListId, owner, restoringPersistedCraft);
     }
 
-    private static void StartQueueCore(CraftingExecutionPlan executionPlan, CraftingListConsumableSettings? listConsumables, int? ephemeralListId)
+    private static void StartQueueCore(
+        CraftingExecutionPlan executionPlan,
+        CraftingListConsumableSettings? listConsumables,
+        int? ephemeralListId,
+        CraftingAutomationOwner owner,
+        bool restoringPersistedCraft)
     {
         _queueProcessorDrain = Task.CompletedTask;
         _isQueueMode = true;
         _ephemeralListId = ephemeralListId;
         _activeExecutionPlan = executionPlan;
+        _activeAutomationOwner = owner;
+        _restoringPersistedCraft = restoringPersistedCraft;
+        _restoredQueueCoverage = restoringPersistedCraft
+            ? executionPlan.QueueView
+                .Where(item => !item.Options.Skipping)
+                .GroupBy(item => item.RecipeId)
+                .ToDictionary(group => group.Key, group => group.Count())
+            : new Dictionary<uint, int>();
         ResetCollectablesInterruptionState();
         _lastCollectablesHardFailLog = DateTime.MinValue;
         CaptureAndStopStandaloneGathering();
@@ -381,6 +434,122 @@ public static class CraftingGatherBridge
         // corresponding gate has completed.
 
         GatherBuddy.CraftingStatusWindow?.SetQueueProcessor(_queueProcessor);
+    }
+
+    private static void TryStartPersistedRecovery()
+    {
+        var now = DateTime.UtcNow;
+        if (_startupRecoveryResolved || HasActiveQueue || now < _nextStartupRecoveryAttemptUtc)
+            return;
+
+        var ticket = GatherBuddy.Config.CraftingRecovery;
+        if (ticket == null)
+        {
+            _startupRecoveryResolved = true;
+            return;
+        }
+
+        var decision = CraftingRecoveryTicket.DecideStartupRecovery(
+            ticket,
+            Dalamud.Objects.LocalPlayer != null,
+            SynthesisReader.IsSynthesisWindowOpen(),
+            RecipeNoteExt.GetActiveCraftRecipeId(),
+            now - _startupRecoveryProbeStartedUtc);
+        if (decision == CraftingStartupRecoveryDecision.Wait)
+            return;
+        if (decision == CraftingStartupRecoveryDecision.Discard)
+        {
+            GatherBuddy.Log.Warning("[CraftingRecovery] Discarding stale or mismatched crafting ownership marker");
+            ClearRecoveryTicket();
+            _startupRecoveryResolved = true;
+            return;
+        }
+        if (!ticket.TryRestore(out var remainingQueue, out var failureReason))
+        {
+            GatherBuddy.Log.Error($"[CraftingRecovery] Could not restore owned craft: {failureReason}");
+            ClearRecoveryTicket();
+            _startupRecoveryResolved = true;
+            return;
+        }
+
+        GatherBuddy.Log.Information(
+            $"[CraftingRecovery] Resuming owned synthesis recipe {remainingQueue[0].RecipeId} with {remainingQueue.Count} queue item(s) remaining");
+        if (RecipeManager.GetRecipe(remainingQueue[0].RecipeId) is { } activeRecipe)
+        {
+            var recoveryContext = CraftingContextResolver.ResolveExecutionContext(
+                remainingQueue[0],
+                activeRecipe,
+                ticket.ListConsumables);
+            if (RecoveryRequiresBaselineWarning(recoveryContext))
+            {
+                const string warning = "Reload recovery is replanning from the live craft without the pre-reload Raphael incumbent; the original quality result cannot be proven.";
+                GatherBuddy.Log.Warning($"[CraftingRecovery] {warning}");
+                Dalamud.Chat.PrintError($"[GatherBuddy Ascended] {warning}");
+            }
+        }
+        _nextStartupRecoveryAttemptUtc = now.AddSeconds(1);
+        var plan = CraftingExecutionPlan.CreateRecovery(remainingQueue);
+        StartQueueCraftAndGather(
+            plan,
+            ticket.ListConsumables?.Clone(),
+            owner: ticket.Owner,
+            restoringPersistedCraft: true);
+        _startupRecoveryResolved = HasActiveQueue;
+    }
+
+    internal static bool RecoveryRequiresBaselineWarning(CraftingExecutionContext context)
+        => context.EffectiveSolverMode is VulcanSolverMode.Donatello or VulcanSolverMode.PureRaphael
+            && context.DonatelloOptions?.Objective != Vulcan.DonatelloSolveObjective.ProgressOnly
+            && !CraftingContextResolver.UsesSelectedMacro(context);
+
+    internal static void PersistCurrentCraftOwnership(uint recipeId)
+    {
+        if (!_isQueueMode || _queueProcessor == null)
+            return;
+
+        var remaining = _queueProcessor.Queue.Skip(_queueProcessor.CurrentQueueIndex).ToList();
+        if (remaining.Count == 0 || remaining[0].RecipeId != recipeId)
+            return;
+
+        GatherBuddy.Config.CraftingRecovery = CraftingRecoveryTicket.Capture(
+            _activeAutomationOwner,
+            remaining,
+            _queueProcessor.ListConsumables);
+        GatherBuddy.Config.Save();
+        GatherBuddy.Log.Debug(
+            $"[CraftingRecovery] Persisted ownership for recipe {recipeId} with {remaining.Count} queue item(s) remaining");
+    }
+
+    private static void OnOwnedCraftFinished(Recipe? recipe, bool cancelled)
+    {
+        if (_isQueueMode)
+            ClearRecoveryTicket();
+    }
+
+    private static void ClearRecoveryTicket()
+    {
+        if (GatherBuddy.Config.CraftingRecovery == null)
+            return;
+        GatherBuddy.Config.CraftingRecovery = null;
+        GatherBuddy.Config.Save();
+    }
+
+    internal static bool TryGetPersistedArtisanRecovery(
+        uint requestedRecipeId,
+        out ushort activeRecipeId,
+        out int alreadyQueued)
+    {
+        activeRecipeId = 0;
+        alreadyQueued = 0;
+        if (!_restoringPersistedCraft
+            || _activeAutomationOwner != CraftingAutomationOwner.ArtisanIpc
+            || _queueProcessor?.CurrentRecipeItem is not { } current
+            || current.RecipeId > ushort.MaxValue)
+            return false;
+
+        activeRecipeId = (ushort)current.RecipeId;
+        alreadyQueued = _restoredQueueCoverage.GetValueOrDefault(requestedRecipeId);
+        return true;
     }
 
     private static void CleanupPreviousQueueBeforeStart()
@@ -420,6 +589,14 @@ public static class CraftingGatherBridge
     }
     
     public static void CreateGatherListForMissingIngredients(Dictionary<uint, int> missing)
+        => CreateGatherList(missing, quantityIsDeficit: true);
+
+    public static void CreateGatherListForRequiredIngredients(IReadOnlyDictionary<uint, int> required)
+        => CreateGatherList(required, quantityIsDeficit: false);
+
+    private static void CreateGatherList(
+        IReadOnlyDictionary<uint, int> ingredients,
+        bool quantityIsDeficit)
     {
         try
         {
@@ -434,12 +611,12 @@ public static class CraftingGatherBridge
                 Enabled = true
             };
 
-            foreach (var (itemId, quantity) in missing)
+            foreach (var (itemId, quantity) in ingredients)
             {
                 var gatherQuantity = GetCraftingGatherTargetQuantity(
                     itemId,
                     quantity,
-                    quantityIsDeficit: true,
+                    quantityIsDeficit,
                     out var gatherItemId,
                     out var completionItemId);
                 if (gatherQuantity <= 0)
@@ -1023,7 +1200,12 @@ public static class CraftingGatherBridge
     }
     
     public static void StopQueue()
+        => StopQueueInternal(clearRecoveryTicket: true);
+
+    private static void StopQueueInternal(bool clearRecoveryTicket)
     {
+        if (clearRecoveryTicket)
+            ClearRecoveryTicket();
         _pendingQueueStart = null;
         if (_queueProcessor != null)
         {
@@ -1069,7 +1251,7 @@ public static class CraftingGatherBridge
     /// </summary>
     public static async Task ShutdownAsync(CancellationToken cancellationToken = default)
     {
-        StopQueue();
+        StopQueueInternal(clearRecoveryTicket: false);
         var drain = _queueProcessorDrain;
         try
         {
@@ -1086,6 +1268,7 @@ public static class CraftingGatherBridge
                 _collectableManager.OnError -= OnCollectablesError;
             }
             _collectableManager = null;
+            CraftingGameInterop.CraftFinished -= OnOwnedCraftFinished;
             _plugin = null;
             _queueProcessor = null;
             _activeExecutionPlan = null;
@@ -1105,6 +1288,12 @@ public static class CraftingGatherBridge
             _autoGatherStateCaptured = false;
             _autoGatherWasEnabled = false;
             _pendingQueueStart = null;
+            _activeAutomationOwner = CraftingAutomationOwner.GatherBuddy;
+            _restoringPersistedCraft = false;
+            _restoredQueueCoverage.Clear();
+            _startupRecoveryResolved = false;
+            _startupRecoveryProbeStartedUtc = DateTime.MinValue;
+            _nextStartupRecoveryAttemptUtc = DateTime.MinValue;
             _gatherList = null;
             _disabledGatherLists.Clear();
             _ephemeralListId = null;

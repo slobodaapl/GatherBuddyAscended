@@ -12,9 +12,6 @@ public class StandardSolverConfig
     public int SolverCollectibleMode { get; set; } = 3;
     public int MaxIQPrepTouch { get; set; } = 10;
     public bool UseSpecialist { get; set; } = false;
-    public bool UseMaterialMiracle { get; set; } = false;
-    public int MinimumStepsBeforeMiracle { get; set; } = 2;
-    public bool MaterialMiracleMulti { get; set; } = false;
 }
 
 public class StandardSolverDefinition : ISolverDefinition
@@ -35,7 +32,6 @@ public class StandardSolver : Solver
     private bool _qualityStarted;
     private bool _venerationUsed;
     private bool _trainedEyeUsed;
-    private bool _materialMiracleUsed;
 
     private Solver? _fallback;
     private StandardSolverConfig _config;
@@ -52,15 +48,12 @@ public class StandardSolver : Solver
 
         if (Simulator.GetDurabilityCost(step, rec.Action) == 0)
         {
-            if (rec.Action != VulcanSkill.MaterialMiracle)
-            {
-                if (step.Durability <= 10 && Simulator.CanUseAction(craft, step, VulcanSkill.MastersMend))
-                    rec.Action = VulcanSkill.MastersMend;
-                if (step.Durability <= 10 && Simulator.CanUseAction(craft, step, VulcanSkill.Manipulation) && step.ManipulationLeft <= 1)
-                    rec.Action = VulcanSkill.Manipulation;
-                if (step.Durability <= 10 && Simulator.CanUseAction(craft, step, VulcanSkill.ImmaculateMend) && craft.CraftDurability >= 70)
-                    rec.Action = VulcanSkill.ImmaculateMend;
-            }
+            if (step.Durability <= 10 && Simulator.CanUseAction(craft, step, VulcanSkill.MastersMend))
+                rec.Action = VulcanSkill.MastersMend;
+            if (step.Durability <= 10 && Simulator.CanUseAction(craft, step, VulcanSkill.Manipulation) && step.ManipulationLeft <= 1)
+                rec.Action = VulcanSkill.Manipulation;
+            if (step.Durability <= 10 && Simulator.CanUseAction(craft, step, VulcanSkill.ImmaculateMend) && craft.CraftDurability >= 70)
+                rec.Action = VulcanSkill.ImmaculateMend;
         }
         else
         {
@@ -100,7 +93,7 @@ public class StandardSolver : Solver
     }
 
     private static bool InTouchRotation(CraftState craft, StepState step)
-        => step.PrevComboAction == VulcanSkill.BasicTouch && craft.StatLevel >= Simulator.MinLevel(VulcanSkill.StandardTouch) || step.PrevComboAction == VulcanSkill.StandardTouch && craft.StatLevel >= Simulator.MinLevel(VulcanSkill.AdvancedTouch);
+        => step.ComboAction == VulcanSkill.BasicTouch && craft.StatLevel >= Simulator.MinLevel(VulcanSkill.StandardTouch) || step.ComboAction == VulcanSkill.StandardTouch && craft.StatLevel >= Simulator.MinLevel(VulcanSkill.AdvancedTouch);
 
     public VulcanSkill BestSynthesis(CraftState craft, StepState step, bool progOnly = false)
     {
@@ -167,15 +160,7 @@ public class StandardSolver : Solver
         _qualityStarted |= step.PrevComboAction is VulcanSkill.BasicTouch or VulcanSkill.StandardTouch or VulcanSkill.AdvancedTouch or VulcanSkill.HastyTouch or VulcanSkill.ByregotsBlessing or VulcanSkill.PrudentTouch
             or VulcanSkill.PreciseTouch or VulcanSkill.TrainedEye or VulcanSkill.PreparatoryTouch or VulcanSkill.TrainedFinesse or VulcanSkill.Innovation;
         _venerationUsed |= step.PrevComboAction == VulcanSkill.Veneration;
-        _materialMiracleUsed |= step.PrevComboAction == VulcanSkill.MaterialMiracle && !_config.MaterialMiracleMulti;
-
-        if (step.MaterialMiracleActive)
-            return fallbackRec;
-
-        if (_config.UseMaterialMiracle && step.Index >= _config.MinimumStepsBeforeMiracle && !_materialMiracleUsed && Simulator.CanUseAction(craft, step, VulcanSkill.MaterialMiracle))
-            return new(VulcanSkill.MaterialMiracle);
-
-        bool inCombo = (step.PrevComboAction == VulcanSkill.BasicTouch && Simulator.CanUseAction(craft, step, VulcanSkill.StandardTouch)) || (step.PrevComboAction == VulcanSkill.StandardTouch && Simulator.CanUseAction(craft, step, VulcanSkill.AdvancedTouch));
+        bool inCombo = (step.ComboAction == VulcanSkill.BasicTouch && Simulator.CanUseAction(craft, step, VulcanSkill.StandardTouch)) || (step.ComboAction == VulcanSkill.StandardTouch && Simulator.CanUseAction(craft, step, VulcanSkill.AdvancedTouch));
         var act = BestSynthesis(craft, step);
         var goingForQuality = GoingForQuality(craft, step, out var maxQuality);
 
@@ -251,7 +236,7 @@ public class StandardSolver : Solver
             if (_wasteNotUsed && Simulator.CanUseAction(craft, step, VulcanSkill.PreciseTouch) && step.GreatStridesLeft == 0 && step.Condition is Condition.Good or Condition.Excellent && !WillActFail(craft, step, VulcanSkill.PreciseTouch)) return new(VulcanSkill.PreciseTouch);
             if (craft.StatLevel < Simulator.MinLevel(VulcanSkill.PreciseTouch) && step.GreatStridesLeft == 0 && step.Condition is Condition.Excellent)
             {
-                if (step.PrevComboAction == VulcanSkill.BasicTouch && Simulator.CanUseAction(craft, step, VulcanSkill.StandardTouch) && step.Durability - Simulator.GetDurabilityCost(step, VulcanSkill.StandardTouch) > 0) return new(VulcanSkill.StandardTouch);
+                if (step.ComboAction == VulcanSkill.BasicTouch && Simulator.CanUseAction(craft, step, VulcanSkill.StandardTouch) && step.Durability - Simulator.GetDurabilityCost(step, VulcanSkill.StandardTouch) > 0) return new(VulcanSkill.StandardTouch);
                 if (Simulator.CanUseAction(craft, step, VulcanSkill.BasicTouch) && step.Durability - Simulator.GetDurabilityCost(step, VulcanSkill.BasicTouch) > 0) return new(VulcanSkill.BasicTouch);
                 if (Simulator.CanUseAction(craft, step, VulcanSkill.TricksOfTrade)) return new(VulcanSkill.TricksOfTrade);
             }
@@ -368,11 +353,11 @@ public class StandardSolver : Solver
     {
         bool wasteNots = step.WasteNotLeft > 0;
 
-        if (Simulator.CanUseAction(craft, step, VulcanSkill.AdvancedTouch) && step.PrevComboAction == VulcanSkill.Observe) return VulcanSkill.AdvancedTouch;
+        if (Simulator.CanUseAction(craft, step, VulcanSkill.AdvancedTouch) && step.ComboAction == VulcanSkill.Observe) return VulcanSkill.AdvancedTouch;
         if (Simulator.CanUseAction(craft, step, VulcanSkill.PreciseTouch)) return VulcanSkill.PreciseTouch;
         if (Simulator.CanUseAction(craft, step, VulcanSkill.PreparatoryTouch) && step.IQStacks < _config.MaxIQPrepTouch && step.InnovationLeft > 0) return VulcanSkill.PreparatoryTouch;
-        if (Simulator.CanUseAction(craft, step, VulcanSkill.AdvancedTouch) && step.PrevComboAction == VulcanSkill.StandardTouch) return VulcanSkill.AdvancedTouch;
-        if (Simulator.CanUseAction(craft, step, VulcanSkill.StandardTouch) && step.PrevComboAction == VulcanSkill.BasicTouch) return VulcanSkill.StandardTouch;
+        if (Simulator.CanUseAction(craft, step, VulcanSkill.AdvancedTouch) && step.ComboAction == VulcanSkill.StandardTouch) return VulcanSkill.AdvancedTouch;
+        if (Simulator.CanUseAction(craft, step, VulcanSkill.StandardTouch) && step.ComboAction == VulcanSkill.BasicTouch) return VulcanSkill.StandardTouch;
         if (Simulator.CanUseAction(craft, step, VulcanSkill.PrudentTouch) && GetComboDurability(craft, step, VulcanSkill.BasicTouch, VulcanSkill.StandardTouch, VulcanSkill.AdvancedTouch) <= 0) return VulcanSkill.PrudentTouch;
         if (Simulator.CanUseAction(craft, step, VulcanSkill.TrainedFinesse) && step.Durability <= 10) return VulcanSkill.TrainedFinesse;
         if (Simulator.CanUseAction(craft, step, VulcanSkill.BasicTouch)) return VulcanSkill.BasicTouch;

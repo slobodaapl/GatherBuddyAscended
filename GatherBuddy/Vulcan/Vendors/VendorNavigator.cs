@@ -570,6 +570,18 @@ public class VendorNavigator
     public bool               IsActive          => _state is not (State.Idle or State.ReadyToPurchase or State.Failed);
     public VendorNpcLocation? CurrentTarget     => _target;
 
+    internal readonly record struct ProgressSnapshot(int State, uint TerritoryId, Vector3 PlayerPosition);
+
+    internal ProgressSnapshot CaptureProgressSnapshot()
+        => new((int)_state, Dalamud.ClientState.TerritoryType, Dalamud.Objects.LocalPlayer?.Position ?? Vector3.Zero);
+
+    internal static bool HasNavigationProgress(ProgressSnapshot previous, ProgressSnapshot current)
+        => previous.State != current.State
+            || previous.TerritoryId != current.TerritoryId
+            || previous.PlayerPosition != Vector3.Zero
+                && current.PlayerPosition != Vector3.Zero
+                && Vector3.DistanceSquared(previous.PlayerPosition, current.PlayerPosition) >= 1f;
+
     public void PlaceMapMarker(VendorNpcLocation target)
         => PlaceMapFlag(target);
 

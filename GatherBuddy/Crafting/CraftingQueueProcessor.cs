@@ -68,6 +68,7 @@ public class CraftingQueueProcessor : IDisposable
         Task<LiveAcquisitionResult>? Task);
 
     private bool _paused = false;
+    private readonly DeferredResumeRequest _resumeRequest = new();
     private bool _pausedDuringGather = false;
     private uint _currentProcessedRecipeId = 0;
     private int _currentProcessedRecipeCount = 0;
@@ -77,6 +78,10 @@ public class CraftingQueueProcessor : IDisposable
     private Dictionary<string, RaphaelSolveRequest> _enqueuedRaphaelRequests = new();
     private uint _jobSwitchRequestedFor = 0u;
     private DateTime _jobSwitchRequestedAt = DateTime.MinValue;
+    private DateTime _jobSwitchStartedAt = DateTime.MinValue;
+    private DateTime _jobSwitchReadySince = DateTime.MinValue;
+    private int _jobSwitchAttempts;
+    private string? _jobSwitchFailure;
     private Dictionary<uint, int> _missingIngredientFailures = new();
     private string _pauseReason = string.Empty;
 
@@ -129,16 +134,17 @@ public class CraftingQueueProcessor : IDisposable
     public void StartQueue(CraftingExecutionPlan executionPlan, CraftingListConsumableSettings? listConsumables = null, RaphaelSolveCoordinator? raphaelCoordinator = null)
     {
         YesAlready.Lock();
+        CraftingGameInterop.SetAutomationPaused(false);
         _executionPlan = executionPlan;
         _currentQueueIndex = 0;
         _raphaelCoordinator = raphaelCoordinator;
         _listConsumables = listConsumables;
         _consumableDelayUntil = DateTime.MinValue;
         _enqueuedRaphaelRequests.Clear();
-        _jobSwitchRequestedFor = 0u;
-        _jobSwitchRequestedAt = DateTime.MinValue;
+        ResetJobSwitchWatchdog();
         _missingIngredientFailures.Clear();
         _pauseReason = string.Empty;
+        _resumeRequest.Cancel();
         _retainerRestock = executionPlan.RetainerRestock;
         _retainerExecutor = null;
         _retainerBellNavigator = null;
@@ -147,7 +153,11 @@ public class CraftingQueueProcessor : IDisposable
         var hasRetainerWork = _retainerRestock && AllaganTools.Enabled
             && (MaterialTargets.Count > 0 || RetainerPrecraftTargets.Count > 0);
 
-        if (hasRetainerWork)
+        if (TryPrepareLiveCraftAdoption())
+        {
+            GatherBuddy.Log.Information("[CraftingQueueProcessor] Preparing to adopt the active craft after plugin reload");
+        }
+        else if (hasRetainerWork)
         {
             GatherBuddy.Log.Information("[CraftingQueueProcessor] Retainer restock enabled");
             if (GatherBuddy.Config.VulcanRetainerBellConfig.AutoNavigateToRetainerBell)
@@ -175,6 +185,31 @@ public class CraftingQueueProcessor : IDisposable
             GatherBuddy.Log.Debug("[CraftingQueueProcessor] Evaluating queue for upfront Raphael solves using effective execution context");
             EnqueueRaphaelSolvesFromCraftStates(QueueItems);
         }
+    }
+
+    private bool TryPrepareLiveCraftAdoption()
+    {
+        if (!SynthesisReader.IsSynthesisWindowOpen() || _currentQueueIndex >= QueueItems.Count)
+            return false;
+
+        var recipeItem = QueueItems[_currentQueueIndex];
+        var recipe = RecipeManager.GetRecipe(recipeItem.RecipeId);
+        if (recipe == null)
+        {
+            FailQueue($"Active synthesis cannot be recovered because recipe {recipeItem.RecipeId} is unavailable.");
+            return true;
+        }
+
+        var activeRecipeId = RecipeNoteExt.GetActiveCraftRecipeId();
+        if (activeRecipeId.HasValue && activeRecipeId.Value != recipe.Value.RowId)
+        {
+            FailQueue(
+                $"Active synthesis recipe {activeRecipeId.Value} does not match queued recipe {recipe.Value.RowId}.");
+            return true;
+        }
+
+        _currentState = QueueState.ReadyForCraft;
+        return true;
     }
 
     public void OnGatherComplete()
@@ -342,8 +377,18 @@ public class CraftingQueueProcessor : IDisposable
             FailQueue($"Cannot start crafting gather stage: {ex.Message}");
             return;
         }
-        CraftingGatherBridge.CreateGatherListForMissingIngredients(BuildCurrentMaterialDeficits());
+        var gatherTargets = SelectRequiredGatherTargets(MaterialTargets, BuildCurrentMaterialDeficits());
+        CraftingGatherBridge.CreateGatherListForRequiredIngredients(gatherTargets);
     }
+
+    internal static Dictionary<uint, int> SelectRequiredGatherTargets(
+        IReadOnlyDictionary<uint, int> requiredQuantities,
+        IReadOnlyDictionary<uint, int> deficits)
+        => deficits
+            .Where(pair => pair.Value > 0
+                && requiredQuantities.TryGetValue(pair.Key, out var required)
+                && required > 0)
+            .ToDictionary(pair => pair.Key, pair => requiredQuantities[pair.Key]);
 
     private Dictionary<uint, int> BuildCurrentMaterialDeficits()
         => ComputeCurrentMaterialDeficits(
@@ -455,7 +500,7 @@ public class CraftingQueueProcessor : IDisposable
         }
 
         _executionPlan.RefreshFromCurrentInventory();
-        if (!CraftingQueuePreflight.TryValidate(_executionPlan, out var failure, validatePrecrafts: true)
+        if (!CraftingQueuePreflight.TryValidate(_executionPlan, out var failure, validatePrecrafts: true, listConsumables: _listConsumables)
             || !_executionPlan.UsesMissionProvidedMaterials
                 && !CraftingQueuePreflight.TryValidateMaterials(_executionPlan, out failure))
         {
@@ -684,6 +729,8 @@ public class CraftingQueueProcessor : IDisposable
     {
         if (_paused)
         {
+            if (_resumeRequest.Requested)
+                TryCompleteResume();
             return;
         }
 
@@ -791,6 +838,13 @@ public class CraftingQueueProcessor : IDisposable
 
     private unsafe void UpdateJobSwitch()
     {
+        if (_jobSwitchFailure is { Length: > 0 } switchFailure)
+        {
+            _jobSwitchFailure = null;
+            FailQueue(switchFailure);
+            return;
+        }
+
         if (_currentQueueIndex >= QueueItems.Count)
         {
             CompleteQueue();
@@ -823,11 +877,41 @@ public class CraftingQueueProcessor : IDisposable
 
         if (currentJob != requiredJob)
         {
-            if (Dalamud.Conditions[ConditionFlag.BetweenAreas] || Dalamud.Conditions[ConditionFlag.BetweenAreas51] ||
-                (Lifestream.Enabled && Lifestream.IsBusy()) || !GenericHelpers.IsScreenReady())
+            var now = DateTime.UtcNow;
+            if (_jobSwitchStartedAt == DateTime.MinValue)
+                _jobSwitchStartedAt = now;
+            var busy = Dalamud.Conditions[ConditionFlag.BetweenAreas]
+                || Dalamud.Conditions[ConditionFlag.BetweenAreas51]
+                || Lifestream.Enabled && Lifestream.IsBusy()
+                || !GenericHelpers.IsScreenReady();
+            if (busy)
             {
+                var failure = GetJobSwitchWatchdogFailure(
+                    now - _jobSwitchStartedAt,
+                    TimeSpan.Zero,
+                    _jobSwitchAttempts,
+                    busy: true);
+                if (failure != null)
+                {
+                    FailQueue(failure);
+                    return;
+                }
                 GatherBuddy.Log.Debug("[CraftingQueueProcessor] Deferring job switch: zone transition, Lifestream active, or screen not ready");
                 _jobSwitchRequestedFor = 0u;
+                _jobSwitchReadySince = DateTime.MinValue;
+                return;
+            }
+
+            if (_jobSwitchReadySince == DateTime.MinValue)
+                _jobSwitchReadySince = now;
+            var watchdogFailure = GetJobSwitchWatchdogFailure(
+                now - _jobSwitchStartedAt,
+                now - _jobSwitchReadySince,
+                _jobSwitchAttempts,
+                busy: false);
+            if (watchdogFailure != null)
+            {
+                FailQueue(watchdogFailure);
                 return;
             }
 
@@ -859,11 +943,13 @@ public class CraftingQueueProcessor : IDisposable
                         GatherBuddy.Log.Debug("[CraftingQueueProcessor] Waiting for screen ready before job switch");
                         return CraftingTasks.TaskResult.Retry;
                     }
-                    SwitchJob(requiredJob);
+                    if (!TrySwitchJob(requiredJob, out var failureReason))
+                        _jobSwitchFailure = failureReason;
                     return CraftingTasks.TaskResult.Done;
                 });
                 _jobSwitchRequestedFor = requiredJob;
                 _jobSwitchRequestedAt = DateTime.UtcNow;
+                _jobSwitchAttempts++;
             }
             else if (_tasks.Count == 0 && _jobSwitchRequestedFor == requiredJob)
             {
@@ -877,10 +963,32 @@ public class CraftingQueueProcessor : IDisposable
         }
         else
         {
-            _jobSwitchRequestedFor = 0u;
-            _jobSwitchRequestedAt = DateTime.MinValue;
+            ResetJobSwitchWatchdog();
             TransitionToRaphaelOrCraft();
         }
+    }
+
+    internal static string? GetJobSwitchWatchdogFailure(
+        TimeSpan totalElapsed,
+        TimeSpan readyElapsed,
+        int attempts,
+        bool busy)
+    {
+        if (totalElapsed >= TimeSpan.FromMinutes(2))
+            return "Job switch timed out after two minutes without reaching the required crafting job.";
+        if (!busy && (readyElapsed >= TimeSpan.FromSeconds(30) || attempts >= 5))
+            return $"Job switch failed after {attempts} equip attempt(s) while the game was ready.";
+        return null;
+    }
+
+    private void ResetJobSwitchWatchdog()
+    {
+        _jobSwitchRequestedFor = 0u;
+        _jobSwitchRequestedAt = DateTime.MinValue;
+        _jobSwitchStartedAt = DateTime.MinValue;
+        _jobSwitchReadySince = DateTime.MinValue;
+        _jobSwitchAttempts = 0;
+        _jobSwitchFailure = null;
     }
 
     private void TransitionToRaphaelOrCraft()
@@ -1023,7 +1131,11 @@ public class CraftingQueueProcessor : IDisposable
         return request != null && _raphaelCoordinator.HasFailedSolution(request, out _);
     }
 
-    private bool EnsureRaphaelSolutionReadyForCurrentCraft(CraftingListItem recipeItem, Recipe recipe, CraftingExecutionContext executionContext)
+    private bool EnsureRaphaelSolutionReadyForCurrentCraft(
+        CraftingListItem recipeItem,
+        Recipe recipe,
+        CraftingExecutionContext executionContext,
+        bool activeSynthesis = false)
     {
         if (_raphaelCoordinator == null || !CraftingContextResolver.UsesRaphaelSolver(executionContext))
             return true;
@@ -1053,7 +1165,10 @@ public class CraftingQueueProcessor : IDisposable
 
         if (_raphaelCoordinator.HasFailedSolution(currentRequest, out _))
         {
-            SkipFailedRaphaelItem(recipeItem);
+            if (activeSynthesis)
+                FailQueue($"Active synthesis cannot be recovered because Raphael seed generation failed for recipe {recipeItem.RecipeId}.");
+            else
+                SkipFailedRaphaelItem(recipeItem);
             return false;
         }
         _raphaelCoordinator.ReenqueueIfMissing(currentRequest);
@@ -1116,6 +1231,32 @@ public class CraftingQueueProcessor : IDisposable
         }
 
         var executionContext = CraftingContextResolver.ResolveExecutionContext(recipeItem, recipe.Value, _listConsumables);
+        if (SynthesisReader.IsSynthesisWindowOpen())
+        {
+            CraftingGatherBridge.PersistCurrentCraftOwnership(recipe.Value.RowId);
+            if (executionContext.EffectiveSolverMode != VulcanSolverMode.Donatello
+                && !EnsureRaphaelSolutionReadyForCurrentCraft(
+                    recipeItem,
+                    recipe.Value,
+                    executionContext,
+                    activeSynthesis: true))
+                return;
+            if (CraftingGameInterop.TryAdoptLiveCraft(recipe.Value, executionContext, out var failureReason))
+            {
+                UpdateCurrentRecipeTracking(1);
+                _lastCraftWasQuickSynth = false;
+                _currentState = QueueState.Crafting;
+                StateChanged?.Invoke(_currentState);
+                return;
+            }
+
+            if (Dalamud.Conditions[ConditionFlag.ExecutingCraftingAction]
+                || failureReason.Contains("temporarily unavailable", StringComparison.Ordinal))
+                return;
+
+            FailQueue($"Active synthesis cannot be recovered: {failureReason}.");
+            return;
+        }
         var consumableSettings = executionContext.ConsumableSettings;
         if (consumableSettings != null)
         {
@@ -1187,6 +1328,7 @@ public class CraftingQueueProcessor : IDisposable
 
         _lastCraftWasQuickSynth = useQuickSynthesis;
         GatherBuddy.Log.Information($"[CraftingQueueProcessor] Starting craft {_currentQueueIndex + 1}/{QueueItems.Count}: {recipe.Value.ItemResult.Value.Name} x{craftQuantity}");
+        CraftingGatherBridge.PersistCurrentCraftOwnership(recipe.Value.RowId);
         CraftingGameInterop.StartCraft(recipe.Value, craftQuantity, useQuickSynthesis);
         _currentState = QueueState.Crafting;
         StateChanged?.Invoke(_currentState);
@@ -1400,9 +1542,14 @@ public class CraftingQueueProcessor : IDisposable
         if (!CraftingContextResolver.UsesRaphaelSolver(executionContext))
             return null;
 
-        return CraftingContextResolver.TryBuildSimulationContext(recipe.Value, executionContext, CraftingStatsSource.PreferCurrentJobStats, out var simulationContext)
-            ? simulationContext.RaphaelRequest
-            : null;
+        if (!CraftingContextResolver.TryBuildSimulationContext(
+                recipe.Value,
+                executionContext,
+                CraftingStatsSource.PreferCurrentJobStats,
+                out var simulationContext))
+            return null;
+
+        return simulationContext.RaphaelRequest;
     }
 
     private void SkipToNextRecipe()
@@ -1456,32 +1603,33 @@ public class CraftingQueueProcessor : IDisposable
         };
     }
 
-    private unsafe void SwitchJob(uint jobId)
+    private unsafe bool TrySwitchJob(uint jobId, out string failureReason)
     {
         try
         {
             var gearsetModule = RaptureGearsetModule.Instance();
             if (gearsetModule == null)
             {
-                GatherBuddy.Log.Error("Failed to get gearset module");
-                return;
+                failureReason = "Cannot switch crafting job because the gearset module is unavailable.";
+                return false;
             }
 
             if (GearsetStatsReader.TryResolveExistingGearsetIndex(gearsetModule, jobId, out var gearsetIndex))
             {
                 gearsetModule->EquipGearset(gearsetIndex);
                 GatherBuddy.Log.Information($"Equipped gearset {gearsetIndex} for job {jobId}");
-                return;
+                failureReason = string.Empty;
+                return true;
             }
 
             var jobName = GetJobName(jobId);
-            GatherBuddy.Log.Error($"[CraftingQueueProcessor] No gearset found for {jobName} (Job ID: {jobId})");
-            Dalamud.Chat.PrintError($"[GatherBuddy] Cannot continue crafting: No gearset found for {jobName}. Please create a gearset for this job.");
-            CompleteQueue();
+            failureReason = $"Cannot continue crafting: no gearset exists for {jobName} (job {jobId}).";
+            return false;
         }
         catch (Exception ex)
         {
-            GatherBuddy.Log.Error($"Failed to switch job: {ex.Message}");
+            failureReason = $"Failed to switch to crafting job {jobId}: {ex.Message}";
+            return false;
         }
     }
 
@@ -1860,6 +2008,8 @@ public class CraftingQueueProcessor : IDisposable
 
         GatherBuddy.Log.Information("[CraftingQueueProcessor] Pausing queue");
         _paused = true;
+        _resumeRequest.Cancel();
+        CraftingGameInterop.SetAutomationPaused(true);
         _pauseReason = reason ?? string.Empty;
         if (_currentState == QueueState.NavigatingToRetainerBell)
         {
@@ -1907,16 +2057,25 @@ public class CraftingQueueProcessor : IDisposable
         if (!_paused)
             return;
 
-        if (_currentState == QueueState.Crafting
-            && CraftingGameInterop.CurrentState is CraftingGameInterop.CraftState.InProgress or CraftingGameInterop.CraftState.WaitAction
-            && !CraftingGameInterop.TryResumeLiveCraft())
-        {
-            GatherBuddy.Log.Warning("[CraftingQueueProcessor] Could not resume the active craft from a stable live state; queue remains paused");
+        if (_resumeRequest.Request())
+            GatherBuddy.Log.Information("[CraftingQueueProcessor] Resume requested");
+        TryCompleteResume();
+    }
+
+    private void TryCompleteResume()
+    {
+        if (!_paused || !_resumeRequest.Requested)
             return;
-        }
+
+        var liveStateReady = !(_currentState == QueueState.Crafting
+            && CraftingGameInterop.CurrentState is CraftingGameInterop.CraftState.InProgress or CraftingGameInterop.CraftState.WaitAction
+            && !CraftingGameInterop.TryResumeLiveCraft());
+        if (!_resumeRequest.TryComplete(liveStateReady))
+            return;
 
         GatherBuddy.Log.Information("[CraftingQueueProcessor] Resuming queue");
         _paused = false;
+        CraftingGameInterop.SetAutomationPaused(false);
         _pauseReason = string.Empty;
         YesAlready.Lock();
 
@@ -1976,7 +2135,9 @@ public class CraftingQueueProcessor : IDisposable
     public void Stop()
     {
         GatherBuddy.Log.Information("[CraftingQueueProcessor] Stopping queue");
+        CraftingGameInterop.SetAutomationPaused(true);
         _paused = false;
+        _resumeRequest.Cancel();
         _pauseReason = string.Empty;
         CancelAcquisition();
         _tasks.Clear();
@@ -2024,8 +2185,7 @@ public class CraftingQueueProcessor : IDisposable
         _craftHangSince = DateTime.MinValue;
         _missingIngredientFailures.Clear();
         _enqueuedRaphaelRequests.Clear();
-        _jobSwitchRequestedFor = 0u;
-        _jobSwitchRequestedAt = DateTime.MinValue;
+        ResetJobSwitchWatchdog();
         _retainerRestock = false;
         _retainerExecutor = null;
         _retainerBellNavigator?.Stop();

@@ -508,10 +508,10 @@ public sealed class MarketboardService : IDisposable
         try
         {
             var player = Dalamud.Objects.LocalPlayer;
-            var current = player?.CurrentWorld.ValueNullable?.Name.ToString();
+            var current = player?.CurrentWorld.ValueNullable?.Name.ExtractText();
             if (!string.IsNullOrWhiteSpace(current))
                 return current;
-            var home = player?.HomeWorld.ValueNullable?.Name.ToString();
+            var home = player?.HomeWorld.ValueNullable?.Name.ExtractText();
             return string.IsNullOrWhiteSpace(home) ? GetDataCenter() : home;
         }
         catch

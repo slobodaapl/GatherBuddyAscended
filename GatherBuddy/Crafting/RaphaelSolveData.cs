@@ -18,11 +18,12 @@ public record RaphaelSolveRequest(
     bool SplendorCosmic = false,
     DonatelloSolveObjective Objective = DonatelloSolveObjective.MaximizeQuality,
     bool MinimizeSteps = false,
-    uint StellarSteadyHandCharges = 0,
-    uint MaxMaterialMiracleUses = 0,
-    uint MinimumStepsBeforeMaterialMiracle = 0
+    uint StellarSteadyHandCharges = 0
 )
 {
+    public static int CanonicalizeCrafterDelineations(bool specialist, int delineations)
+        => specialist ? Math.Clamp(delineations, 0, 2) : 0;
+
     public static RaphaelSolveRequest FromCraftState(CraftState craft, bool allowSpecialistActions, string? validationContext = null)
     {
         var options = craft.DonatelloOptions;
@@ -39,25 +40,27 @@ public record RaphaelSolveRequest(
             Specialist: allowSpecialistActions && craft.Specialist,
             InitialQuality: craft.InitialQuality,
             ValidationContext: validationContext,
-            CrafterDelineations: allowSpecialistActions && craft.Specialist ? craft.CrafterDelineations : 0,
+            CrafterDelineations: CanonicalizeCrafterDelineations(
+                allowSpecialistActions && craft.Specialist,
+                craft.CrafterDelineations),
             SplendorCosmic: craft.SplendorCosmic,
             Objective: options?.Objective ?? DonatelloSolveObjective.MaximizeQuality,
             MinimizeSteps: options?.MinimizeSteps ?? GatherBuddy.Config.RaphaelSolverConfig.DonatelloMinimizeSteps,
-            StellarSteadyHandCharges: stellarCharges,
-            MaxMaterialMiracleUses: options?.MaxMaterialMiracleUses ?? 0,
-            MinimumStepsBeforeMaterialMiracle: options?.MinimumStepsBeforeMaterialMiracle ?? 0
+            StellarSteadyHandCharges: stellarCharges
         );
     }
 
     public string GetKey()
     {
-        var key = $"{RecipeId}/{Level}/{Craftsmanship}/{Control}/{CP}/{(Manipulation ? "1" : "0")}/{(Specialist ? "1" : "0")}/{InitialQuality}/{CrafterDelineations}/{(SplendorCosmic ? "1" : "0")}/{(int)Objective}/{(MinimizeSteps ? "1" : "0")}/{StellarSteadyHandCharges}/{MaxMaterialMiracleUses}/{MinimumStepsBeforeMaterialMiracle}";
+        var delineations = CanonicalizeCrafterDelineations(Specialist, CrafterDelineations);
+        var key = $"{RecipeId}/{Level}/{Craftsmanship}/{Control}/{CP}/{(Manipulation ? "1" : "0")}/{(Specialist ? "1" : "0")}/{InitialQuality}/{delineations}/{(SplendorCosmic ? "1" : "0")}/{(int)Objective}/{(MinimizeSteps ? "1" : "0")}/{StellarSteadyHandCharges}";
         return string.IsNullOrEmpty(ValidationContext) ? key : $"{key}/{ValidationContext}";
     }
 }
 
 public class CachedRaphaelSolution
 {
+    public int CacheVersion { get; set; }
     public string Key { get; set; } = string.Empty;
     public RaphaelSolveRequest Request { get; set; } = null!;
     public List<uint> ActionIds { get; set; } = new();
@@ -74,6 +77,7 @@ public class CachedRaphaelSolution
 
     public CachedRaphaelSolution(string key, RaphaelSolveRequest request)
     {
+        CacheVersion = RaphaelSolveCoordinator.SolutionCacheVersion;
         Key = key;
         Request = request;
         GeneratedAt = DateTime.UtcNow;
@@ -103,6 +107,7 @@ public class RaphaelSolveCoordinatorConfig
     public int RaphaelInitialOptimizationSeconds { get; set; } = 30;
     public bool RaphaelAllowSpecialistActions { get; set; } = false;
     public bool DonatelloMinimizeSteps { get; set; } = false;
+    public bool DonatelloExperimentalProgressPriority { get; set; } = false;
     public int DonatelloOptimizationThresholdMs { get; set; } = DonatelloSolver.DefaultLiveReplanDeadlineMillis;
     public int DonatelloCacheMemoryMiB { get; set; } = 512;
     public bool AutoClearSolutionCache { get; set; } = true;

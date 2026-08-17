@@ -22,7 +22,7 @@ internal static class CraftingInventoryCounter
         {
             foreach (var item in Dalamud.GameInventory.GetInventoryItems(inventoryType))
             {
-                if (item.BaseItemId != itemId)
+                if (item.BaseItemId != itemId && item.ItemId != itemId)
                     continue;
 
                 if (item.IsHq)

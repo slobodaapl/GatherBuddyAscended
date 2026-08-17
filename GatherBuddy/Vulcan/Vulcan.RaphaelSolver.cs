@@ -48,7 +48,7 @@ public class RaphaelSolverDefinition : ISolverDefinition
     }
 
     private RaphaelSolveRequest BuildSolveRequest(CraftState craft)
-        => RaphaelSolveRequest.FromCraftState(craft, GatherBuddy.Config.RaphaelSolverConfig.RaphaelAllowSpecialistActions);
+        => RaphaelSolveRequest.FromCraftState(craft, CraftingContextResolver.ResolveSpecialistActionsAllowed(craft));
 }
 
 public class RaphaelMacroSolver : Solver
@@ -68,11 +68,14 @@ public class RaphaelMacroSolver : Solver
         if (_currentActionIndex >= _solution.ActionIds.Count)
         {
             GatherBuddy.Log.Debug($"[RaphaelMacroSolver] All Raphael actions completed");
-            return new(VulcanSkill.None, "Raphael solution complete");
+            return new(VulcanSkill.None, "Raphael solution exhausted before craft completion", IsTerminalFailure: true);
         }
 
         var actionId = _solution.ActionIds[_currentActionIndex];
         var vulcanSkill = ConvertActionIdToSkill(actionId);
+
+        if (!vulcanSkill.IsExecutableAction())
+            return new(VulcanSkill.None, $"Raphael solution contained invalid action ID {actionId}", IsTerminalFailure: true);
 
         _currentActionIndex++;
 

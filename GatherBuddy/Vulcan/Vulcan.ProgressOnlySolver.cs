@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using GatherBuddy.Crafting;
 
 namespace GatherBuddy.Vulcan;
 
@@ -33,7 +34,7 @@ public class ProgressOnlySolver : Solver
                 _plan = DonatelloNative.SolveDetailed(
                     craft,
                     step,
-                    GatherBuddy.Config.RaphaelSolverConfig.RaphaelAllowSpecialistActions,
+                    CraftingContextResolver.ResolveSpecialistActionsAllowed(craft),
                     DonatelloNative.SolveMode.CompleteFastest,
                     hardDeadlineMillis: 30_000).Actions.ToList();
                 _actionIndex = 0;
@@ -44,7 +45,7 @@ public class ProgressOnlySolver : Solver
                 if (step.Index <= 1)
                 {
                     GatherBuddy.Log.Error($"[ProgressOnly] Native completion planning failed before craft start: {ex.Message}");
-                    return new(VulcanSkill.None, "Native completion planning failed");
+                    return new(VulcanSkill.None, "Native completion planning failed", IsTerminalFailure: true);
                 }
                 GatherBuddy.Log.Error($"[ProgressOnly] Native completion planning failed mid-craft; using emergency completion: {ex.Message}");
                 return _emergency.Solve(craft, step);
@@ -52,13 +53,13 @@ public class ProgressOnlySolver : Solver
         }
 
         if (_actionIndex >= _plan.Count)
-            return new(VulcanSkill.None, "Native completion plan exhausted");
+            return new(VulcanSkill.None, "Native completion plan exhausted", IsTerminalFailure: true);
         var action = _plan[_actionIndex++];
         var (result, expected) = Simulator.Execute(craft, step, action, 0, 1);
         if (result == Simulator.ExecuteResult.CantUse)
         {
             if (step.Index <= 1)
-                return new(VulcanSkill.None, $"Native completion returned unusable {action}");
+                return new(VulcanSkill.None, $"Native completion returned unusable {action}", IsTerminalFailure: true);
             return _emergency.Solve(craft, step);
         }
         _expectedState = expected;
@@ -85,6 +86,7 @@ public class ProgressOnlySolver : Solver
             && left.QuickInnoAvailable == right.QuickInnoAvailable
             && left.TrainedPerfectionActive == right.TrainedPerfectionActive
             && left.TrainedPerfectionAvailable == right.TrainedPerfectionAvailable
+            && left.ComboAction == right.ComboAction
             && left.StellarSteadyHandCharges == right.StellarSteadyHandCharges
             && left.StellarSteadyHandLeft == right.StellarSteadyHandLeft;
 

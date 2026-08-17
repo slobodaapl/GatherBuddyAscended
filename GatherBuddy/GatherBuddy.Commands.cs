@@ -369,6 +369,31 @@ public partial class GatherBuddy
         
         switch (subcommand)
         {
+            case "conditionsampler":
+                var samplingCommand = parts.Length > 1 ? parts[1].ToLowerInvariant() : "status";
+                switch (samplingCommand)
+                {
+                    case "on":
+                        Config.ExpertConditionSamplingEnabled = true;
+                        Config.Save();
+                        Communicator.Print(ExpertConditionSampler.Enable());
+                        break;
+                    case "off":
+                    case "stop":
+                        Config.ExpertConditionSamplingEnabled = false;
+                        Config.Save();
+                        ExpertConditionSampler.Disable();
+                        Communicator.Print("[ExpertConditionSampler] Disabled.");
+                        break;
+                    case "status":
+                        Communicator.Print(ExpertConditionSampler.GetStatus());
+                        break;
+                    default:
+                        Communicator.Print("Usage: /gatherdebug conditionsampler <on|off|stop|status>");
+                        break;
+                }
+                return;
+
             case "findrecipe":
                 if (parts.Length < 2)
                 {

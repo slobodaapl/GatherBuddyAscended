@@ -10,45 +10,30 @@ namespace GatherBuddy.Crafting;
 
 public static class CraftingStateBuilder
 {
-public static GameStateBuilder.PlayerStats GetCurrentPlayerStats()
+    public static GameStateBuilder.PlayerStats? GetCurrentPlayerStats()
     {
         try
         {
             var player = Dalamud.Objects.LocalPlayer;
             if (player == null)
-            {
-                return new GameStateBuilder.PlayerStats(
-                    Craftsmanship: 100,
-                    Control: 100,
-                    CP: 180,
-                    Level: 1,
-                    Manipulation: false,
-                    Specialist: false,
-                    SplendorCosmic: false
-                );
-            }
+                return null;
 
             var level = player.Level;
             var jobId = player.ClassJob.RowId;
             var isCrafter = jobId is >= 8 and <= 15;
-
             if (!isCrafter)
-            {
-                return new GameStateBuilder.PlayerStats(
-                    Craftsmanship: 100,
-                    Control: 100,
-                    CP: 180,
-                    Level: level,
-                    Manipulation: false,
-                    Specialist: false,
-                    SplendorCosmic: false
-                );
-            }
+                return null;
+
+            var craftsmanship = GetCraftsmanshipStat();
+            var control = GetControlStat();
+            var cp = GetMaxCPStat();
+            if (craftsmanship == null || control == null || cp == null)
+                return null;
 
             var stats = new GameStateBuilder.PlayerStats(
-                Craftsmanship: GetCraftsmanshipStat() ?? 100,
-                Control: GetControlStat() ?? 100,
-                CP: GetMaxCPStat() ?? 180,
+                Craftsmanship: craftsmanship.Value,
+                Control: control.Value,
+                CP: cp.Value,
                 Level: level,
                 Manipulation: GetManipulationUnlocked(jobId),
                 Specialist: GetIsSpecialist(jobId),
@@ -61,15 +46,7 @@ public static GameStateBuilder.PlayerStats GetCurrentPlayerStats()
         catch (Exception ex)
         {
             GatherBuddy.Log.Warning($"[CraftingStateBuilder] Failed to get current player stats: {ex.Message}");
-            return new GameStateBuilder.PlayerStats(
-                Craftsmanship: 100,
-                Control: 100,
-                CP: 180,
-                Level: 1,
-                Manipulation: false,
-                Specialist: false,
-                SplendorCosmic: false
-            );
+            return null;
         }
     }
 
@@ -194,8 +171,7 @@ public static GameStateBuilder.PlayerStats GetCurrentPlayerStats()
                     return false;
 
                 return Dalamud.GameData.GetExcelSheet<Item>()?.TryGetRow(mainHand->ItemId, out var item) == true
-                    && item.LevelEquip is 90 or 100
-                    && item.Rarity >= 4;
+                    && IsSplendorCosmicTool(item.LevelEquip, item.Rarity);
             }
         }
         catch
@@ -203,6 +179,9 @@ public static GameStateBuilder.PlayerStats GetCurrentPlayerStats()
             return false;
         }
     }
+
+    internal static bool IsSplendorCosmicTool(int levelEquip, int rarity)
+        => levelEquip is 90 or 100 && rarity >= 4;
 
     public static GameStateBuilder.RecipeInfo BuildRecipeInfo(
         Recipe recipe,
@@ -392,6 +371,7 @@ public static GameStateBuilder.PlayerStats GetCurrentPlayerStats()
             Level: lt.ClassJobLevel,
             Difficulty: difficulty,
             QualityMax: qualityMax,
+            RequiredQuality: (int)recipe.RequiredQuality,
             Durability: durability,
             ProgressDivider: lt.ProgressDivider,
             ProgressModifier: lt.ProgressModifier,
@@ -399,6 +379,7 @@ public static GameStateBuilder.PlayerStats GetCurrentPlayerStats()
             QualityModifier: lt.QualityModifier,
             CanHQ: recipe.CanHq,
             IsExpert: recipe.IsExpert,
+            Stars: lt.Stars,
             IsCollectible: isCollectible,
             QualityMin1: qualityMin1,
             QualityMin2: qualityMin2,
@@ -456,9 +437,11 @@ public static GameStateBuilder.PlayerStats GetCurrentPlayerStats()
         return 0;
     }
 
-    public static CraftState BuildCraftState(Recipe recipe)
+    public static CraftState? BuildCraftState(Recipe recipe)
     {
         var playerStats = GetCurrentPlayerStats();
+        if (playerStats == null)
+            return null;
         var recipeInfo = BuildRecipeInfo(recipe, playerStats.Level);
         return GameStateBuilder.BuildCraftState(recipeInfo, playerStats);
     }

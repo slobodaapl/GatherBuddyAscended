@@ -238,7 +238,12 @@ internal static class LiveAcquisitionAcceptanceTests
                 [7001] = VendorCurrencyAvailabilitySource.CurrencyManager,
             },
         };
-        var exactVendorResult = new LiveAcquisitionExecutor(exactVendorCurrency)
+        var vendorTimeoutOptions = new LiveAcquisitionOptions
+        {
+            TravelTimeout = TimeSpan.FromMinutes(7),
+            PurchaseTimeout = TimeSpan.FromSeconds(2),
+        };
+        var exactVendorResult = new LiveAcquisitionExecutor(exactVendorCurrency, vendorTimeoutOptions)
             .ExecuteAsync(Ready(new AcquisitionPlan
             {
                 Transactions = new[]
@@ -275,6 +280,78 @@ internal static class LiveAcquisitionAcceptanceTests
             .GetResult();
         Require(exactVendorResult.Status == LiveAcquisitionStatus.Completed,
             "vendor acquisition must verify exact observed deltas for multiple currencies");
+        Require(exactVendorCurrency.LastVendorNavigationTimeout == vendorTimeoutOptions.TravelTimeout,
+            "vendor navigation must receive the travel timeout instead of the purchase timeout");
+
+        var vendorTravelSpend = new FakeEnvironment
+        {
+            VendorCurrencyBefore = new Dictionary<uint, long>
+            {
+                [VendorShopResolver.GilCurrencyItemId] = 10_000,
+            },
+            VendorCurrencyAfter = new Dictionary<uint, long>
+            {
+                [VendorShopResolver.GilCurrencyItemId] = 7_307,
+            },
+            VendorCurrencySources = new Dictionary<uint, VendorCurrencyAvailabilitySource>
+            {
+                [VendorShopResolver.GilCurrencyItemId] = VendorCurrencyAvailabilitySource.InventoryManagerGil,
+            },
+            VendorCurrencySourcesAfter = new Dictionary<uint, VendorCurrencyAvailabilitySource>
+            {
+                [VendorShopResolver.GilCurrencyItemId] = VendorCurrencyAvailabilitySource.InventoryManagerGil,
+            },
+            VendorAuthoritativeCurrencySpend = new Dictionary<uint, long>
+            {
+                [VendorShopResolver.GilCurrencyItemId] = 1_350,
+            },
+        };
+        var vendorTravelSpendResult = new LiveAcquisitionExecutor(vendorTravelSpend)
+            .ExecuteAsync(Ready(new AcquisitionPlan
+            {
+                Transactions = new[]
+                {
+                    new AcquisitionTransaction
+                    {
+                        ItemId = 46,
+                        ItemName = "Tallow Candle",
+                        SourceKind = AcquisitionSourceKind.Vendor,
+                        SourceId = "vendor-46",
+                        Quantity = 6,
+                        PurchaseUnits = 6,
+                        GilCost = 1_350,
+                        Costs = new[]
+                        {
+                            new AcquisitionCurrencyCost
+                            {
+                                CurrencyId = AcquisitionCurrency.GilId,
+                                Amount = 1_350,
+                                IsGil = true,
+                                Group = VendorCurrencyGroup.Gil,
+                            },
+                        },
+                    },
+                },
+            }))
+            .GetAwaiter()
+            .GetResult();
+        Require(vendorTravelSpendResult.Status == LiveAcquisitionStatus.Completed
+            && vendorTravelSpendResult.GilSpent == 1_350,
+            "vendor transaction accounting must exclude Gil spent during navigation before the shop purchase");
+
+        var openVendorInteraction = new FakeEnvironment { VendorInteractionClosed = false };
+        var openVendorResult = new LiveAcquisitionExecutor(openVendorInteraction)
+            .ExecuteAsync(Ready(new AcquisitionPlan
+            {
+                Transactions = new[] { Transaction(48, AcquisitionSourceKind.Vendor, 0, string.Empty, 1) },
+            }))
+            .GetAwaiter()
+            .GetResult();
+        Require(openVendorResult.Status != LiveAcquisitionStatus.Completed
+            && openVendorResult.FailureKind == LiveAcquisitionFailureKind.VerificationFailed
+            && openVendorResult.PurchasedQuantities.GetValueOrDefault(48u) == 1
+            && !openVendorResult.HasIndeterminatePurchases,
+            "a verified vendor purchase must not release crafting until the vendor interaction closes");
 
         var missingVendorCurrency = new FakeEnvironment
         {
@@ -1098,6 +1175,8 @@ internal static class LiveAcquisitionAcceptanceTests
         public long? VendorGilBefore { get; init; }
         public long? VendorGilAfter { get; init; }
         public long? VendorGilReported { get; init; }
+        public bool VendorInteractionClosed { get; init; } = true;
+        public IReadOnlyDictionary<uint, long>? VendorAuthoritativeCurrencySpend { get; init; }
         public IReadOnlyDictionary<uint, long> VendorCurrencyBefore { get; init; }
             = new Dictionary<uint, long>();
         public IReadOnlyDictionary<uint, long> VendorCurrencyAfter { get; init; }
@@ -1115,6 +1194,7 @@ internal static class LiveAcquisitionAcceptanceTests
         public bool ThrowCancellationAfterSubmit { get; init; }
         public int MarketPurchaseCalls { get; private set; }
         public int VendorPurchaseCalls { get; private set; }
+        public TimeSpan? LastVendorNavigationTimeout { get; private set; }
         public int CleanupCalls { get; private set; }
         public AcquisitionWorldRoute? LastMarketRoute { get; private set; }
         public HashSet<long> PurchasedListingIds { get; } = new();
@@ -1166,26 +1246,33 @@ internal static class LiveAcquisitionAcceptanceTests
                 MarketGilAfter));
         }
 
-        public Task<LiveVendorPurchaseResult> PurchaseVendorAsync(AcquisitionTransaction transaction, TimeSpan timeout, CancellationToken cancellationToken)
+        public Task<LiveVendorPurchaseResult> PurchaseVendorAsync(AcquisitionTransaction transaction, TimeSpan navigationTimeout, CancellationToken cancellationToken)
         {
             VendorPurchaseCalls++;
+            LastVendorNavigationTimeout = navigationTimeout;
             var beforeSnapshot = VendorCurrencyBefore.ToDictionary(pair => pair.Key, pair => pair.Value);
             var afterSnapshot = VendorCurrencySpendPerCall.Count == 0
                 ? VendorCurrencyAfter.ToDictionary(pair => pair.Key, pair => pair.Value)
                 : beforeSnapshot.ToDictionary(
                     pair => pair.Key,
                     pair => pair.Value - VendorCurrencySpendPerCall.GetValueOrDefault(pair.Key));
-            var currencySpent = VendorCurrencyBefore
+            var observedCurrencySpent = VendorCurrencyBefore
                 .Keys
                 .Intersect(afterSnapshot.Keys)
                 .Where(currencyId => currencyId != VendorShopResolver.GilCurrencyItemId)
                 .ToDictionary(
                     currencyId => currencyId,
                     currencyId => beforeSnapshot[currencyId] - afterSnapshot[currencyId]);
-            var gilSpent = beforeSnapshot.TryGetValue(VendorShopResolver.GilCurrencyItemId, out var gilBefore)
+            var currencySpent = VendorAuthoritativeCurrencySpend?
+                .Where(pair => pair.Key != VendorShopResolver.GilCurrencyItemId)
+                .ToDictionary(pair => pair.Key, pair => pair.Value)
+                ?? observedCurrencySpent;
+            var observedGilSpent = beforeSnapshot.TryGetValue(VendorShopResolver.GilCurrencyItemId, out var gilBefore)
                 && afterSnapshot.TryGetValue(VendorShopResolver.GilCurrencyItemId, out var gilAfter)
                 ? gilBefore - gilAfter
                 : VendorGilReported ?? transaction.GilCost;
+            var gilSpent = VendorAuthoritativeCurrencySpend?.GetValueOrDefault(VendorShopResolver.GilCurrencyItemId)
+                ?? observedGilSpent;
             var primaryOutputQuantity = transaction.PrimaryOutputQuantity > 0
                 ? transaction.PrimaryOutputQuantity
                 : transaction.Outputs
@@ -1220,6 +1307,8 @@ internal static class LiveAcquisitionAcceptanceTests
                 VendorGilBefore ?? (beforeSnapshot.TryGetValue(VendorShopResolver.GilCurrencyItemId, out var before) ? before : null),
                 VendorGilAfter ?? (afterSnapshot.TryGetValue(VendorShopResolver.GilCurrencyItemId, out var after) ? after : null))
             {
+                InteractionClosed = VendorInteractionClosed,
+                CurrencySpendIsAuthoritative = VendorAuthoritativeCurrencySpend != null,
                 CurrencyBalancesBefore = beforeSnapshot,
                 CurrencyBalancesAfter = afterSnapshot,
                 CurrencyBalanceSources = VendorCurrencySources,

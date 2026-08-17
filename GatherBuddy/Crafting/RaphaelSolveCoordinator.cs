@@ -46,6 +46,7 @@ public class RaphaelSolveCoordinator
     }
 
     private const string CacheFileName = "raphael_solution_cache.json";
+    internal const int SolutionCacheVersion = 3;
 
     public RaphaelSolveCoordinator(RaphaelSolveCoordinatorConfig? config = null)
     {
@@ -68,7 +69,7 @@ public class RaphaelSolveCoordinator
                 return;
 
             var toSave = _cachedSolutions.Values
-                .Where(s => !s.IsFailed)
+                .Where(IsCacheEntryCurrent)
                 .ToList();
 
             File.WriteAllText(file.FullName, JsonConvert.SerializeObject(toSave, Formatting.Indented));
@@ -94,12 +95,23 @@ public class RaphaelSolveCoordinator
 
             var cutoff = DateTime.UtcNow.AddDays(-_config.SolutionCacheMaxAgeDays);
             var loaded = 0;
-            foreach (var solution in solutions)
+            foreach (var solution in solutions
+                         .Where(solution => IsCacheEntryCurrent(solution)
+                             && !solution.IsFailed
+                             && solution.GeneratedAt >= cutoff)
+                         .OrderByDescending(solution => solution.AchievedQuality)
+                         .ThenBy(solution => solution.ActionIds.Count)
+                         .ThenByDescending(solution => solution.GeneratedAt))
             {
-                if (solution.IsFailed || solution.GeneratedAt < cutoff)
-                    continue;
-                _cachedSolutions.TryAdd(solution.Key, solution);
-                loaded++;
+                solution.Request = solution.Request with
+                {
+                    CrafterDelineations = RaphaelSolveRequest.CanonicalizeCrafterDelineations(
+                        solution.Request.Specialist,
+                        solution.Request.CrafterDelineations),
+                };
+                solution.Key = solution.Request.GetKey();
+                if (_cachedSolutions.TryAdd(solution.Key, solution))
+                    loaded++;
             }
 
         }
@@ -108,6 +120,11 @@ public class RaphaelSolveCoordinator
             GatherBuddy.Log.Error($"[RaphaelSolveCoordinator] Failed to load solution cache: {ex.Message}");
         }
     }
+
+    internal static bool IsCacheEntryCurrent(CachedRaphaelSolution solution)
+        => solution.CacheVersion == SolutionCacheVersion
+            && solution.Optimal
+            && !solution.IsFailed;
 
     public int PendingSolves => GetQueuedSolveCount();
     public int ActiveSolves => _activeSolveCount;
@@ -191,6 +208,7 @@ public class RaphaelSolveCoordinator
                 continue;
             }
 
+            var allowSpecialistActions = CraftingContextResolver.ResolveSpecialistActionsAllowed(item.CraftSettings);
             var request = new RaphaelSolveRequest(
                 RecipeId: item.RecipeId,
                 Level: stats.Level,
@@ -198,9 +216,11 @@ public class RaphaelSolveCoordinator
                 Control: stats.Control,
                 CP: stats.CP,
                 Manipulation: stats.Manipulation,
-                Specialist: stats.Specialist,
+                Specialist: stats.Specialist && allowSpecialistActions,
                 InitialQuality: CalculateInitialQuality(item, recipe),
-                CrafterDelineations: stats.Specialist ? stats.CrafterDelineations : 0
+                CrafterDelineations: RaphaelSolveRequest.CanonicalizeCrafterDelineations(
+                    stats.Specialist && allowSpecialistActions,
+                    stats.CrafterDelineations)
             );
 
             var key = request.GetKey();
@@ -238,6 +258,7 @@ public class RaphaelSolveCoordinator
             
             var initialQuality = CalculateInitialQuality(item, recipe.Value);
 
+            var allowSpecialistActions = CraftingContextResolver.ResolveSpecialistActionsAllowed(item.CraftSettings);
             var request = new RaphaelSolveRequest(
                 RecipeId: stats.RecipeId,
                 Level: stats.Level,
@@ -245,9 +266,11 @@ public class RaphaelSolveCoordinator
                 Control: stats.Control,
                 CP: stats.CP,
                 Manipulation: stats.Manipulation,
-                Specialist: stats.Specialist,
+                Specialist: stats.Specialist && allowSpecialistActions,
                 InitialQuality: initialQuality,
-                CrafterDelineations: stats.Specialist ? CraftingSpecialistResources.GetCrafterDelineationCount() : 0
+                CrafterDelineations: RaphaelSolveRequest.CanonicalizeCrafterDelineations(
+                    stats.Specialist && allowSpecialistActions,
+                    CraftingSpecialistResources.GetCrafterDelineationCount())
             );
 
             var key = request.GetKey();
@@ -384,6 +407,22 @@ public class RaphaelSolveCoordinator
             GatherBuddy.Log.Debug($"[RaphaelSolveCoordinator] Queue stop requested while {_cachedSolutions.Count} cached solutions remain available");
     }
 
+    public bool CancelAllPendingSolvesAndWait(TimeSpan timeout)
+    {
+        CancelAllPendingSolves();
+        var tasks = _inProgressTasks.Values.Select(solve => solve.Task).ToArray();
+        if (tasks.Length == 0)
+            return true;
+        try
+        {
+            return Task.WaitAll(tasks, timeout);
+        }
+        catch (AggregateException)
+        {
+            return tasks.All(task => task.IsCompleted);
+        }
+    }
+
     public bool RemoveCachedSolution(RaphaelSolveRequest request)
     {
         var key = request.GetKey();
@@ -516,6 +555,7 @@ public class RaphaelSolveCoordinator
                 continue;
             }
 
+            var allowSpecialistActions = CraftingContextResolver.ResolveSpecialistActionsAllowed(item.CraftSettings);
             var request = new RaphaelSolveRequest(
                 RecipeId: item.RecipeId,
                 Level: playerLevel,
@@ -523,9 +563,11 @@ public class RaphaelSolveCoordinator
                 Control: playerControl,
                 CP: playerCP,
                 Manipulation: manipulationUnlocked,
-                Specialist: isSpecialist,
+                Specialist: isSpecialist && allowSpecialistActions,
                 InitialQuality: CalculateInitialQuality(item, recipe.Value),
-                CrafterDelineations: isSpecialist ? CraftingSpecialistResources.GetCrafterDelineationCount() : 0
+                CrafterDelineations: RaphaelSolveRequest.CanonicalizeCrafterDelineations(
+                    isSpecialist && allowSpecialistActions,
+                    CraftingSpecialistResources.GetCrafterDelineationCount())
             );
 
             var key = request.GetKey();
@@ -641,8 +683,8 @@ public class RaphaelSolveCoordinator
             var result = DonatelloNative.SolveDetailed(
                       craft,
                       root,
-                      _config.RaphaelAllowSpecialistActions,
-                      DonatelloNative.SolveMode.OptimizeQuality,
+                      request.Specialist,
+                      ResolveSolveMode(request.Objective),
                       interrupt,
                       softDeadlineMillis: Math.Clamp(_config.RaphaelInitialOptimizationSeconds, 1, 300) * 1000,
                       hardDeadlineMillis: Math.Clamp(_config.RaphaelTimeoutMinutes, 1, 60) * 60 * 1000);
@@ -659,6 +701,15 @@ public class RaphaelSolveCoordinator
                 GatherBuddy.Log.Error($"[RaphaelSolveCoordinator] FAIL: Raphael generated empty solution for recipe {request.RecipeId}");
                 return;
             }
+
+            var validationFailure = ValidateSolvedPlan(
+                craft,
+                root,
+                result.Actions,
+                result.AchievedQuality,
+                request.Objective != DonatelloSolveObjective.ProgressOnly);
+            if (validationFailure != null)
+                throw new InvalidOperationException(validationFailure);
 
             cacheEntry.ActionIds = actionIds;
             cacheEntry.Optimal = result.Optimal;
@@ -696,6 +747,26 @@ public class RaphaelSolveCoordinator
         {
             DonatelloNative.FreeInterrupt(interrupt);
         }
+    }
+
+    internal static DonatelloNative.SolveMode ResolveSolveMode(DonatelloSolveObjective objective)
+        => objective == DonatelloSolveObjective.ProgressOnly
+            ? DonatelloNative.SolveMode.CompleteFastest
+            : DonatelloNative.SolveMode.OptimizeQuality;
+
+    internal static string? ValidateSolvedPlan(
+        CraftState craft,
+        StepState root,
+        IReadOnlyList<VulcanSkill> actions,
+        int claimedQuality,
+        bool validateQuality = true)
+    {
+        var evaluation = DonatelloPlanEvaluator.Evaluate(craft, root, actions);
+        if (!evaluation.Completes)
+            return "Raphael generated a plan that does not complete under the plugin simulator";
+        if (validateQuality && evaluation.Quality != claimedQuality)
+            return $"Raphael native/plugin simulator quality mismatch: native={claimedQuality}, plugin={evaluation.Quality}";
+        return null;
     }
 
     internal static string FormatFailureReason(string? nativeError)

@@ -1,5 +1,6 @@
 using System;
 using FFXIVClientStructs.FFXIV.Client.Game;
+using FFXIVClientStructs.FFXIV.Client.UI.Agent;
 using GatherBuddy.Plugin;
 using Dalamud.Game.ClientState.Conditions;
 using GatherBuddy.Automation;
@@ -54,19 +55,20 @@ namespace GatherBuddy.AutoGather
             return false;
         }
 
-        private unsafe void ReduceItems(bool reduceAll, Action? onComplete = null)
+        private unsafe void ReduceItems(bool reduceAll, Action? onComplete = null, uint sourceItemId = 0)
         {
             AutoStatus = "Aetherial reduction";
             var delay = (int)GatherBuddy.Config.AutoGatherConfig.ExecutionDelay;
             TaskManager.Enqueue(StopNavigation);
-            if (PurifyItemSelectorAddon == null)
+            var agent = AgentPurify.Instance();
+            if (agent == null || !agent->IsAgentActive())
             {
                 EnqueueActionWithDelay(() => { ActionManager.Instance()->UseAction(ActionType.GeneralAction, 21); });
                 // Prevent the "Unable to execute command while occupied" message right after entering a house.
                 TaskManager.DelayNext(500);
             }
 
-            TaskManager.Enqueue(ReduceFirstItem,                                3000, true, "Reduce first item");
+            TaskManager.Enqueue(() => ReduceFirstItem(sourceItemId),             3000, true, "Reduce selected item");
             TaskManager.Enqueue(() => !Dalamud.Conditions[ConditionFlag.Occupied39], 5000, true, "Wait until first item reduction is complete");
             TaskManager.DelayNext(delay);
             TaskManager.Enqueue(StartAutoReduction,                             1000, true, "Start auto reduction");
@@ -87,6 +89,8 @@ namespace GatherBuddy.AutoGather
                     {
                         if (PurifyItemSelectorAddon is var addon and not null)
                             Callback.Fire(addon, true, -1);
+                        else if (AgentPurify.Instance() is var agent and not null && agent->IsAgentActive())
+                            agent->Hide();
                     });
                     if (onComplete != null)
                         TaskManager.Enqueue(() => onComplete());
@@ -94,14 +98,44 @@ namespace GatherBuddy.AutoGather
             });
         }
 
-        private unsafe bool? ReduceFirstItem()
+        private unsafe bool? ReduceFirstItem(uint sourceItemId)
         {
-            var addon = PurifyItemSelectorAddon;
-            if (addon == null)
+            var agent = AgentPurify.Instance();
+            var inventory = InventoryManager.Instance();
+            if (agent == null || inventory == null || !agent->IsAgentActive())
                 return false;
 
-            Callback.Fire(addon, true, 12, 0u);
-            return true;
+            foreach (var inventoryType in InventoryTypes)
+            {
+                var container = inventory->GetInventoryContainer(inventoryType);
+                if (container == null || !container->IsLoaded)
+                    continue;
+
+                for (var slot = 0; slot < container->Size; ++slot)
+                {
+                    var inventoryItem = container->GetInventorySlot(slot);
+                    if (inventoryItem == null || inventoryItem->ItemId == 0 || !inventoryItem->IsCollectable())
+                        continue;
+
+                    var itemId = inventoryItem->GetBaseItemId();
+                    if (sourceItemId != 0 && itemId != sourceItemId)
+                        continue;
+
+                    var reducible = GatherBuddy.GameData.Gatherables.TryGetValue(itemId, out var gatherable)
+                        ? gatherable.ItemData.AetherialReduce != 0
+                        : GatherBuddy.GameData.Fishes.TryGetValue(itemId, out var fish)
+                          && fish.ItemData.AetherialReduce != 0;
+                    if (!reducible)
+                        continue;
+
+                    GatherBuddy.Log.Debug(
+                        $"[Reduction] Reducing source item {itemId} from {inventoryType} slot {slot}.");
+                    agent->ReduceItem(inventoryItem);
+                    return true;
+                }
+            }
+
+            return false;
         }
 
         private unsafe bool? StartAutoReduction()

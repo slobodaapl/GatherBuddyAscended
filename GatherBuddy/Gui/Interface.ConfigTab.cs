@@ -65,9 +65,9 @@ public partial class Interface
                 GatherBuddy.Config.AutoGatherConfig.DoGathering, b => GatherBuddy.Config.AutoGatherConfig.DoGathering = b);
 
         public static void DrawTeleportToNextNodeBox()
-            => DrawCheckbox("Teleport to next timed item",
-                "Teleport to an upcoming timed node or fishing spot and wait at the Aetheryte when there is nothing else to gather\n" +
-                "This option has priority over going home when idle.",
+            => DrawCheckbox("Wait for next timed item",
+                "When only upcoming timed nodes or fishing spots remain, wait instead of going home.\n" +
+                "Travel starts only when the item is active or within Timed Node Precognition.",
                 GatherBuddy.Config.AutoGatherConfig.TeleportToNextNode, b => GatherBuddy.Config.AutoGatherConfig.TeleportToNextNode = b);
 
         public static void DrawGoHomeBox()
@@ -110,9 +110,9 @@ public partial class Interface
               + "or if the node didn't have any needed items on the first place.",
                 GatherBuddy.Config.AutoGatherConfig.AbandonNodes, b => GatherBuddy.Config.AutoGatherConfig.AbandonNodes = b);
 
-        public static void DrawAlwaysExhaustTimedCollectableNodesBox()
-            => DrawCheckbox("Always use all gathering attempts on timed collectables",
-                "Keep gathering a timed collectable until the node is exhausted, even after the requested quantity is reached.",
+        public static void DrawAlwaysExhaustSpecialNodesBox()
+            => DrawCheckbox("Always use all gathering attempts on special nodes",
+                "Keep gathering the requested item on unspoiled, ephemeral, legendary, and clouded nodes until the node is exhausted, even after the requested quantity is reached.",
                 GatherBuddy.Config.AutoGatherConfig.AlwaysExhaustTimedCollectableNodes,
                 b => GatherBuddy.Config.AutoGatherConfig.AlwaysExhaustTimedCollectableNodes = b);
 
@@ -1510,13 +1510,18 @@ public partial class Interface
                         layout.Child.Draw(ConfigFunctions.DrawHonkVolumeSlider);
                 }),
             new("Check Retainer Inventories",                     ConfigFunctions.DrawCheckRetainersBox),
-            new("Teleport to next timed item",                    ConfigFunctions.DrawTeleportToNextNodeBox),
+            new("Wait for next timed item",                        ConfigFunctions.DrawTeleportToNextNodeBox),
             new("Go home when done Go home when idle",            ConfigFunctions.DrawGoHomeBox),
             new("Gather any crystals when The Giving Land is off cooldown", ConfigFunctions.DrawUseGivingLandOnCooldown),
             new("Use skills for fallback items",                  ConfigFunctions.DrawUseSkillsForFallabckBox),
             new("Continue manually selected gatherables",         ConfigFunctions.DrawAssistManualGatheringBox),
-            new("Abandon nodes without needed items",             ConfigFunctions.DrawAbandonNodesBox),
-            new("Always use all gathering attempts on timed collectables", ConfigFunctions.DrawAlwaysExhaustTimedCollectableNodesBox),
+            new("Abandon nodes without needed items Always use all gathering attempts on special nodes",
+                layout =>
+                {
+                    ConfigFunctions.DrawAbandonNodesBox();
+                    if (GatherBuddy.Config.AutoGatherConfig.AbandonNodes)
+                        layout.Child.Draw(ConfigFunctions.DrawAlwaysExhaustSpecialNodesBox);
+                }),
             new("Always gather maps when available",              ConfigFunctions.DrawAlwaysMapsBox),
         ]),
         new("Auto-Gather", "Fishing",

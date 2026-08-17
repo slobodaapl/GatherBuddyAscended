@@ -143,46 +143,6 @@ public partial class VulcanWindow
         ImGui.Separator();
         ImGui.Spacing();
 
-        ImGui.BeginGroup();
-        ImGui.Text("Material Miracle Settings");
-        ImGui.Spacing();
-
-        var useMaterialMiracle = config.UseMaterialMiracle;
-        if (ImGui.Checkbox("Use Material Miracle", ref useMaterialMiracle))
-        {
-            config.UseMaterialMiracle = useMaterialMiracle;
-            GatherBuddy.Config.Save();
-        }
-        if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("Use Material Miracle action during crafts");
-
-        if (config.UseMaterialMiracle)
-        {
-            var minSteps = config.MinimumStepsBeforeMiracle;
-            ImGui.SetNextItemWidth(VulcanUiScaling.Scaled(150f));
-            if (ImGui.SliderInt("Min Steps Before Miracle##minSteps", ref minSteps, 1, 10))
-            {
-                config.MinimumStepsBeforeMiracle = minSteps;
-                GatherBuddy.Config.Save();
-            }
-            if (ImGui.IsItemHovered())
-                ImGui.SetTooltip("Minimum crafting steps before using Material Miracle");
-
-            var materialMiracleMulti = config.MaterialMiracleMulti;
-            if (ImGui.Checkbox("Allow Multiple Material Miracles", ref materialMiracleMulti))
-            {
-                config.MaterialMiracleMulti = materialMiracleMulti;
-                GatherBuddy.Config.Save();
-            }
-            if (ImGui.IsItemHovered())
-                ImGui.SetTooltip("Allow using Material Miracle multiple times in a single craft");
-        }
-        ImGui.EndGroup();
-
-        ImGui.Spacing();
-        ImGui.Separator();
-        ImGui.Spacing();
-
         if (ImGui.Button("Reset to Defaults", VulcanUiScaling.Scaled(200f, 0f)))
         {
             GatherBuddy.Config.StandardSolverConfig = new Vulcan.StandardSolverConfig();

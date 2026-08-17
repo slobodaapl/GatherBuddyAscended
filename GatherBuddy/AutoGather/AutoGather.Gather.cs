@@ -211,6 +211,14 @@ namespace GatherBuddy.AutoGather
                 return (!target.IsCollectable, target);
             }
 
+            if (target != null
+             && SpecialNodeExhaustionPolicy.ShouldExhaust(
+                 GatherBuddy.Config.AutoGatherConfig,
+                 gatherTarget.Gatherable!.NodeType))
+            {
+                return (false, target);
+            }
+
             if (selectedTargetOnly)
                 throw new NoGatherableItemsInNodeException();
 

@@ -18,7 +18,10 @@ public interface ISolverDefinition
 
 public abstract class Solver
 {
-    public record struct Recommendation(VulcanSkill Action, string Comment = "");
+    public record struct Recommendation(
+        VulcanSkill Action,
+        string Comment = "",
+        bool IsTerminalFailure = false);
 
     public virtual Solver Clone() => (Solver)MemberwiseClone();
     public abstract Recommendation Solve(CraftState craft, StepState step);

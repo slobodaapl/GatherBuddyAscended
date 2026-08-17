@@ -11,6 +11,7 @@ public static class GameStateBuilder
         int Level,
         int Difficulty,
         int QualityMax,
+        int RequiredQuality,
         int Durability,
         int ProgressDivider,
         int ProgressModifier,
@@ -18,6 +19,7 @@ public static class GameStateBuilder
         int QualityModifier,
         bool CanHQ,
         bool IsExpert,
+        byte Stars,
         bool IsCollectible,
         int QualityMin1,
         int QualityMin2,
@@ -47,6 +49,7 @@ public static class GameStateBuilder
             RecipeId = recipe.RecipeId,
 
             CraftExpert = recipe.IsExpert && (ushort)recipe.ConditionFlags != 15,
+            CraftStars = recipe.Stars,
             CraftHQ = recipe.CanHQ,
             CraftCollectible = recipe.IsCollectible,
             CraftLevel = recipe.Level,
@@ -64,7 +67,7 @@ public static class GameStateBuilder
             CraftQualityDivider = recipe.QualityDivider,
             CraftQualityModifier = recipe.QualityModifier,
 
-            CraftRequiredQuality = 0,
+            CraftRequiredQuality = recipe.RequiredQuality,
             CraftRecommendedCraftsmanship = 0,
 
             ConditionFlags = recipe.ConditionFlags,
@@ -74,7 +77,10 @@ public static class GameStateBuilder
             CurrentStellarSteadyHandCharges = recipe.CurrentStellarSteadyHandCharges,
             InitialQuality = 0,
 
-            CraftConditionProbabilities = GetConditionProbabilities(recipe.ConditionFlags),
+            CraftConditionProbabilities = GetConditionProbabilities(
+                recipe.ConditionFlags,
+                playerStats.Level,
+                recipe.IsExpert && (ushort)recipe.ConditionFlags != 15),
             CollectableMetadataKey = recipe.CollectableMetadataKey,
             IsCosmic = recipe.IsCosmic
         };
@@ -110,14 +116,13 @@ public static class GameStateBuilder
             QuickInnoAvailable = craft.Specialist,
             TrainedPerfectionAvailable = craft.StatLevel >= Simulator.MinLevel(VulcanSkill.TrainedPerfection),
             TrainedPerfectionActive = false,
-            MaterialMiracleActive = false,
             MaterialMiracleCharges = craft.CurrentMaterialMiracleCharges,
-            MaterialMiraclesUsed = 0,
             StellarSteadyHandCharges = craft.CurrentStellarSteadyHandCharges,
             StellarSteadyHandLeft = 0,
             StellarSteadyHandsUsed = 0,
 
             PrevActionFailed = false,
+            ComboAction = VulcanSkill.None,
             PrevComboAction = VulcanSkill.None,
             ObserveCounter = 0
         };
@@ -150,8 +155,6 @@ public static class GameStateBuilder
             TrainedPerfectionAvailable = gameState.TrainedPerfectionAvailable,
             TrainedPerfectionActive = gameState.TrainedPerfectionActive,
             MaterialMiracleCharges = gameState.MaterialMiracleCharges,
-            MaterialMiracleActive = gameState.MaterialMiracleActive,
-            MaterialMiraclesUsed = gameState.MaterialMiraclesUsed,
             StellarSteadyHandCharges = gameState.StellarSteadyHandCharges,
             StellarSteadyHandLeft = gameState.StellarSteadyHandLeft,
             StellarSteadyHandsUsed = gameState.StellarSteadyHandsUsed
@@ -174,17 +177,18 @@ public static class GameStateBuilder
         bool TrainedPerfectionAvailable,
         bool TrainedPerfectionActive,
         uint MaterialMiracleCharges,
-        bool MaterialMiracleActive,
-        uint MaterialMiraclesUsed,
         uint StellarSteadyHandCharges,
         int StellarSteadyHandLeft,
         uint StellarSteadyHandsUsed
     );
 
-    private static float[] GetConditionProbabilities(ConditionFlags flags)
+    internal static float[] GetConditionProbabilities(ConditionFlags flags, int statLevel, bool craftExpert)
     {
         if ((flags & ConditionFlags.Normal) == 0)
             return new[] { 1f };
+
+        if (!craftExpert)
+            return CraftState.NormalCraftConditionProbabilities(statLevel);
 
         var probs = new float[11];
         probs[0] = 1f;

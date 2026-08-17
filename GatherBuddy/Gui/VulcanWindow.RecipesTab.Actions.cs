@@ -204,6 +204,7 @@ public partial class VulcanWindow
                 MacroMode = settings.MacroMode,
                 SolverOverride = settings.SolverOverride,
                 MaximizeQualityAtCostOfTime = settings.MaximizeQualityAtCostOfTime,
+                SpecialistActionOverride = settings.SpecialistActionOverride,
                 IngredientPreferences = new Dictionary<uint, int>(settings.IngredientPreferences),
             };
         }

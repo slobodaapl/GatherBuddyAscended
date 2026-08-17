@@ -375,12 +375,43 @@ public static unsafe class AcquisitionPlanningInputBuilder
 
     private static AcquisitionPath ResolveGatherPath(uint itemId, Gatherable gatherable, AcquisitionPathKind kind)
     {
-        var jobId = gatherable.GatheringType.ToGroup() switch
+        var jobIds = ResolveGatheringJobIds(
+            gatherable.NodeList.Select(node => node.GatheringType),
+            gatherable.GatheringType);
+        if (jobIds.Count == 0)
+            jobIds = [0];
+
+        return SelectBestGatherPath(jobIds
+            .Select(jobId => ResolveGatherPathForJob(gatherable, kind, jobId))
+            .ToArray());
+    }
+
+    internal static IReadOnlyList<uint> ResolveGatheringJobIds(
+        IEnumerable<GatheringType> nodeTypes,
+        GatheringType aggregateType)
+        => nodeTypes
+            .Select(GatheringJobId)
+            .Append(GatheringJobId(aggregateType))
+            .Where(jobId => jobId != 0)
+            .Distinct()
+            .ToArray();
+
+    private static uint GatheringJobId(GatheringType gatheringType)
+        => gatheringType.ToGroup() switch
         {
             GatheringType.Miner => 16u,
             GatheringType.Botanist => 17u,
             _ => 0u,
         };
+
+    private static AcquisitionPath ResolveGatherPathForJob(
+        Gatherable gatherable,
+        AcquisitionPathKind kind,
+        uint jobId)
+    {
+        var relevantNodes = gatherable.NodeList
+            .Where(node => GatheringJobId(node.GatheringType) == jobId)
+            .ToList();
         var requiredLevel = gatherable.Level;
         var actualLevel = ReadJobLevel(jobId);
         var gearsetAvailable = false;
@@ -389,11 +420,11 @@ public static unsafe class AcquisitionPlanningInputBuilder
         var actualPerception = 0;
         var perceptionKnown = requiredPerception == 0
             || gearsetAvailable && GearsetStatsReader.TryReadGearsetPerception(jobId, out actualPerception);
-        var folkloreNodes = gatherable.NodeList
+        var folkloreNodes = relevantNodes
             .Where(node => node.FolkloreId != 0 || !string.IsNullOrWhiteSpace(node.Folklore))
             .ToList();
-        var folkloreRequired = gatherable.NodeList.Count > 0
-            && folkloreNodes.Count == gatherable.NodeList.Count;
+        var folkloreRequired = relevantNodes.Count > 0
+            && folkloreNodes.Count == relevantNodes.Count;
         var folkloreKnown = !folkloreRequired;
         var folkloreUnlocked = !folkloreRequired;
         if (folkloreRequired)
@@ -424,8 +455,8 @@ public static unsafe class AcquisitionPlanningInputBuilder
                 RequiredPerception = requiredPerception,
                 ActualPerception = actualPerception,
                 PerceptionKnown = perceptionKnown,
-                RouteKnown = gatherable.Locations.Count > 0,
-                RouteAvailable = gatherable.Locations.Count > 0,
+                RouteKnown = relevantNodes.Count > 0,
+                RouteAvailable = relevantNodes.Count > 0,
             });
         return new AcquisitionPath
         {
@@ -435,6 +466,18 @@ public static unsafe class AcquisitionPlanningInputBuilder
             Capability = capability,
         };
     }
+
+    internal static AcquisitionPath SelectBestGatherPath(IReadOnlyList<AcquisitionPath> candidates)
+        => candidates
+            .OrderBy(candidate => candidate.Capability.Status switch
+            {
+                AcquisitionCapabilityStatus.Usable => 0,
+                AcquisitionCapabilityStatus.Unknown => 1,
+                _ => 2,
+            })
+            .ThenByDescending(candidate => candidate.Capability.ActualLevel)
+            .ThenBy(candidate => candidate.JobId)
+            .First();
 
     private static List<AcquisitionVendorOffer> BuildVendorOffers(
         IReadOnlyList<AcquisitionDependency> dependencies)
@@ -587,12 +630,19 @@ public static unsafe class AcquisitionPlanningInputBuilder
         {
             var cached = service.GetCached(dependency.ItemId, scope);
             var fetchedAt = service.GetFetchTime(dependency.ItemId, scope);
-            if (cached == null || DateTime.UtcNow - fetchedAt > UniversalisCacheTtl)
+            if (cached == null)
             {
                 service.QueueLookup(dependency.ItemId, dependency.ItemName, ResolveItemIcon(dependency.ItemId), scope);
-                if (!service.HasError(dependency.ItemId, scope))
-                    loadingReason = $"Loading Universalis data for {dependency.ItemName}.";
+                loadingReason = service.HasError(dependency.ItemId, scope)
+                    ? $"Retrying Universalis data for {dependency.ItemName}."
+                    : $"Loading Universalis data for {dependency.ItemName}.";
                 continue;
+            }
+
+            if (DateTime.UtcNow - fetchedAt > UniversalisCacheTtl)
+            {
+                service.QueueLookup(dependency.ItemId, dependency.ItemName, ResolveItemIcon(dependency.ItemId), scope);
+                loadingReason = $"Refreshing Universalis data for {dependency.ItemName}.";
             }
 
             foreach (var listing in cached.Listings)

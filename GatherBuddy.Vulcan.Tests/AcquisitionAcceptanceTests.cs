@@ -6,6 +6,7 @@ using GatherBuddy.AutoGather;
 using GatherBuddy.Crafting;
 using GatherBuddy.Crafting.Acquisition;
 using LuminaSupplemental.Excel.Model;
+using GatheringType = global::GatherBuddy.Enums.GatheringType;
 
 namespace GatherBuddy.Vulcan.Tests;
 
@@ -21,6 +22,8 @@ public static class AcquisitionAcceptanceTests
         SelectedUsablePathRemainsAuthoritative(require);
         SelectedRecipeIdentitySurvivesFallback(require);
         UnavailablePathIsAStartBlocker(require);
+        MultiJobGatherPathSelectsUsableConcreteJob(require);
+        MarketFallbackSurvivesUnavailableVendor(require);
         CapabilityEvidenceDistinguishesKnownAndUnknown(require);
         UnknownPathKindIsExplicitlyUnknown(require);
         UnknownBalancesAndWorldsBlockSafely(require);
@@ -30,6 +33,7 @@ public static class AcquisitionAcceptanceTests
         GlobalBudgetReservesCurrencyAcrossItems(require);
         CurrencyVectorsAreRequiredTogether(require);
         PreferenceRelaxationStaysWithinHardBudget(require);
+        SameSourceDifferentItemVendorTransactionsRemainDistinct(require);
         CoProductVendorTransactionIsSharedAcrossDependencies(require);
         ParetoFrontierAvoidsCartesianGlobalExplosion(require);
         ExactSearchReportsItsDeterministicLimit(require);
@@ -51,6 +55,12 @@ public static class AcquisitionAcceptanceTests
         require(AetherialReductionSourceResolver.GetSourceItemIds(46246u)
                 .SequenceEqual([46247u, 46248u, 46249u]),
             "the packaged supplemental data must expose all Levinchrome Aethersand reduction candidates");
+        require(AetherialReductionSourceResolver.GetOutputItemIds().Contains(46246u),
+            "Levinchrome Aethersand must be enumerable as an Aetherial Reduction output for manual auto-gather selection");
+        require(AetherialReductionSourceResolver.IsSourceForOutput(46246u, 46247u),
+            "Levinchrome Quartz must validate as a source for the selected Aethersand output");
+        require(!AetherialReductionSourceResolver.IsSourceForOutput(46246u, 46250u),
+            "an unrelated gatherable must not validate as the source for a selected reduction output");
     }
 
     private static void ManualGatherAssistSettingDefaultsOn(Action<bool, string> require)
@@ -67,6 +77,15 @@ public static class AcquisitionAcceptanceTests
         config.DoGathering = false;
         require(!ManualGatherAssistPolicy.IsEnabled(config),
             "the global gathering-window interaction setting must disable manual assistance");
+
+        require(!ManualGatherAssistPolicy.ShouldAutoGatherOwnSession(0, [], 100, [200]),
+            "AutoGather must not claim a manually opened node when no active target exists");
+        require(!ManualGatherAssistPolicy.ShouldAutoGatherOwnSession(200, [300], 100, [201]),
+            "AutoGather must not claim a manually opened node that does not contain its active target");
+        require(ManualGatherAssistPolicy.ShouldAutoGatherOwnSession(200, [100], 100, [201]),
+            "matching gathering-point identity must authorize AutoGather ownership");
+        require(ManualGatherAssistPolicy.ShouldAutoGatherOwnSession(200, [300], 100, [200]),
+            "a visible active-target item must authorize AutoGather ownership when node identity is unavailable");
     }
 
     private static void FinalOutputsAreNeverPurchased(Action<bool, string> require)
@@ -194,6 +213,70 @@ public static class AcquisitionAcceptanceTests
             "an unusable path without a source must block the craft before execution");
         require(result.Blockers.Any(blocker => blocker.Kind == AcquisitionBlockerKind.CapabilityUnavailable),
             "missing source plus an unusable path must expose the capability blocker");
+    }
+
+    private static void MultiJobGatherPathSelectsUsableConcreteJob(Action<bool, string> require)
+    {
+        var jobIds = AcquisitionPlanningInputBuilder.ResolveGatheringJobIds(
+            [GatheringType.Mining, GatheringType.Logging],
+            GatheringType.Multiple);
+        var selected = AcquisitionPlanningInputBuilder.SelectBestGatherPath(
+        [
+            new AcquisitionPath
+            {
+                JobId = 16,
+                Kind = AcquisitionPathKind.Gather,
+                Capability = new AcquisitionCapability
+                {
+                    JobId = 16,
+                    Status = AcquisitionCapabilityStatus.Unusable,
+                    ActualLevel = 0,
+                },
+            },
+            new AcquisitionPath
+            {
+                JobId = 17,
+                Kind = AcquisitionPathKind.Gather,
+                Capability = new AcquisitionCapability
+                {
+                    JobId = 17,
+                    Status = AcquisitionCapabilityStatus.Usable,
+                    ActualLevel = 90,
+                },
+            },
+        ]);
+
+        require(jobIds.SequenceEqual([16u, 17u])
+            && selected.JobId == 17
+            && selected.Capability.Status == AcquisitionCapabilityStatus.Usable,
+            "multi-job gatherables must select the usable concrete gathering job instead of job zero or an unavailable alternative");
+    }
+
+    private static void MarketFallbackSurvivesUnavailableVendor(Action<bool, string> require)
+    {
+        var result = AcquisitionPlanner.Plan(
+            new AcquisitionPlanningInput
+            {
+                Dependencies = new[] { Blocked(325, 1, "Marketable material") },
+                VendorOffers = new[]
+                {
+                    new AcquisitionVendorOffer
+                    {
+                        ItemId = 325,
+                        OfferId = "unsupported-shop",
+                        ReceiveQuantity = 1,
+                        IsAvailable = false,
+                        UnavailableReason = "Vendor automation does not support this offer.",
+                    },
+                },
+                MarketListings = new[] { Listing(325, 3250, 1) },
+                GilBalance = 10_000,
+            },
+            Enabled());
+
+        require(result.Status == AcquisitionPlanStatus.Ready
+            && result.SelectedPlan?.Transactions.SingleOrDefault()?.SourceKind == AcquisitionSourceKind.Market,
+            "an unavailable vendor route must not block a valid market-board fallback");
     }
 
     private static void SelectedRecipeIdentitySurvivesFallback(Action<bool, string> require)
@@ -698,6 +781,59 @@ public static class AcquisitionAcceptanceTests
                 && result.SelectedPlan.PurchasedQuantities[901] == 1
                 && result.SelectedPlan.PurchasedQuantities[902] == 1,
             "one vendor transaction must jointly satisfy A+B co-product dependencies and charge once");
+    }
+
+    private static void SameSourceDifferentItemVendorTransactionsRemainDistinct(Action<bool, string> require)
+    {
+        var result = AcquisitionPlanner.Plan(
+            new AcquisitionPlanningInput
+            {
+                Dependencies = new[] { Blocked(910, 10), Blocked(911, 8) },
+                VendorOffers = new[]
+                {
+                    new AcquisitionVendorOffer
+                    {
+                        ItemId = 910,
+                        OfferId = "shared-vendor-source",
+                        ReceiveQuantity = 1,
+                        Costs = new[] { Currency(9_100, 20, true) },
+                    },
+                    new AcquisitionVendorOffer
+                    {
+                        ItemId = 911,
+                        OfferId = "shared-vendor-source",
+                        ReceiveQuantity = 1,
+                        Costs = new[] { Currency(9_100, 20, true) },
+                    },
+                },
+                CurrencyBalances = new Dictionary<uint, long> { [9_100] = 360 },
+            },
+            new AcquisitionPlanningSettings
+            {
+                AutoPurchaseBlockedDependencies = true,
+                PreferMarketForSpecialCurrency = false,
+            });
+
+        var selected = result.SelectedPlan;
+        var preferred = result.PreferredEstimate?.Currencies.SingleOrDefault(currency => currency.CurrencyId == 9_100);
+        var minimum = result.MinimumGilEstimate?.Currencies.SingleOrDefault(currency => currency.CurrencyId == 9_100);
+        require(result.IsSuccess
+                && selected != null
+                && selected.Transactions.Count == 2
+                && selected.Transactions.Select(transaction => transaction.ItemId).OrderBy(itemId => itemId)
+                    .SequenceEqual(new[] { 910u, 911u })
+                && selected.Transactions.Single(transaction => transaction.ItemId == 910).Quantity == 10
+                && selected.Transactions.Single(transaction => transaction.ItemId == 910).PurchaseUnits == 10
+                && selected.Transactions.Single(transaction => transaction.ItemId == 910).Costs
+                    .Single(cost => cost.CurrencyId == 9_100).Amount == 200
+                && selected.Transactions.Single(transaction => transaction.ItemId == 911).Quantity == 8
+                && selected.Transactions.Single(transaction => transaction.ItemId == 911).PurchaseUnits == 8
+                && selected.Transactions.Single(transaction => transaction.ItemId == 911).Costs
+                    .Single(cost => cost.CurrencyId == 9_100).Amount == 160
+                && selected.Estimate.Currencies.Single(currency => currency.CurrencyId == 9_100).Required == 360
+                && preferred?.Required == 360
+                && minimum?.Required == 360,
+            "different vendor items sharing a source ID must retain both atomic purchases and aggregate their currency cost");
     }
 
     private static AcquisitionDependency Blocked(

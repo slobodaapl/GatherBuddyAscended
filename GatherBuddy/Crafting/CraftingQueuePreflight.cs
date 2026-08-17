@@ -11,7 +11,8 @@ internal static unsafe class CraftingQueuePreflight
     internal static bool TryValidate(
         CraftingExecutionPlan plan,
         out string failure,
-        bool validatePrecrafts = false)
+        bool validatePrecrafts = false,
+        CraftingListConsumableSettings? listConsumables = null)
     {
         failure = string.Empty;
         var validationItems = validatePrecrafts
@@ -91,6 +92,45 @@ internal static unsafe class CraftingQueuePreflight
             // appear in the player's persistent recipe-unlock book.
             if (entry.Recipe.Number != 0 && !Dalamud.UnlockState.IsRecipeUnlocked(entry.Recipe))
                 issues.Add($"The recipe for {DescribeRecipe(entry.Item, entry.Recipe)} is not unlocked.");
+        }
+
+        foreach (var item in plan.QueueView.Where(item => !item.Options.Skipping && item.Quantity > 0))
+        {
+            var recipe = RecipeManager.GetRecipe(item.RecipeId);
+            if (!recipe.HasValue)
+                continue;
+
+            var executionContext = CraftingContextResolver.ResolveExecutionContext(item, recipe.Value, listConsumables);
+            if (string.IsNullOrEmpty(executionContext.SelectedMacroId))
+                continue;
+
+            var macro = CraftingGameInterop.UserMacroLibrary.GetMacroByStringId(executionContext.SelectedMacroId);
+            if (macro == null
+                || !CraftingContextResolver.TryBuildSimulationContext(
+                    recipe.Value,
+                    executionContext,
+                    CraftingStatsSource.AlwaysGearsetStats,
+                    CraftingSimulationIntent.Execution,
+                    out var simulationContext))
+                continue;
+
+            var stats = simulationContext.Stats;
+            if (macro.MinCraftsmanship <= stats.Craftsmanship
+                && macro.MinControl <= stats.Control
+                && macro.MinCP <= stats.CP)
+                continue;
+
+            var deficits = new List<string>();
+            if (stats.Craftsmanship < macro.MinCraftsmanship)
+                deficits.Add($"craftsmanship {stats.Craftsmanship}/{macro.MinCraftsmanship}");
+            if (stats.Control < macro.MinControl)
+                deficits.Add($"control {stats.Control}/{macro.MinControl}");
+            if (stats.CP < macro.MinCP)
+                deficits.Add($"CP {stats.CP}/{macro.MinCP}");
+
+            var issue = $"{DescribeRecipe(item, recipe.Value)} uses macro '{macro.Name}', but configured gear and consumables provide insufficient {string.Join(", ", deficits)}.";
+            if (!issues.Contains(issue))
+                issues.Add(issue);
         }
 
         if (issues.Count == 0)

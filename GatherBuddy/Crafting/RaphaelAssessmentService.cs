@@ -528,9 +528,7 @@ public static class RaphaelAssessmentService
         craft.DonatelloOptions = new DonatelloExecutionOptions(
             request.Objective,
             request.MinimizeSteps,
-            request.StellarSteadyHandCharges,
-            request.MaxMaterialMiracleUses,
-            request.MinimumStepsBeforeMaterialMiracle);
+            request.StellarSteadyHandCharges);
         return true;
     }
 

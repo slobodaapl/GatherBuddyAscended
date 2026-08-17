@@ -13,6 +13,12 @@ internal static class AetherialReductionSourceResolver
     internal static IReadOnlyList<uint> GetSourceItemIds(uint outputItemId)
         => SourcesByOutput.Value.GetValueOrDefault(outputItemId) ?? [];
 
+    internal static IReadOnlyCollection<uint> GetOutputItemIds()
+        => SourcesByOutput.Value.Keys.ToArray();
+
+    internal static bool IsSourceForOutput(uint outputItemId, uint sourceItemId)
+        => GetSourceItemIds(outputItemId).Contains(sourceItemId);
+
     internal static IReadOnlyDictionary<uint, uint[]> BuildIndex(IEnumerable<ItemSupplement> relations)
         => relations
             .Where(relation => relation.ItemSupplementSource == ItemSupplementSource.Reduction

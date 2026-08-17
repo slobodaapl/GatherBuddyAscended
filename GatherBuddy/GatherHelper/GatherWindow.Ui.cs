@@ -7,6 +7,7 @@ using Dalamud.Bindings.ImGui;
 using Dalamud.Game.ClientState.Keys;
 using Dalamud.Interface.Utility;
 using Dalamud.Interface.Windowing;
+using Dalamud.Utility;
 using GatherBuddy.AutoGather.Extensions;
 using GatherBuddy.AutoGather.Lists;
 using GatherBuddy.Classes;
@@ -57,7 +58,7 @@ public class GatherWindow : Window
     {
         if (!GatherBuddy.Config.ShowGatherWindowTimers || !ImGui.TableNextColumn())
             return;
-        if (time.Equals(TimeInterval.Always))
+        if (time.Equals(TimeInterval.Always) || time.Equals(TimeInterval.Invalid))
             return;
 
         var active = time.Start <= GatherBuddy.Time.ServerTime;
@@ -83,7 +84,9 @@ public class GatherWindow : Window
             ? "Unknown Location\nUnknown Territory\nUnknown Aetheryte\n"
             : $"{loc.Name}\n{loc.Territory.Name}\n{loc.ClosestAetheryte?.Name ?? "No Aetheryte"}\n");
 
-        sb.Append(time.Equals(TimeInterval.Always)
+        sb.Append(time.Equals(TimeInterval.Invalid)
+            ? "No reachable AutoGather target"
+            : time.Equals(TimeInterval.Always)
             ? "Always Up"
             : $"{time.Start}\n{time.End}\n{time.DurationString()}\n{TimeInterval.DurationString(time.Start > GatherBuddy.Time.ServerTime ? time.Start : time.End, GatherBuddy.Time.ServerTime, false)}");
 
@@ -117,7 +120,7 @@ public class GatherWindow : Window
             false);
     }
 
-    private readonly List<(IGatherable Item, ILocation Location, TimeInterval Uptime, uint Quantity)> _data = new();
+    private readonly List<(IGatherable Item, ILocation Location, TimeInterval Uptime, uint Quantity, uint CompletionItemId)> _data = new();
 
     private static bool HasPredatorTimerIssue(IGatherable item)
     {
@@ -158,12 +161,18 @@ public class GatherWindow : Window
         }
     }
 
-    private void DrawItem(IGatherable item, ILocation loc, TimeInterval time, uint quantity)
+    private void DrawItem(IGatherable item, ILocation loc, TimeInterval time, uint quantity, uint completionItemId)
     {
         if (GatherBuddy.Config.ShowGatherWindowOnlyAvailable && time.Start > GatherBuddy.Time.ServerTime)
             return;
 
-        var inventoryCount = item.GetTotalCount();
+        var inventoryCount = item.GetCompletionCount(completionItemId);
+        var displayItem = completionItemId == 0
+            ? item.ItemData
+            : Dalamud.GameData.GetExcelSheet<Lumina.Excel.Sheets.Item>()?.GetRowOrDefault(completionItemId) ?? item.ItemData;
+        var displayName = completionItemId == 0
+            ? item.Name[GatherBuddy.Language].ToString()
+            : $"{displayItem.Name.ExtractText()} ← {item.Name[GatherBuddy.Language]}";
 
         if (quantity > 0 && inventoryCount >= quantity && GatherBuddy.Config.HideGatherWindowCompletedItems)
             return;
@@ -173,7 +182,7 @@ public class GatherWindow : Window
         if (ImGui.TableNextColumn())
         {
             using var style = ImRaii.PushStyle(ImGuiStyleVar.ItemSpacing, ImGui.GetStyle().ItemSpacing / 2);
-            if (Icons.DefaultStorage.TryLoadIcon(item.ItemData.Icon, out var icon))
+            if (Icons.DefaultStorage.TryLoadIcon(displayItem.Icon, out var icon))
                 ImGuiUtil.HoverIcon(icon.Handle, icon.Size, new Vector2(ImGui.GetTextLineHeight()));
             else
                 ImGui.Dummy(new Vector2(ImGui.GetTextLineHeight()));
@@ -186,7 +195,7 @@ public class GatherWindow : Window
                 colorId = ColorId.DisabledText;
             using var color                         = ImRaii.PushColor(ImGuiCol.Text, colorId.Value());
             var quantityText = quantity > 0 ? $" ({inventoryCount}/{quantity})" : "";
-            if (ImGui.Selectable($"{item.Name[GatherBuddy.Language]}{quantityText}", false))
+            if (ImGui.Selectable($"{displayName}{quantityText}", false))
             {
                 if (_plugin.Executor.LastItem != item)
                     _plugin.Executor.GatherItem(item);
@@ -211,6 +220,8 @@ public class GatherWindow : Window
                         var idx = list.Items.IndexOf(item);
                         if (idx < 0)
                             continue;
+                        if (list.CompletionItemIds.GetValueOrDefault(item) != completionItemId)
+                            continue;
 
                         _plugin.AutoGatherListsManager.ChangeEnabled(list, item, false);
                         break;
@@ -225,6 +236,8 @@ public class GatherWindow : Window
 
                         var idx = list.Items.IndexOf(item);
                         if (idx < 0)
+                            continue;
+                        if (list.CompletionItemIds.GetValueOrDefault(item) != completionItemId)
                             continue;
 
                         _deleteListObj = list;
@@ -300,10 +313,32 @@ public class GatherWindow : Window
         _data.Clear();
 
         var list = _plugin.AutoGatherListsManager.ActiveItems
-            .Select(x => (x.Item, x.Quantity))
-            .Concat(_plugin.GatherWindowManager.ActiveItems.Select(i => (Item: i, Quantity: 0u)))
-            .GroupBy(x => x.Item)
-            .Select(g => { var (loc, time) = GatherBuddy.UptimeManager.BestLocation(g.Key); return (g.Key, loc, time, (uint)g.Sum(x => x.Quantity)); });
+            .Select(x => (x.Item, x.Quantity, x.CompletionItemId, AutoGather: true))
+            .Concat(_plugin.GatherWindowManager.ActiveItems.Select(i =>
+                (Item: i, Quantity: 0u, CompletionItemId: 0u, AutoGather: false)))
+            .GroupBy(x => (x.Item, x.CompletionItemId))
+            .Select(g =>
+            {
+                ILocation loc;
+                TimeInterval time;
+                if (g.Any(x => x.AutoGather)
+                 && GatherBuddy.AutoGather.TryGetCachedGatherTarget(g.Key.Item, g.Key.CompletionItemId, out var target))
+                {
+                    loc = target.Location;
+                    time = target.Time;
+                }
+                else if (g.Any(x => !x.AutoGather))
+                {
+                    (loc, time) = GatherBuddy.UptimeManager.BestLocation(g.Key.Item);
+                }
+                else
+                {
+                    loc = g.Key.Item.Locations.First();
+                    time = TimeInterval.Invalid;
+                }
+
+                return (g.Key.Item, loc, time, (uint)g.Sum(x => x.Quantity), g.Key.CompletionItemId);
+            });
 
         if (GatherBuddy.Config.SortGatherWindowByUptime)
             list = list.OrderBy(i => i.time, Comparer<TimeInterval>.Create((x, y) => x.Compare(y)));
@@ -383,8 +418,8 @@ public class GatherWindow : Window
         if (!table)
             return;
         
-        foreach (var (item, loc, time, quantity) in _data)
-            DrawItem(item, loc, time, quantity);
+        foreach (var (item, loc, time, quantity, completionItemId) in _data)
+            DrawItem(item, loc, time, quantity, completionItemId);
 
         CheckAnchorPosition();
     }

@@ -15,15 +15,21 @@ public sealed class ArtisanIpcShim : IDisposable
 {
     public const string ArtisanInternalName = "Artisan";
     private const string ProgressOnlySolverName = "Progress Only Solver";
+    private const string StandardSolverName = "Standard Recipe Solver";
+    private const string RaphaelSolverName = "Raphael Recipe Solver";
+    private const string ExpertSolverName = "Expert Recipe Solver";
 
     private readonly IDalamudPluginInterface _pluginInterface;
     private readonly Dictionary<uint, RecipeOverrides> _recipeOverrides = new();
-    private uint? _standardMaxMaterialMiracleUses;
-    private uint? _standardMinimumStepsBeforeMiracle;
     private bool _registered;
     private bool _providerYieldedForEnable;
     private bool _stopRequested;
     private bool _disposed;
+    private bool _recoveringActiveSynthesis;
+    private ushort _recoveryRecipeId;
+    private (ushort RecipeId, int Amount)? _deferredCraft;
+    private ushort _restoredQueueRecipeId;
+    private int _restoredQueueRecipeCount;
 
     private sealed class RecipeOverrides
     {
@@ -34,8 +40,6 @@ public sealed class ArtisanIpcShim : IDisposable
         public uint? SquadronManual;
         public uint? ExpertProfileId;
         public uint? ExpertMaxSteadyUses;
-        public uint? ExpertMaxMaterialMiracleUses;
-        public uint? ExpertMinimumStepsBeforeMiracle;
     }
 
     private readonly record struct ConsumableSelection(uint ItemId, bool HighQuality);
@@ -50,7 +54,30 @@ public sealed class ArtisanIpcShim : IDisposable
     public bool IsBusy => IsShimBusy();
 
     public void Update()
-        => ReconcileProviderState();
+    {
+        ReconcileProviderState();
+        if (!_recoveringActiveSynthesis
+            || SynthesisReader.IsSynthesisWindowOpen()
+            || CraftingGatherBridge.HasActiveQueue)
+            return;
+
+        _recoveringActiveSynthesis = false;
+        _restoredQueueRecipeId = 0;
+        _restoredQueueRecipeCount = 0;
+        if (_deferredCraft is not { } deferred)
+            return;
+
+        _deferredCraft = null;
+        try
+        {
+            CraftItemCore(deferred.RecipeId, deferred.Amount);
+        }
+        catch (Exception ex)
+        {
+            GatherBuddy.Log.Error(
+                $"[ArtisanIpcShim] Deferred ICE craft failed after live-synthesis recovery: recipe={deferred.RecipeId}, amount={deferred.Amount}: {ex}");
+        }
+    }
 
     public bool TryPrepareArtisanToggle(bool enable, out string? blockedReason)
     {
@@ -119,6 +146,18 @@ public sealed class ArtisanIpcShim : IDisposable
             ? DonatelloSolveObjective.ProgressOnly
             : DonatelloSolveObjective.MaximizeQuality;
 
+    internal static SolverOverrideMode ResolveSolverOverride(string? solverName)
+        => solverName switch
+        {
+            null or "" => SolverOverrideMode.DonatelloSolver,
+            ProgressOnlySolverName => SolverOverrideMode.ProgressOnlySolver,
+            StandardSolverName => SolverOverrideMode.StandardSolver,
+            RaphaelSolverName => SolverOverrideMode.RaphaelSolver,
+            ExpertSolverName => SolverOverrideMode.DonatelloSolver,
+            _ when solverName.StartsWith("Macro: ", StringComparison.Ordinal) => SolverOverrideMode.DonatelloSolver,
+            _ => throw new NotSupportedException($"Artisan solver '{solverName}' is not supported by the GatherBuddy compatibility shim."),
+        };
+
     internal static DonatelloExecutionOptions BuildDonatelloOptions(
         string? solverName,
         bool isExpert,
@@ -127,16 +166,16 @@ public sealed class ArtisanIpcShim : IDisposable
         uint? expertMinimumStepsBeforeMiracle,
         uint? standardMaxMaterialMiracleUses,
         uint? standardMinimumStepsBeforeMiracle)
-        => new(
+    {
+        _ = expertMaxMaterialMiracleUses;
+        _ = expertMinimumStepsBeforeMiracle;
+        _ = standardMaxMaterialMiracleUses;
+        _ = standardMinimumStepsBeforeMiracle;
+        return new(
             ResolveObjective(solverName),
             MinimizeSteps: false,
-            MaxStellarSteadyHandUses: isExpert ? expertMaxSteadyUses ?? 0 : 0,
-            MaxMaterialMiracleUses: isExpert
-                ? expertMaxMaterialMiracleUses ?? 0
-                : standardMaxMaterialMiracleUses ?? 0,
-            MinimumStepsBeforeMaterialMiracle: isExpert
-                ? expertMinimumStepsBeforeMiracle ?? 0
-                : standardMinimumStepsBeforeMiracle ?? 0);
+            MaxStellarSteadyHandUses: isExpert ? expertMaxSteadyUses ?? 0 : 0);
+    }
 
     internal RecipeCraftSettings BuildCraftSettings(uint recipeId, bool isExpert)
     {
@@ -175,17 +214,27 @@ public sealed class ArtisanIpcShim : IDisposable
         {
             settings.UseAllNQ = false;
         }
+        var solverName = overrides?.SolverName;
         settings.SelectedMacroId = null;
         settings.MacroMode = MacroOverrideMode.Specific;
-        settings.SolverOverride = SolverOverrideMode.DonatelloSolver;
+        settings.SolverOverride = ResolveSolverOverride(solverName);
+        if (solverName?.StartsWith("Macro: ", StringComparison.Ordinal) == true)
+        {
+            var macroName = solverName["Macro: ".Length..];
+            var macro = CraftingGameInterop.UserMacroLibrary.GetAllMacros()
+                .FirstOrDefault(candidate => string.Equals(candidate.Name, macroName, StringComparison.Ordinal));
+            if (macro == null)
+                throw new NotSupportedException($"Artisan requested macro '{macroName}', but no GatherBuddy macro has that name.");
+            settings.SelectedMacroId = macro.Id;
+        }
         settings.DonatelloOptions = BuildDonatelloOptions(
             overrides?.SolverName,
             isExpert,
             overrides?.ExpertMaxSteadyUses,
-            overrides?.ExpertMaxMaterialMiracleUses,
-            overrides?.ExpertMinimumStepsBeforeMiracle,
-            _standardMaxMaterialMiracleUses,
-            _standardMinimumStepsBeforeMiracle);
+            null,
+            null,
+            null,
+            null);
         return settings;
     }
 
@@ -202,6 +251,30 @@ public sealed class ArtisanIpcShim : IDisposable
     private void CraftItem(ushort recipeId, int amount)
     {
         GatherBuddy.Log.Information($"[ArtisanIpcShim] Received ICE craft request: recipe={recipeId}, amount={amount}");
+        if (CraftingGatherBridge.TryGetPersistedArtisanRecovery(
+                recipeId,
+                out var activeRecipeId,
+                out var alreadyQueued))
+        {
+            _recoveringActiveSynthesis = true;
+            _recoveryRecipeId = activeRecipeId;
+            _restoredQueueRecipeId = recipeId;
+            _restoredQueueRecipeCount = alreadyQueued;
+            DeferCraftAfterRecovery(recipeId, amount);
+            GatherBuddy.Log.Information(
+                $"[ArtisanIpcShim] Deduplicated ICE request against restored queue: recipe={recipeId}, requested={amount}, alreadyQueued={alreadyQueued}");
+            return;
+        }
+        if (_recoveringActiveSynthesis)
+        {
+            DeferCraftAfterRecovery(recipeId, amount);
+            return;
+        }
+        if (SynthesisReader.IsSynthesisWindowOpen()
+            && !CraftingGatherBridge.HasActiveQueue
+            && TryRecoverActiveSynthesis(recipeId, amount))
+            return;
+
         try
         {
             CraftItemCore(recipeId, amount);
@@ -244,12 +317,102 @@ public sealed class ArtisanIpcShim : IDisposable
         var plan = CraftingExecutionPlan.CreateDirect(list);
         if (!CraftingQueuePreflight.TryValidate(plan, out var failure))
             throw new InvalidOperationException(failure.Replace('\n', ' '));
-        CraftingGatherBridge.StartQueueCraftAndGather(plan);
+        CraftingGatherBridge.StartQueueCraftAndGather(
+            plan,
+            owner: CraftingAutomationOwner.ArtisanIpc);
         if (CraftingGatherBridge.TryGetActiveQueueFailure(out failure))
             throw new InvalidOperationException(failure.Replace('\n', ' '));
         GatherBuddy.Log.Information(
             $"[ArtisanIpcShim] Accepted ICE craft: recipe={recipeId}, amount={amount}, objective={list.Recipes[0].CraftSettings?.DonatelloOptions?.Objective}");
     }
+
+    private bool TryRecoverActiveSynthesis(ushort requestedRecipeId, int requestedAmount)
+    {
+        var activeRecipeId = RecipeNoteExt.GetActiveCraftRecipeId();
+        if (activeRecipeId is not { } selectedId || selectedId > ushort.MaxValue)
+            return false;
+        var recipe = RecipeManager.GetRecipe(selectedId);
+        if (!recipe.HasValue)
+            return false;
+
+        var recoveryItem = new CraftingListItem(selectedId, 1)
+        {
+            IsOriginalRecipe = true,
+            CraftSettings = BuildCraftSettings(selectedId, recipe.Value.IsExpert),
+        };
+
+        var recoveryList = new CraftingListDefinition
+        {
+            ID = int.MinValue,
+            Name = "Recovered Artisan IPC craft",
+            SkipIfEnough = false,
+            SkipFinalIfEnough = false,
+            RetainerRestock = false,
+            AutoPurchaseBlockedDependencies = false,
+            ReturnToHomeWorldBeforeCrafting = false,
+        };
+        recoveryList.Recipes.Add(recoveryItem);
+        var recoveryPlan = CraftingExecutionPlan.CreateDirect(recoveryList);
+        var failureReason = string.Empty;
+        if (!CraftingQueuePreflight.TryValidate(recoveryPlan, out failureReason))
+        {
+            GatherBuddy.Log.Warning(
+                $"[ArtisanIpcShim] Active synthesis recipe {selectedId} failed recovery preflight: {failureReason.Replace('\n', ' ')}");
+            return false;
+        }
+
+        CraftingGatherBridge.StartQueueCraftAndGather(
+            recoveryPlan,
+            owner: CraftingAutomationOwner.ArtisanIpc,
+            restoringPersistedCraft: true);
+        if (!CraftingGatherBridge.HasActiveQueue
+            || CraftingGatherBridge.TryGetActiveQueueFailure(out failureReason))
+        {
+            GatherBuddy.Log.Warning(
+                $"[ArtisanIpcShim] Active synthesis recipe {selectedId} failed recovery startup: {failureReason.Replace('\n', ' ')}");
+            return false;
+        }
+
+        _recoveringActiveSynthesis = true;
+        _recoveryRecipeId = (ushort)selectedId;
+        _restoredQueueRecipeId = 0;
+        _restoredQueueRecipeCount = 0;
+        DeferCraftAfterRecovery(requestedRecipeId, requestedAmount);
+        GatherBuddy.Log.Information(
+            $"[ArtisanIpcShim] Recovering active synthesis recipe {selectedId}; deferred ICE request recipe={requestedRecipeId}, amount={requestedAmount}");
+        return true;
+    }
+
+    private void DeferCraftAfterRecovery(ushort recipeId, int amount)
+    {
+        var alreadyQueued = recipeId == _restoredQueueRecipeId ? _restoredQueueRecipeCount : 0;
+        var remaining = RemainingRequestedAfterRecovery(
+            _recoveryRecipeId,
+            recipeId,
+            amount,
+            alreadyQueued);
+        if (remaining <= 0)
+            return;
+        if (_deferredCraft is { } existing && existing.RecipeId != recipeId)
+        {
+            GatherBuddy.Log.Warning(
+                $"[ArtisanIpcShim] Ignoring additional ICE request recipe={recipeId}, amount={amount} while recipe={existing.RecipeId}, amount={existing.Amount} is already deferred");
+            return;
+        }
+
+        _deferredCraft = (recipeId, Math.Max(_deferredCraft?.Amount ?? 0, remaining));
+    }
+
+    internal static int RemainingRequestedAfterRecovery(
+        ushort activeRecipeId,
+        ushort requestedRecipeId,
+        int requestedAmount,
+        int alreadyQueued = 0)
+        => Math.Max(
+            0,
+            requestedAmount - Math.Max(
+                activeRecipeId == requestedRecipeId ? 1 : 0,
+                alreadyQueued));
 
     private void AssignRecipe(ushort recipeId, uint _, uint __, uint ___, uint ____)
         => GatherBuddy.Log.Debug($"[ArtisanIpcShim] Ignoring legacy AssignRecipie for recipe {recipeId}; CraftItem owns exact ingredient assignment.");
@@ -302,13 +465,8 @@ public sealed class ArtisanIpcShim : IDisposable
     private void ChangeSolver(uint recipeId, string solverName, bool temporary)
     {
         _ = temporary;
+        _ = ResolveSolverOverride(solverName);
         Overrides(recipeId).SolverName = solverName;
-        if (ResolveObjective(solverName) == DonatelloSolveObjective.MaximizeQuality
-            && solverName is not ("Standard Recipe Solver" or "Raphael Recipe Solver" or "Expert Recipe Solver")
-            && !solverName.StartsWith("Macro: ", StringComparison.Ordinal))
-        {
-            GatherBuddy.Log.Debug($"[ArtisanIpcShim] Solver '{solverName}' mapped to Donatello quality maximization.");
-        }
     }
 
     private void ResetSolver(uint recipeId)
@@ -353,6 +511,8 @@ public sealed class ArtisanIpcShim : IDisposable
     private void ChangeExpertProfileId(uint recipeId, uint profileId, bool temporary)
     {
         _ = temporary;
+        if (profileId != 0)
+            throw new NotSupportedException("Artisan expert profile IDs are not supported by the GatherBuddy compatibility shim.");
         Overrides(recipeId).ExpertProfileId = profileId;
     }
 
@@ -370,39 +530,37 @@ public sealed class ArtisanIpcShim : IDisposable
 
     private void ChangeExpertMaxMaterialMiracleUses(uint recipeId, uint uses, bool temporary)
     {
-        _ = temporary;
-        Overrides(recipeId).ExpertMaxMaterialMiracleUses = uses;
+        throw new NotSupportedException("Artisan expert Material Miracle limits are not supported by the GatherBuddy compatibility shim.");
     }
 
     private void ResetExpertMaxMaterialMiracleUses(uint recipeId)
-        => Overrides(recipeId).ExpertMaxMaterialMiracleUses = null;
+        => _ = recipeId;
 
     private void ChangeExpertMinimumStepsBeforeMiracle(uint recipeId, uint steps, bool temporary)
     {
-        _ = temporary;
-        Overrides(recipeId).ExpertMinimumStepsBeforeMiracle = steps;
+        throw new NotSupportedException("Artisan expert Material Miracle step thresholds are not supported by the GatherBuddy compatibility shim.");
     }
 
     private void ResetExpertMinimumStepsBeforeMiracle(uint recipeId)
-        => Overrides(recipeId).ExpertMinimumStepsBeforeMiracle = null;
+        => _ = recipeId;
 
     private void ChangeStandardMaxMaterialMiracleUses(uint uses, bool temporary)
     {
-        _ = temporary;
-        _standardMaxMaterialMiracleUses = uses;
+        throw new NotSupportedException("Artisan standard Material Miracle limits are not supported by the GatherBuddy compatibility shim.");
     }
 
     private void ResetStandardMaxMaterialMiracleUses()
-        => _standardMaxMaterialMiracleUses = null;
+    {
+    }
 
     private void ChangeStandardMinimumStepsBeforeMiracle(uint steps, bool temporary)
     {
-        _ = temporary;
-        _standardMinimumStepsBeforeMiracle = steps;
+        throw new NotSupportedException("Artisan standard Material Miracle step thresholds are not supported by the GatherBuddy compatibility shim.");
     }
 
     private void ResetStandardMinimumStepsBeforeMiracle()
-        => _standardMinimumStepsBeforeMiracle = null;
+    {
+    }
 
     private static List<(string, int)> ReturnMacroInfo()
         => [];

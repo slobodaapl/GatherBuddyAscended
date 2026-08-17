@@ -331,7 +331,7 @@ public sealed class LiveAcquisitionExecutor : IDisposable
                 {
                     purchase = await _environment.PurchaseVendorAsync(
                         WithQuantity(transaction, remaining),
-                        _options.PurchaseTimeout,
+                        _options.TravelTimeout,
                         cancellationToken);
                 }
                 catch (OperationCanceledException)
@@ -361,7 +361,7 @@ public sealed class LiveAcquisitionExecutor : IDisposable
                         _purchasedQuantities.Count > 0 || _hasIndeterminatePurchases));
                 }
 
-                var vendorGil = ActualGilSpent(purchase.GilBefore, purchase.GilAfter, purchase.GilSpent);
+                var vendorGil = VendorGilSpent(purchase);
                 RecordPurchase(transaction, transactionIndex, purchase.QuantityPurchased, vendorGil,
                     purchase.OutputQuantities, purchase.CurrencySpent, purchase.IsHq);
                 AddDiagnostic(Stage, purchase.Message, transaction.ItemId, transaction.ItemName, transaction.WorldName, transaction.GilCost, purchase.GilSpent);
@@ -947,6 +947,10 @@ public sealed class LiveAcquisitionExecutor : IDisposable
             return string.IsNullOrWhiteSpace(purchase.Message)
                 ? "Vendor purchase was accepted but could not be verified."
                 : purchase.Message;
+        if (!purchase.InteractionClosed)
+            return string.IsNullOrWhiteSpace(purchase.Message)
+                ? "Vendor purchase completed, but the vendor interaction did not close."
+                : purchase.Message;
         if (purchase.ItemId != transaction.ItemId)
             return $"Vendor purchase returned item {purchase.ItemId:N0}, expected {transaction.ItemId:N0}.";
         if (!purchase.IsHq.HasValue || purchase.IsHq.Value != transaction.IsHq)
@@ -985,7 +989,7 @@ public sealed class LiveAcquisitionExecutor : IDisposable
         var currencyFailure = ValidateVendorCurrencyDeltas(transaction, purchase);
         if (currencyFailure != null)
             return currencyFailure;
-        if (!TryGetActualGilSpent(purchase.GilBefore, purchase.GilAfter, purchase.GilSpent, out var gil, out var gilFailure))
+        if (!TryGetVendorGilSpent(purchase, out var gil, out var gilFailure))
             return gilFailure;
         var reservation = RemainingTransactionReservation(transaction, transactionIndex);
         if (gil > reservation)
@@ -1020,6 +1024,24 @@ public sealed class LiveAcquisitionExecutor : IDisposable
             : 1;
         foreach (var cost in costs)
         {
+            var reportedDelta = cost.IsGil
+                ? purchase.GilSpent
+                : purchase.CurrencySpent.TryGetValue(cost.CurrencyId, out var nonGilSpent)
+                    ? nonGilSpent
+                    : -1;
+            if (reportedDelta < 0)
+                return $"Vendor purchase for {transaction.ItemName} did not report authoritative {CurrencyLabel(cost.CurrencyId)} spend.";
+
+            if (cost.Amount % plannedTransactions != 0)
+                return $"Vendor purchase for {transaction.ItemName} has a non-integral per-transaction {CurrencyLabel(cost.CurrencyId)} cost.";
+            var expectedDelta = checked(cost.Amount / plannedTransactions * completedTransactions);
+            if (purchase.CurrencySpendIsAuthoritative)
+            {
+                if (reportedDelta != expectedDelta)
+                    return $"Vendor purchase for {transaction.ItemName} spent {reportedDelta:N0} {CurrencyLabel(cost.CurrencyId)}; expected {expectedDelta:N0} for {completedTransactions:N0} completed transaction(s).";
+                continue;
+            }
+
             if (!purchase.CurrencyBalancesBefore.TryGetValue(cost.CurrencyId, out var before)
                 || !purchase.CurrencyBalancesAfter.TryGetValue(cost.CurrencyId, out var after)
                 || !purchase.CurrencyBalanceSources.TryGetValue(cost.CurrencyId, out var beforeSource)
@@ -1033,17 +1055,8 @@ public sealed class LiveAcquisitionExecutor : IDisposable
             if (observedDelta < 0)
                 return $"Vendor purchase for {transaction.ItemName} increased {CurrencyLabel(cost.CurrencyId)} unexpectedly; balance verification failed.";
 
-            var reportedDelta = cost.IsGil
-                ? purchase.GilSpent
-                : purchase.CurrencySpent.TryGetValue(cost.CurrencyId, out var nonGilSpent)
-                    ? nonGilSpent
-                    : -1;
-            if (reportedDelta < 0 || reportedDelta != observedDelta)
+            if (reportedDelta != observedDelta)
                 return $"Vendor purchase for {transaction.ItemName} reported {CurrencyLabel(cost.CurrencyId)} spend {reportedDelta:N0}, but the wallet delta was {observedDelta:N0}.";
-
-            if (cost.Amount % plannedTransactions != 0)
-                return $"Vendor purchase for {transaction.ItemName} has a non-integral per-transaction {CurrencyLabel(cost.CurrencyId)} cost.";
-            var expectedDelta = checked(cost.Amount / plannedTransactions * completedTransactions);
             if (observedDelta != expectedDelta)
                 return $"Vendor purchase for {transaction.ItemName} spent {observedDelta:N0} {CurrencyLabel(cost.CurrencyId)}; expected {expectedDelta:N0} for {completedTransactions:N0} completed transaction(s).";
         }
@@ -1084,7 +1097,9 @@ public sealed class LiveAcquisitionExecutor : IDisposable
             return;
 
         var quantity = System.Math.Max(0, purchase.QuantityPurchased);
-        var gil = TryGetObservedGilSpent(purchase.GilBefore, purchase.GilAfter, purchase.GilSpent);
+        var gil = purchase.CurrencySpendIsAuthoritative
+            ? System.Math.Max(0, purchase.GilSpent)
+            : TryGetObservedGilSpent(purchase.GilBefore, purchase.GilAfter, purchase.GilSpent);
         if (quantity > 0 || gil > 0 || purchase.CurrencySpent.Count > 0 || purchase.OutputQuantities.Count > 0)
             RecordPurchase(transaction, transactionIndex, quantity, gil,
                 purchase.OutputQuantities, purchase.CurrencySpent, purchase.IsHq);
@@ -1176,6 +1191,28 @@ public sealed class LiveAcquisitionExecutor : IDisposable
             return false;
         }
         return true;
+    }
+
+    private static bool TryGetVendorGilSpent(
+        LiveVendorPurchaseResult purchase,
+        out long actual,
+        out string failure)
+    {
+        if (!purchase.CurrencySpendIsAuthoritative)
+            return TryGetActualGilSpent(
+                purchase.GilBefore,
+                purchase.GilAfter,
+                purchase.GilSpent,
+                out actual,
+                out failure);
+
+        actual = System.Math.Max(0, purchase.GilSpent);
+        failure = string.Empty;
+        if (purchase.GilSpent >= 0)
+            return true;
+
+        failure = $"Purchase reported an invalid negative Gil spend ({purchase.GilSpent:N0}).";
+        return false;
     }
 
     private static long TryGetObservedGilSpent(long? gilBefore, long? gilAfter, long reported)
@@ -1370,6 +1407,11 @@ public sealed class LiveAcquisitionExecutor : IDisposable
             return gilBefore.Value - gilAfter.Value;
         return System.Math.Max(0, reported);
     }
+
+    private static long VendorGilSpent(LiveVendorPurchaseResult purchase)
+        => purchase.CurrencySpendIsAuthoritative
+            ? System.Math.Max(0, purchase.GilSpent)
+            : ActualGilSpent(purchase.GilBefore, purchase.GilAfter, purchase.GilSpent);
 
     private void AddDiagnostic(
         LiveAcquisitionStage stage,

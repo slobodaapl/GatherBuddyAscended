@@ -22,9 +22,13 @@ public static class Simulator
             next.Index = SkipUpdates(action) ? step.Index : step.Index + 1;
             next.Progress = step.Progress + (success ? CalculateProgress(craft, step, action) : 0);
             var qualityIncrease = success ? CalculateQuality(craft, step, action) : 0;
-            next.Quality = Math.Min(craft.CraftQualityMax, step.Quality + qualityIncrease);
+            next.Quality = ClampQuality(craft, step.Quality + qualityIncrease);
             next.IQStacks = step.IQStacks;
-            if (success)
+            if (action == VulcanSkill.CarefulObservation)
+            {
+                next.ExpedienceLeft = step.ExpedienceLeft;
+            }
+            else if (success)
             {
                 if (qualityIncrease > 0)
                     ++next.IQStacks;
@@ -47,7 +51,7 @@ public static class Simulator
                 _ => GetOldBuffDuration(step.WasteNotLeft, action)
             };
             next.ManipulationLeft = action == VulcanSkill.Manipulation ? GetNewBuffDuration(step, 8) : GetOldBuffDuration(step.ManipulationLeft, action);
-            next.GreatStridesLeft = action == VulcanSkill.GreatStrides ? GetNewBuffDuration(step, 3) : GetOldBuffDuration(step.GreatStridesLeft, action, next.Quality != step.Quality);
+            next.GreatStridesLeft = action == VulcanSkill.GreatStrides ? GetNewBuffDuration(step, 3) : GetOldBuffDuration(step.GreatStridesLeft, action, success && qualityIncrease > 0);
             next.InnovationLeft = action == VulcanSkill.Innovation ? GetNewBuffDuration(step, 4) : action == VulcanSkill.QuickInnovation ? GetNewBuffDuration(step, 1) : GetOldBuffDuration(step.InnovationLeft, action);
             next.VenerationLeft = action == VulcanSkill.Veneration ? GetNewBuffDuration(step, 4) : GetOldBuffDuration(step.VenerationLeft, action);
             next.MuscleMemoryLeft = action == VulcanSkill.MuscleMemory ? GetNewBuffDuration(step, 5) : GetOldBuffDuration(step.MuscleMemoryLeft, action, next.Progress != step.Progress);
@@ -59,19 +63,29 @@ public static class Simulator
             next.HeartAndSoulAvailable = step.HeartAndSoulAvailable && action != VulcanSkill.HeartAndSoul;
             next.QuickInnoLeft = step.QuickInnoLeft - (action == VulcanSkill.QuickInnovation ? 1 : 0);
             next.QuickInnoAvailable = step.QuickInnoLeft > 0 && next.InnovationLeft == 0;
-            next.PrevActionFailed = !success;
-            next.PrevComboAction = action;
+            next.PrevActionFailed = action is VulcanSkill.MaterialMiracle or VulcanSkill.CarefulObservation
+                ? step.PrevActionFailed
+                : !success;
+            next.PrevComboAction = action is VulcanSkill.MaterialMiracle or VulcanSkill.CarefulObservation
+                ? step.PrevComboAction
+                : action;
+            next.ComboAction = action switch
+            {
+                VulcanSkill.MaterialMiracle or VulcanSkill.CarefulObservation => step.ComboAction,
+                VulcanSkill.BasicTouch or VulcanSkill.StandardTouch or VulcanSkill.Observe => action,
+                _ => VulcanSkill.None,
+            };
             next.TrainedPerfectionActive = action == VulcanSkill.TrainedPerfection || (step.TrainedPerfectionActive && !HasDurabilityCost(action));
             next.TrainedPerfectionAvailable = step.TrainedPerfectionAvailable && action != VulcanSkill.TrainedPerfection;
             next.MaterialMiracleCharges = action == VulcanSkill.MaterialMiracle ? step.MaterialMiracleCharges - 1 : step.MaterialMiracleCharges;
-            next.MaterialMiracleActive = action == VulcanSkill.MaterialMiracle || step.MaterialMiracleActive;
-            next.MaterialMiraclesUsed = action == VulcanSkill.MaterialMiracle ? step.MaterialMiraclesUsed + 1 : step.MaterialMiraclesUsed;
             next.StellarSteadyHandCharges = action == VulcanSkill.StellarSteadyHand
                 ? step.StellarSteadyHandCharges - 1
                 : step.StellarSteadyHandCharges;
             next.StellarSteadyHandLeft = action == VulcanSkill.StellarSteadyHand
                 ? 3
-                : Math.Max(0, step.StellarSteadyHandLeft - 1);
+                : action == VulcanSkill.CarefulObservation
+                    ? step.StellarSteadyHandLeft
+                    : Math.Max(0, step.StellarSteadyHandLeft - 1);
             next.StellarSteadyHandsUsed = action == VulcanSkill.StellarSteadyHand
                 ? step.StellarSteadyHandsUsed + 1
                 : step.StellarSteadyHandsUsed;
@@ -97,7 +111,9 @@ public static class Simulator
                 next.Durability = Math.Min(craft.CraftDurability, next.Durability + repair);
             }
 
-            next.Condition = SkipUpdates(action) ? step.Condition : GetNextCondition(craft, step, nextStateRoll);
+            next.Condition = action == VulcanSkill.CarefulObservation || !SkipUpdates(action)
+                ? GetNextCondition(craft, step, nextStateRoll)
+                : step.Condition;
 
             return (success ? ExecuteResult.Succeeded : ExecuteResult.Failed, next);
         }
@@ -132,7 +148,11 @@ public static class Simulator
             return (int)res;
         }
 
-        public static bool CanUseAction(CraftState craft, StepState step, VulcanSkill action) => action switch
+        public static int ClampQuality(CraftState craft, int quality)
+            => Math.Clamp(quality, 0, craft.CraftQualityMax);
+
+        public static bool CanUseAction(CraftState craft, StepState step, VulcanSkill action)
+            => action.IsExecutableAction() && action switch
         {
             VulcanSkill.IntensiveSynthesis or VulcanSkill.PreciseTouch or VulcanSkill.TricksOfTrade => step.Condition is Condition.Good or Condition.Excellent || step.HeartAndSoulActive,
             VulcanSkill.PrudentSynthesis or VulcanSkill.PrudentTouch => step.WasteNotLeft == 0,
@@ -146,7 +166,7 @@ public static class Simulator
             VulcanSkill.TrainedPerfection => step.TrainedPerfectionAvailable,
             VulcanSkill.DaringTouch => step.ExpedienceLeft > 0,
             VulcanSkill.QuickInnovation => step.QuickInnoLeft > 0 && step.InnovationLeft == 0 && step.CrafterDelineationsLeft > 0,
-            VulcanSkill.MaterialMiracle => step.MaterialMiracleCharges > 0 && !step.MaterialMiracleActive,
+            VulcanSkill.MaterialMiracle => step.MaterialMiracleCharges > 0,
             VulcanSkill.StellarSteadyHand => step.StellarSteadyHandCharges > 0,
             _ => true
         } && craft.StatLevel >= MinLevel(action) && step.RemainingCP >= GetCPCost(step, action);
@@ -192,7 +212,7 @@ public static class Simulator
             VulcanSkill.DaringTouch => 96,
             VulcanSkill.ImmaculateMend => 98,
             VulcanSkill.TrainedPerfection => 100,
-            VulcanSkill.MaterialMiracle => 101,
+            VulcanSkill.MaterialMiracle => 1,
             VulcanSkill.StellarSteadyHand => 90,
             _ => 1
         };
@@ -247,7 +267,7 @@ public static class Simulator
 
         public static int GetCPCost(StepState step, VulcanSkill action)
         {
-            var cost = GetBaseCPCost(action, step.PrevComboAction);
+            var cost = GetBaseCPCost(action, step.ComboAction);
             if (step.Condition == Condition.Pliant)
                 cost -= cost / 2;
             return cost;
@@ -324,31 +344,30 @@ public static class Simulator
             if (potency == 0)
                 return 0;
 
-            float buffMod = (1 + (step.GreatStridesLeft > 0 ? 1 : 0) + (step.InnovationLeft > 0 ? 0.5f : 0)) * (100 + 10 * step.IQStacks) / 100;
-            float effPotency = potency * buffMod;
-
-            float condMod = step.Condition switch
+            var effectQualityModifier = (100 + 100 * (step.GreatStridesLeft > 0 ? 1 : 0)
+                + 50 * (step.InnovationLeft > 0 ? 1 : 0)) * (100 + 10 * step.IQStacks);
+            var conditionModifier = step.Condition switch
             {
-                Condition.Good => craft.SplendorCosmic ? 1.75f : 1.5f,
-                Condition.Excellent => 4,
-                Condition.Poor => 0.5f,
-                _ => 1
+                Condition.Good => craft.SplendorCosmic ? 7 : 6,
+                Condition.Excellent => 16,
+                Condition.Poor => 2,
+                _ => 4
             };
-            return (int)(BaseQuality(craft) * condMod * effPotency / 100);
+            return (int)((long)BaseQuality(craft) * potency * effectQualityModifier * conditionModifier / 4_000_000);
         }
 
         public static bool WillFinishCraft(CraftState craft, StepState step, VulcanSkill action) => step.FinalAppraisalLeft == 0 && step.Progress + CalculateProgress(craft, step, action) >= craft.CraftProgress;
 
         public static VulcanSkill NextTouchCombo(StepState step, CraftState craft)
         {
-            if (step.PrevComboAction == VulcanSkill.BasicTouch) return VulcanSkill.StandardTouch;
-            if (step.PrevComboAction == VulcanSkill.StandardTouch) return VulcanSkill.AdvancedTouch;
+            if (step.ComboAction == VulcanSkill.BasicTouch) return VulcanSkill.StandardTouch;
+            if (step.ComboAction == VulcanSkill.StandardTouch) return VulcanSkill.AdvancedTouch;
             return VulcanSkill.BasicTouch;
         }
 
         public static VulcanSkill NextTouchComboRefined(StepState step, CraftState craft)
         {
-            if (step.PrevComboAction == VulcanSkill.BasicTouch && craft.StatLevel >= MinLevel(VulcanSkill.RefinedTouch)) return VulcanSkill.RefinedTouch;
+            if (step.ComboAction == VulcanSkill.BasicTouch && craft.StatLevel >= MinLevel(VulcanSkill.RefinedTouch)) return VulcanSkill.RefinedTouch;
             return VulcanSkill.BasicTouch;
         }
 
