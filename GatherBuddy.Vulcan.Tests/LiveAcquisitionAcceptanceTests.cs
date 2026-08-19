@@ -50,6 +50,26 @@ internal static class LiveAcquisitionAcceptanceTests
         Require(route.Routes[1].GatewayId == AcquisitionWorldGateways.Gridania,
             "world hops must use the first attuned major-city gateway");
 
+        var localMarketFirst = new FakeEnvironment
+        {
+            IsAtMarketBoard = true,
+            Listings = new[] { new LiveMarketListing(1, 100, 10, "World A", 1, 5, 0, false) },
+        };
+        var localMarketFirstResult = new LiveAcquisitionExecutor(localMarketFirst)
+            .ExecuteAsync(Ready(new AcquisitionPlan
+            {
+                Transactions = new[]
+                {
+                    Transaction(1, AcquisitionSourceKind.Market, 10, "World A", 5),
+                    Transaction(2, AcquisitionSourceKind.Vendor, 0, string.Empty, 1),
+                },
+            }))
+            .GetAwaiter()
+            .GetResult();
+        Require(localMarketFirstResult.Status == LiveAcquisitionStatus.Completed
+            && localMarketFirst.ActionOrder.SequenceEqual(new[] { "market", "market", "vendor" }),
+            "a market board at the current location must be used before vendor travel");
+
         var cheapestGateway = AcquisitionRoutePlanner.Plan(
             new AcquisitionPlan
             {
@@ -67,6 +87,25 @@ internal static class LiveAcquisitionAcceptanceTests
         Require(cheapestGateway.Routes[0].GatewayId == AcquisitionWorldGateways.Uldah
             && cheapestGateway.Routes[0].TeleportCost == 5,
             "world hops must choose the cheapest attuned gateway with deterministic cost input");
+
+        var currentGateway = AcquisitionRoutePlanner.Plan(
+            new AcquisitionPlan
+            {
+                Transactions = new[] { Transaction(1, AcquisitionSourceKind.Market, 20, "World B", 10) },
+            },
+            new AcquisitionRouteInput
+            {
+                CurrentWorldId = 10,
+                CurrentWorldName = "World A",
+                LifestreamAvailable = true,
+                CanVisitWorld = _ => true,
+                IsGatewayAttuned = _ => true,
+                CurrentGatewayId = AcquisitionWorldGateways.Uldah,
+                GatewayTeleportCost = id => id == AcquisitionWorldGateways.LimsaLominsa ? 1 : 999,
+            });
+        Require(currentGateway.Routes[0].GatewayId == AcquisitionWorldGateways.Uldah
+            && currentGateway.Routes[0].TeleportCost == 0,
+            "an eligible gateway in the current city must prevent a paid teleport to a cheaper remote gateway");
 
         var unknownGatewayCost = AcquisitionRoutePlanner.Plan(
             new AcquisitionPlan
@@ -607,6 +646,26 @@ internal static class LiveAcquisitionAcceptanceTests
         Require(!blockedRoute.IsReady && blockedRoute.FailureReason.Contains("Current world only", StringComparison.OrdinalIgnoreCase),
             "current-world-only must hard-stop a plan requiring another world");
 
+        var pendingTravel = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var waitingEnvironment = new FakeEnvironment { TravelCompletion = pendingTravel };
+        var waitingExecutor = new LiveAcquisitionExecutor(waitingEnvironment);
+        LiveAcquisitionDiagnostic? travelDiagnostic = null;
+        waitingExecutor.Diagnostic += diagnostic => travelDiagnostic = diagnostic;
+        var waitingExecution = waitingExecutor.ExecuteAsync(Ready(new AcquisitionPlan
+        {
+            Transactions = new[] { Transaction(1, AcquisitionSourceKind.Market, 20, "World B", 10) },
+        }));
+        Require(!waitingExecution.IsCompleted
+            && waitingExecutor.Stage == LiveAcquisitionStage.Travel
+            && travelDiagnostic is { Stage: LiveAcquisitionStage.Travel }
+            && travelDiagnostic.Message.Contains("Traveling to World B", StringComparison.Ordinal),
+            "cross-world acquisition must expose its active travel stage and destination while travel is pending");
+        pendingTravel.SetResult(false);
+        var failedTravel = waitingExecution.GetAwaiter().GetResult();
+        Require(failedTravel.FailureKind == LiveAcquisitionFailureKind.TravelBlocked
+            && failedTravel.FinalStage == LiveAcquisitionStage.Travel,
+            "failed cross-world travel must retain the travel stage instead of reporting preconditions");
+
         var fake = new FakeEnvironment
         {
             Listings = new[]
@@ -629,10 +688,30 @@ internal static class LiveAcquisitionAcceptanceTests
         Require(fake.LastMarketRoute?.WorldId == 10,
             "market navigation must receive the complete selected world route");
 
+        var inconsistentEstimate = new FakeEnvironment
+        {
+            Listings = new[] { new LiveMarketListing(1, 100, 10, "World A", 1, 10, 0, false) },
+        };
+        var inconsistentEstimateResult = new LiveAcquisitionExecutor(inconsistentEstimate)
+            .ExecuteAsync(Ready(new AcquisitionPlan
+            {
+                Transactions = new[]
+                {
+                    Transaction(1, AcquisitionSourceKind.Market, 10, "World A", 10),
+                },
+                Estimate = new AcquisitionEstimate { TotalGil = 5 },
+            }))
+            .GetAwaiter()
+            .GetResult();
+        Require(inconsistentEstimateResult.FailureKind == LiveAcquisitionFailureKind.InvalidPlan
+            && inconsistentEstimate.MarketPurchaseCalls == 0,
+            "an estimate that understates its transaction reservations must hard-fail before purchase submission");
+
         var underfill = new FakeEnvironment
         {
             Listings = new[] { new LiveMarketListing(2, 200, 10, "World A", 2, 5, 0, false) },
             MarketQuantityOverride = 1,
+            MarketGilReported = 5,
         };
         var underfillResult = new LiveAcquisitionExecutor(
                 underfill,
@@ -647,7 +726,7 @@ internal static class LiveAcquisitionAcceptanceTests
                     {
                         Transactions = new[]
                         {
-                            Transaction(2, AcquisitionSourceKind.Market, 10, "World A", 10, quantity: 2, sourceId: "201"),
+                            Transaction(2, AcquisitionSourceKind.Market, 10, "World A", 5, sourceId: "201"),
                         },
                     }));
                 })
@@ -752,6 +831,159 @@ internal static class LiveAcquisitionAcceptanceTests
         Require(lowerResult.Status == LiveAcquisitionStatus.Completed,
             "a lower live unit price must remain purchasable");
 
+        var cheaperDifferentListing = new FakeEnvironment
+        {
+            Listings = new[] { new LiveMarketListing(3, 301, 10, "World A", 1, 1, 0, false) },
+        };
+        var cheaperDifferentListingResult = new LiveAcquisitionExecutor(cheaperDifferentListing)
+            .ExecuteAsync(Ready(new AcquisitionPlan
+            {
+                Transactions = new[]
+                {
+                    Transaction(3, AcquisitionSourceKind.Market, 10, "World A", 10, sourceId: "300"),
+                },
+            }))
+            .GetAwaiter()
+            .GetResult();
+        Require(cheaperDifferentListingResult.Status != LiveAcquisitionStatus.Completed
+            && cheaperDifferentListing.MarketPurchaseCalls == 0,
+            "a cheaper different listing must trigger replan instead of replacing the exact estimated row");
+
+        var safeReplacement = new FakeEnvironment();
+        var safeReplacementResult = new LiveAcquisitionExecutor(
+                safeReplacement,
+                new LiveAcquisitionOptions { MaximumReplans = 1 },
+                _ =>
+                {
+                    safeReplacement.ReplanListings = new[]
+                    {
+                        new LiveMarketListing(3, 301, 10, "World A", 1, 5, 0, false),
+                    };
+                    return Task.FromResult<AcquisitionPlanningResult?>(Ready(new AcquisitionPlan
+                    {
+                        Transactions = new[]
+                        {
+                            Transaction(3, AcquisitionSourceKind.Market, 10, "World A", 5, sourceId: "301"),
+                        },
+                    }));
+                })
+            .ExecuteAsync(Ready(new AcquisitionPlan
+            {
+                Transactions = new[]
+                {
+                    Transaction(3, AcquisitionSourceKind.Market, 10, "World A", 10, sourceId: "300"),
+                },
+            }))
+            .GetAwaiter()
+            .GetResult();
+        Require(safeReplacementResult.Status == LiveAcquisitionStatus.Completed
+            && safeReplacement.MarketPurchaseCalls == 1
+            && safeReplacement.PurchasedListingIds.SetEquals(new[] { 301L }),
+            "a replan may select one exact replacement row only when its quantity and total remain inside the original estimate");
+
+        var increasedEstimate = new FakeEnvironment();
+        var increasedEstimateResult = new LiveAcquisitionExecutor(
+                increasedEstimate,
+                new LiveAcquisitionOptions { MaximumReplans = 1, MaximumGilSpend = 100 },
+                _ =>
+                {
+                    increasedEstimate.ReplanListings = new[]
+                    {
+                        new LiveMarketListing(4, 401, 10, "World A", 1, 11, 0, false),
+                    };
+                    return Task.FromResult<AcquisitionPlanningResult?>(Ready(new AcquisitionPlan
+                    {
+                        Transactions = new[]
+                        {
+                            Transaction(4, AcquisitionSourceKind.Market, 10, "World A", 11, sourceId: "401"),
+                        },
+                    }));
+                })
+            .ExecuteAsync(Ready(new AcquisitionPlan
+            {
+                Transactions = new[]
+                {
+                    Transaction(4, AcquisitionSourceKind.Market, 10, "World A", 10, sourceId: "400"),
+                },
+            }))
+            .GetAwaiter()
+            .GetResult();
+        Require(increasedEstimateResult.FailureKind == LiveAcquisitionFailureKind.GilBudgetExceeded
+            && increasedEstimate.MarketPurchaseCalls == 0,
+            "a replan that increases the original displayed Gil estimate must hard-fail before purchase submission even under a larger optional cap");
+
+        var cumulativeIncrease = new FakeEnvironment
+        {
+            Listings = new[]
+            {
+                new LiveMarketListing(6, 600, 10, "World A", 1, 5, 0, false),
+                new LiveMarketListing(7, 700, 10, "World A", 1, 5, 0, false),
+            },
+            StaleOnListingsRequest = 2,
+        };
+        var cumulativeIncreaseResult = new LiveAcquisitionExecutor(
+                cumulativeIncrease,
+                new LiveAcquisitionOptions { MaximumReplans = 1 },
+                _ =>
+                {
+                    cumulativeIncrease.ReplanListings = new[]
+                    {
+                        new LiveMarketListing(7, 701, 10, "World A", 1, 6, 0, false),
+                    };
+                    return Task.FromResult<AcquisitionPlanningResult?>(Ready(new AcquisitionPlan
+                    {
+                        Transactions = new[]
+                        {
+                            Transaction(7, AcquisitionSourceKind.Market, 10, "World A", 6, sourceId: "701"),
+                        },
+                    }));
+                })
+            .ExecuteAsync(Ready(new AcquisitionPlan
+            {
+                Transactions = new[]
+                {
+                    Transaction(6, AcquisitionSourceKind.Market, 10, "World A", 5, sourceId: "600"),
+                    Transaction(7, AcquisitionSourceKind.Market, 10, "World A", 5, sourceId: "700"),
+                },
+            }))
+            .GetAwaiter()
+            .GetResult();
+        Require(cumulativeIncreaseResult.FailureKind == LiveAcquisitionFailureKind.GilBudgetExceeded
+            && cumulativeIncrease.MarketPurchaseCalls == 1
+            && cumulativeIncreaseResult.PurchasedQuantities.GetValueOrDefault(6u) == 1,
+            "replan admission must include already-spent Gil and hard-fail before a replacement exceeds the original total estimate");
+
+        var increasedQuantity = new FakeEnvironment();
+        var increasedQuantityResult = new LiveAcquisitionExecutor(
+                increasedQuantity,
+                new LiveAcquisitionOptions { MaximumReplans = 1 },
+                _ =>
+                {
+                    increasedQuantity.ReplanListings = new[]
+                    {
+                        new LiveMarketListing(5, 501, 10, "World A", 2, 5, 0, false),
+                    };
+                    return Task.FromResult<AcquisitionPlanningResult?>(Ready(new AcquisitionPlan
+                    {
+                        Transactions = new[]
+                        {
+                            Transaction(5, AcquisitionSourceKind.Market, 10, "World A", 10, quantity: 2, sourceId: "501"),
+                        },
+                    }));
+                })
+            .ExecuteAsync(Ready(new AcquisitionPlan
+            {
+                Transactions = new[]
+                {
+                    Transaction(5, AcquisitionSourceKind.Market, 10, "World A", 10, sourceId: "500"),
+                },
+            }))
+            .GetAwaiter()
+            .GetResult();
+        Require(increasedQuantityResult.FailureKind == LiveAcquisitionFailureKind.ListingUnavailable
+            && increasedQuantity.MarketPurchaseCalls == 0,
+            "a replan that increases an originally estimated purchase quantity must hard-fail before purchase submission");
+
         var higherPrice = new FakeEnvironment
         {
             Listings = new[] { new LiveMarketListing(4, 400, 10, "World A", 1, 20, 0, false) },
@@ -851,11 +1083,11 @@ internal static class LiveAcquisitionAcceptanceTests
                     };
                     return Task.FromResult<AcquisitionPlanningResult?>(Ready(new AcquisitionPlan
                     {
-                        // New listing/source ID, but the original required
-                        // quantity remains two after the first purchase.
+                        // The fresh global plan is based on current inventory,
+                        // so only the one still-missing item remains.
                         Transactions = new[]
                         {
-                            Transaction(14, AcquisitionSourceKind.Market, 10, "World A", 10, quantity: 2, sourceId: "1402"),
+                            Transaction(14, AcquisitionSourceKind.Market, 10, "World A", 5, sourceId: "1402"),
                         },
                     }));
                 })
@@ -905,7 +1137,7 @@ internal static class LiveAcquisitionAcceptanceTests
             {
                 Transactions = new[]
                 {
-                    Transaction(15, AcquisitionSourceKind.Market, 10, "World A", 40, quantity: 40, sourceId: "1500"),
+                    Transaction(15, AcquisitionSourceKind.Market, 10, "World A", 50, quantity: 50, sourceId: "1500"),
                 },
                 // The selected source is a 50-item atomic stack, but the
                 // dependency demand remains exactly 40. The first listing is
@@ -920,32 +1152,28 @@ internal static class LiveAcquisitionAcceptanceTests
             && staleAtomicStack.MarketPurchaseCalls == 1,
             "a stale 50-item atomic selection must not turn a replanned 40-item demand into a required 50");
 
-        var atomicOverbuy = new FakeEnvironment
+        var largerReplacement = new FakeEnvironment
         {
             Listings = new[]
             {
                 new LiveMarketListing(13, 1300, 10, "World A", 50, 1, 0, false),
-                new LiveMarketListing(19, 1900, 10, "World A", 1, 5, 0, false),
             },
         };
-        var atomicOverbuyResult = new LiveAcquisitionExecutor(
-                atomicOverbuy,
+        var largerReplacementResult = new LiveAcquisitionExecutor(
+                largerReplacement,
                 new LiveAcquisitionOptions { MaximumGilSpend = 55 })
             .ExecuteAsync(Ready(new AcquisitionPlan
             {
                 Transactions = new[]
                 {
-                    Transaction(13, AcquisitionSourceKind.Market, 10, "World A", 40, quantity: 40),
-                    Transaction(19, AcquisitionSourceKind.Market, 10, "World A", 5),
+                    Transaction(13, AcquisitionSourceKind.Market, 10, "World A", 40, quantity: 40, sourceId: "1300"),
                 },
             }))
             .GetAwaiter()
             .GetResult();
-        Require(atomicOverbuyResult.Status == LiveAcquisitionStatus.Completed
-            && atomicOverbuyResult.PurchasedQuantities[13] == 50
-            && atomicOverbuyResult.PurchasedQuantities[19] == 1
-            && atomicOverbuy.MarketPurchaseCalls == 2,
-            "a larger market stack may overbuy only when the complete atomic stack fits its global reservation");
+        Require(largerReplacementResult.Status != LiveAcquisitionStatus.Completed
+            && largerReplacement.MarketPurchaseCalls == 0,
+            "a larger live stack must never replace the exact estimated stack, even when it fits the global Gil cap");
 
         var atomicReservation = new FakeEnvironment
         {
@@ -983,8 +1211,8 @@ internal static class LiveAcquisitionAcceptanceTests
             {
                 Transactions = new[]
                 {
-                    Transaction(18, AcquisitionSourceKind.Market, 10, "World A", 5, quantity: 5, isHq: true),
-                    Transaction(18, AcquisitionSourceKind.Market, 10, "World A", 5, quantity: 5),
+                    Transaction(18, AcquisitionSourceKind.Market, 10, "World A", 8, quantity: 8, sourceId: "1800", isHq: true),
+                    Transaction(18, AcquisitionSourceKind.Market, 10, "World A", 2, quantity: 2, sourceId: "1801"),
                 },
             }))
             .GetAwaiter()
@@ -993,7 +1221,7 @@ internal static class LiveAcquisitionAcceptanceTests
             && hqAllocationResult.PurchasedQuantities[18] == 10
             && hqAllocation.PurchasedListingIds.Contains(1800)
             && hqAllocation.PurchasedListingIds.Contains(1801),
-            "prior HQ overbuy must satisfy hard-HQ first and only its remainder may satisfy ordinary quantity");
+            "the executor must buy only the exact HQ and NQ stacks selected by the estimate");
 
         var hqFallback = new FakeEnvironment
         {
@@ -1008,13 +1236,13 @@ internal static class LiveAcquisitionAcceptanceTests
                 new LiveAcquisitionOptions { PreferHQ = true })
             .ExecuteAsync(Ready(new AcquisitionPlan
             {
-                Transactions = new[] { Transaction(8, AcquisitionSourceKind.Market, 10, "World A", 5) },
+                Transactions = new[] { Transaction(8, AcquisitionSourceKind.Market, 10, "World A", 5, sourceId: "801") },
             }))
             .GetAwaiter()
             .GetResult();
         Require(hqFallbackResult.Status == LiveAcquisitionStatus.Completed
             && hqFallback.PurchasedListingIds.Contains(801),
-            "PreferHQ must fall back to an affordable NQ listing when HQ is not required");
+            "execution must retain the affordable NQ listing selected by the estimate");
 
         var hqAllowed = new FakeEnvironment
         {
@@ -1027,7 +1255,7 @@ internal static class LiveAcquisitionAcceptanceTests
         var hqAllowedResult = new LiveAcquisitionExecutor(hqAllowed)
             .ExecuteAsync(Ready(new AcquisitionPlan
             {
-                Transactions = new[] { Transaction(12, AcquisitionSourceKind.Market, 10, "World A", 5) },
+                Transactions = new[] { Transaction(12, AcquisitionSourceKind.Market, 10, "World A", 5, isHq: true) },
             }))
             .GetAwaiter()
             .GetResult();
@@ -1105,6 +1333,25 @@ internal static class LiveAcquisitionAcceptanceTests
             && cancelled.CleanupCalls == 1,
             "cancellation after submit must preserve indeterminate state and clean up");
 
+        var stoppedAwayFromHome = new FakeEnvironment
+        {
+            ApplyWorldTravel = true,
+            BlockMarketNavigationUntilCancellation = true,
+        };
+        var stoppedExecutor = new LiveAcquisitionExecutor(stoppedAwayFromHome);
+        var stoppedExecution = stoppedExecutor.ExecuteAsync(Ready(new AcquisitionPlan
+        {
+            Transactions = new[] { Transaction(10, AcquisitionSourceKind.Market, 20, "World B", 5) },
+        }));
+        Require(stoppedAwayFromHome.MarketNavigationStarted.Task.Wait(TimeSpan.FromSeconds(1)),
+            "the cancellation fixture must reach destination-world market navigation");
+        stoppedExecutor.StopAsync().GetAwaiter().GetResult();
+        var stoppedResult = stoppedExecution.GetAwaiter().GetResult();
+        Require(stoppedResult.Status == LiveAcquisitionStatus.Cancelled
+            && stoppedAwayFromHome.CleanupCalls == 1
+            && stoppedAwayFromHome.TravelWorldIds.SequenceEqual(new[] { 20u }),
+            "stopping acquisition away from home must clean up without initiating uncancellable return travel");
+
         var stale = new FakeEnvironment { ListingsFresh = false };
         var vendorReplacement = Ready(new AcquisitionPlan
         {
@@ -1124,11 +1371,36 @@ internal static class LiveAcquisitionAcceptanceTests
     }
 
     private static AcquisitionPlanningResult Ready(AcquisitionPlan plan)
-        => new()
+    {
+        var transactionGil = plan.Transactions.Sum(transaction => System.Math.Max(0, transaction.GilCost));
+        if (plan.Estimate.TotalGil == 0 && transactionGil > 0)
+        {
+            var taxGil = plan.Transactions.Sum(transaction => System.Math.Max(0, transaction.TaxGilCost));
+            plan = new AcquisitionPlan
+            {
+                Transactions = plan.Transactions,
+                Estimate = new AcquisitionEstimate
+                {
+                    TotalGil = transactionGil,
+                    TotalPurchaseGil = System.Math.Max(0, transactionGil - taxGil),
+                    TotalTaxGil = taxGil,
+                    TotalOverbuy = plan.Estimate.TotalOverbuy,
+                    Currencies = plan.Estimate.Currencies,
+                    WorldGroups = plan.Estimate.WorldGroups,
+                },
+                RequiredQuantities = plan.RequiredQuantities,
+                RequiredHqQuantities = plan.RequiredHqQuantities,
+                RequiredNqQuantities = plan.RequiredNqQuantities,
+                PurchasedQuantities = plan.PurchasedQuantities,
+            };
+        }
+
+        return new AcquisitionPlanningResult
         {
             Status = AcquisitionPlanStatus.Ready,
             SelectedPlan = plan,
         };
+    }
 
     private static AcquisitionTransaction Transaction(
         uint itemId,
@@ -1144,7 +1416,9 @@ internal static class LiveAcquisitionAcceptanceTests
             ItemId = itemId,
             ItemName = $"Item {itemId}",
             SourceKind = source,
-            SourceId = sourceId ?? itemId.ToString(),
+            SourceId = sourceId ?? (source == AcquisitionSourceKind.Market
+                ? checked(itemId * 100L).ToString()
+                : itemId.ToString()),
             SourceName = source == AcquisitionSourceKind.Market ? "Marketboard" : "Vendor",
             WorldId = worldId,
             WorldName = worldName,
@@ -1155,14 +1429,17 @@ internal static class LiveAcquisitionAcceptanceTests
 
     private sealed class FakeEnvironment : ILiveAcquisitionEnvironment
     {
-        public uint CurrentWorldId => 10;
+        public uint SimulatedCurrentWorldId { get; set; } = 10;
+        public uint CurrentWorldId => SimulatedCurrentWorldId;
         public string CurrentWorldName => "World A";
         public bool IsLifestreamAvailable => true;
         public bool IsVNavmeshAvailable => true;
         public bool IsMarketAutomationAvailable => true;
         public bool IsVendorAutomationAvailable => true;
+        public bool IsAtMarketBoard { get; init; }
         public bool IsInDuty => false;
         public bool IsInNonCrossWorldParty => false;
+        public uint CurrentGatewayId => 0;
         public IReadOnlyList<LiveMarketListing> Listings { get; init; } = Array.Empty<LiveMarketListing>();
         public int? MarketQuantityOverride { get; init; }
         public uint? MarketItemIdOverride { get; init; }
@@ -1192,12 +1469,18 @@ internal static class LiveAcquisitionAcceptanceTests
         public IReadOnlyList<LiveMarketListing>? ReplanListings { get; set; }
         public int ListingsRequestCalls { get; private set; }
         public bool ThrowCancellationAfterSubmit { get; init; }
+        public TaskCompletionSource<bool>? TravelCompletion { get; init; }
+        public bool ApplyWorldTravel { get; init; }
+        public bool BlockMarketNavigationUntilCancellation { get; init; }
+        public TaskCompletionSource<bool> MarketNavigationStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public List<uint> TravelWorldIds { get; } = new();
         public int MarketPurchaseCalls { get; private set; }
         public int VendorPurchaseCalls { get; private set; }
         public TimeSpan? LastVendorNavigationTimeout { get; private set; }
         public int CleanupCalls { get; private set; }
         public AcquisitionWorldRoute? LastMarketRoute { get; private set; }
         public HashSet<long> PurchasedListingIds { get; } = new();
+        public List<string> ActionOrder { get; } = new();
 
         public bool CanVisitWorld(uint worldId) => true;
         public bool IsGatewayAttuned(uint gatewayId) => true;
@@ -1207,13 +1490,26 @@ internal static class LiveAcquisitionAcceptanceTests
         public LiveAcquisitionPreconditionResult ValidatePlan(AcquisitionPlan plan, LiveAcquisitionOptions options)
             => new(true);
 
-        public Task<bool> TravelToWorldAsync(AcquisitionWorldRoute route, TimeSpan timeout, CancellationToken cancellationToken)
-            => Task.FromResult(true);
-
-        public Task<bool> NavigateToMarketBoardAsync(AcquisitionWorldRoute route, TimeSpan timeout, CancellationToken cancellationToken)
+        public async Task<bool> TravelToWorldAsync(AcquisitionWorldRoute route, TimeSpan timeout, CancellationToken cancellationToken)
         {
+            TravelWorldIds.Add(route.WorldId);
+            if (TravelCompletion != null)
+                return await TravelCompletion.Task.WaitAsync(cancellationToken);
+            if (ApplyWorldTravel)
+                SimulatedCurrentWorldId = route.WorldId;
+            return true;
+        }
+
+        public async Task<bool> NavigateToMarketBoardAsync(AcquisitionWorldRoute route, TimeSpan timeout, CancellationToken cancellationToken)
+        {
+            ActionOrder.Add("market");
             LastMarketRoute = route;
-            return Task.FromResult(true);
+            if (BlockMarketNavigationUntilCancellation)
+            {
+                MarketNavigationStarted.TrySetResult(true);
+                await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            }
+            return true;
         }
 
         public Task<LiveMarketListingsResponse> RequestLiveListingsAsync(uint itemId, TimeSpan timeout, CancellationToken cancellationToken)
@@ -1228,6 +1524,7 @@ internal static class LiveAcquisitionAcceptanceTests
 
         public Task<LiveMarketPurchaseResult> PurchaseMarketListingAsync(LiveMarketListing listing, TimeSpan timeout, CancellationToken cancellationToken)
         {
+            ActionOrder.Add("market");
             MarketPurchaseCalls++;
             PurchasedListingIds.Add(listing.ListingId);
             if (ThrowCancellationAfterSubmit)
@@ -1248,6 +1545,7 @@ internal static class LiveAcquisitionAcceptanceTests
 
         public Task<LiveVendorPurchaseResult> PurchaseVendorAsync(AcquisitionTransaction transaction, TimeSpan navigationTimeout, CancellationToken cancellationToken)
         {
+            ActionOrder.Add("vendor");
             VendorPurchaseCalls++;
             LastVendorNavigationTimeout = navigationTimeout;
             var beforeSnapshot = VendorCurrencyBefore.ToDictionary(pair => pair.Key, pair => pair.Value);

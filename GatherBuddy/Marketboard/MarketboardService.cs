@@ -17,7 +17,7 @@ public sealed class MarketboardService : IDisposable
     private const string HistoryFile     = "mb_history.json";
 
     private sealed record PersistedEntry(uint ItemId, string Name, uint IconId);
-    private sealed record SearchIndexEntry(uint ItemId, string Name, uint IconId, string NormalizedName);
+    private sealed record SearchIndexEntry(uint ItemId, string Name, uint IconId, string NormalizedName, bool IsMarketable);
     private sealed class LookupOperation
     {
         public LookupOperation(CancellationTokenSource cancellation)
@@ -78,6 +78,26 @@ public sealed class MarketboardService : IDisposable
     public bool IsPending(uint itemId, string scope) { lock (_lock) return _pending.Contains((itemId, scope)); }
     public bool HasError(uint itemId,  string scope) { lock (_lock) return _errors.Contains((itemId, scope));  }
 
+    /// <summary>
+    /// Returns true only when the game data explicitly identifies the item as
+    /// unavailable on the marketboard. If the item sheet cannot be read, keep
+    /// the result eligible so transient game-data startup does not suppress a
+    /// legitimate lookup.
+    /// </summary>
+    public bool IsKnownUnmarketable(uint itemId)
+    {
+        try
+        {
+            var itemSheet = Dalamud.GameData.GetExcelSheet<Item>();
+            return itemSheet?.TryGetRow(itemId, out var item) == true
+                && (item.IsUntradable || item.ItemSearchCategory.RowId == 0);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     public MarketItemData? GetCached(uint itemId, string scope)
     {
         lock (_lock)
@@ -107,7 +127,7 @@ public sealed class MarketboardService : IDisposable
         lock (_lock) return new List<uint>(_history);
     }
 
-    public List<MarketSearchResult> SearchItems(string query, int limit = 50)
+    public List<MarketSearchResult> SearchItems(string query, int limit = 50, bool includeNonMarketable = false)
     {
         var normalized = SearchTextNormalizer.Normalize(query);
         if (string.IsNullOrEmpty(normalized) || limit <= 0)
@@ -118,6 +138,8 @@ public sealed class MarketboardService : IDisposable
         {
             foreach (var item in GetSearchIndex())
             {
+                if (!includeNonMarketable && !item.IsMarketable)
+                    continue;
                 var score = FuzzySearch.Score(item.NormalizedName, new[] { normalized });
                 if (score.HasValue)
                     results.Add(new MarketSearchResult(item.ItemId, item.Name, item.IconId, score.Value));
@@ -159,7 +181,7 @@ public sealed class MarketboardService : IDisposable
                 var entries = new List<SearchIndexEntry>();
                 foreach (var item in itemSheet)
                 {
-                    if (item.RowId == 0 || item.IsUntradable || item.ItemSearchCategory.RowId == 0)
+                    if (item.RowId == 0)
                         continue;
                     var name = item.Name.ExtractText();
                     if (string.IsNullOrWhiteSpace(name))
@@ -168,7 +190,8 @@ public sealed class MarketboardService : IDisposable
                         item.RowId,
                         name,
                         (uint)item.Icon,
-                        SearchTextNormalizer.Normalize(name)));
+                        SearchTextNormalizer.Normalize(name),
+                        !item.IsUntradable && item.ItemSearchCategory.RowId != 0));
                 }
 
                 _searchIndex = entries.AsReadOnly();
@@ -324,16 +347,23 @@ public sealed class MarketboardService : IDisposable
     private async Task<MarketItemData?> FetchMarketItemAsync(uint itemId, string scope, bool canBeHq, CancellationToken ct)
     {
         if (!canBeHq)
-            return (await _universalis.GetMarketDataAsync(scope, new[] { itemId }, 20, ct)).FirstOrDefault();
+        {
+            var fetch = await _universalis.GetMarketDataWithStatusAsync(scope, new[] { itemId }, 20, ct);
+            if (fetch.HadApiError && fetch.Items.Count == 0)
+                return null;
+            return fetch.Items.FirstOrDefault() ?? new MarketItemData { ItemId = itemId };
+        }
 
-        var nqRes = await _universalis.GetMarketDataAsync(scope, new[] { itemId }, 10, ct, false);
+        var nqFetch = await _universalis.GetMarketDataWithStatusAsync(scope, new[] { itemId }, 10, ct, false);
         await Task.Delay(300, ct);
-        var hqRes = await _universalis.GetMarketDataAsync(scope, new[] { itemId }, 10, ct, true);
-        var nqData = nqRes.FirstOrDefault(result => result.ItemId == itemId);
-        var hqData = hqRes.FirstOrDefault(result => result.ItemId == itemId);
+        var hqFetch = await _universalis.GetMarketDataWithStatusAsync(scope, new[] { itemId }, 10, ct, true);
+        var nqData = nqFetch.Items.FirstOrDefault(result => result.ItemId == itemId);
+        var hqData = hqFetch.Items.FirstOrDefault(result => result.ItemId == itemId);
+        if (nqData == null && hqData == null && nqFetch.HadApiError && hqFetch.HadApiError)
+            return null;
         var baseData = nqData ?? hqData;
         return baseData == null
-            ? null
+            ? new MarketItemData { ItemId = itemId }
             : new MarketItemData
             {
                 ItemId = baseData.ItemId,

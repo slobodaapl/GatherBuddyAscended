@@ -178,8 +178,8 @@ namespace GatherBuddy.AutoGather
         internal IEnumerable<GatherTarget> ItemsToGather
             => _activeItemList;
 
-        internal bool TryGetCachedGatherTarget(IGatherable item, uint completionItemId, out GatherTarget target)
-            => _activeItemList.TryGetCachedTarget(item, completionItemId, out target);
+        internal bool TryGetCurrentGatherTarget(IGatherable item, uint completionItemId, out GatherTarget target)
+            => _activeItemList.TryGetCurrentTarget(item, completionItemId, out target);
 
         internal ReadOnlyDictionary<GatheringNode, TimeInterval> DebugVisitedTimedLocations
             => _activeItemList.DebugVisitedTimedLocations;

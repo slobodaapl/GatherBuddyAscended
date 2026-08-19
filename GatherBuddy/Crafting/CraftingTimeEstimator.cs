@@ -70,6 +70,7 @@ public static class CraftingTimeEstimator
         {
             case VulcanSolverMode.PureRaphael:
             case VulcanSolverMode.Donatello:
+            case VulcanSolverMode.Gabriel:
                 return ResolveRaphaelActionCount(craft);
             case VulcanSolverMode.StandardSolver:
                 if (SupportsStandardSolver(craft))
@@ -170,6 +171,7 @@ public static class CraftingTimeEstimator
         {
             case VulcanSolverMode.PureRaphael:
             case VulcanSolverMode.Donatello:
+            case VulcanSolverMode.Gabriel:
                 if (TryGetRaphaelSolution(craft, out var raphaelSolution))
                 {
                     fallbackKey = $"raphael/{raphaelSolution.Key}/{raphaelSolution.GeneratedAt.Ticks}";

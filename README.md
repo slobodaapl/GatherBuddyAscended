@@ -37,22 +37,37 @@ quality-of-life work, and future features beyond the Reborn baseline.
 
 ### Donatello benchmark
 
-We replayed Raphael plans, injected every supported observed condition at every action boundary,
-and asked Donatello to optimize the same remaining craft.
+Each craft is simulated on the same plugin path the game uses. Raphael produces an initial
+plan and plays it through to the end. Donatello starts from that same plan and searches from
+the live state when the craft's condition leaves Normal, keeping a replacement only when it
+is strictly better (higher quality, then fewer steps, then shorter duration).
 
-![Donatello effectiveness grows with recipe level](images/donatello-effectiveness.png)
+The corpus is ten random regular recipes in each level band from 1–10 through 91–100, using
+crafter stats from that band, plus ten dedicated level-100 regular crafts and ten expert
+crafts in each of the 80–90, 91–99, and level-100 bands. Both solvers see the same action
+and condition rolls.
 
-Across every tested level bracket, Donatello had a non-zero chance of finding a better continuation.
-Its measured effectiveness rises with recipe difficulty (linear fit $`R^2 = 0.86`$), so the benefit is
-expected to grow as the game adds higher-level recipes. At level 100, Donatello found a strictly
-better solution in approximately 55% of simulated replan opportunities.
+![Donatello improvement rate by recipe level](images/donatello-effectiveness.png)
 
-| Corpus | Scenarios | Better plans | Equivalent plans | Worse plans | Solver failures |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| Quick | 270 | 97 | 161 | 12 | 0 |
-| Full action set | 189 | 55 | 133 | 1 | 0 |
+| Level | Better | Tied | Win rate |
+| --- | ---: | ---: | ---: |
+| 1–10 | 5 | 5 | 50% |
+| 11–20 | 6 | 4 | 60% |
+| 21–30 | 3 | 7 | 30% |
+| 31–40 | 5 | 5 | 50% |
+| 41–50 | 4 | 6 | 40% |
+| 51–60 | 4 | 6 | 40% |
+| 61–70 | 8 | 2 | 80% |
+| 71–80 | 6 | 4 | 60% |
+| 81–90 | 7 | 3 | 70% |
+| 91–100 | 8 | 2 | 80% |
+| 100 | 10 | 0 | 100% |
+| Expert 80–90 | 10 | 0 | 100% |
+| Expert 90–99 | 10 | 0 | 100% |
+| Expert 100 | 10 | 0 | 100% |
 
-Every selected Donatello plan completed its craft. Worse plans are discarded and replaced by standard solve any time they're detected, as such it's safe and cannot fail. The benchmark is reproducible from the [`donatello-bench`](donatello/donatello-bench) crate.
+Regular recipes improve more often at higher levels. Expert crafts are the diamonds on the
+graph.
 
 ## Direction
 

@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 using System.Net.Http;
 using System.Text.Json;
 using System.Threading;
@@ -21,6 +22,10 @@ public sealed class UniversalisService : IDisposable
     private readonly HttpClient      _http;
     private readonly SemaphoreSlim    _throttle = new(3, 3);
 
+    public sealed record MarketDataFetchResult(
+        IReadOnlyList<MarketItemData> Items,
+        bool HadApiError);
+
     public UniversalisService()
     {
         _http = new HttpClient { Timeout = TimeSpan.FromMilliseconds(RequestTimeoutMs) };
@@ -29,10 +34,15 @@ public sealed class UniversalisService : IDisposable
 
     public async Task<List<MarketItemData>> GetMarketDataAsync(
         string worldOrDc, IReadOnlyList<uint> itemIds, int listingCount = 20, CancellationToken ct = default, bool? hqFilter = null)
+        => (await GetMarketDataWithStatusAsync(worldOrDc, itemIds, listingCount, ct, hqFilter).ConfigureAwait(false)).Items.ToList();
+
+    public async Task<MarketDataFetchResult> GetMarketDataWithStatusAsync(
+        string worldOrDc, IReadOnlyList<uint> itemIds, int listingCount = 20, CancellationToken ct = default, bool? hqFilter = null)
     {
-        if (itemIds.Count == 0) return new();
+        if (itemIds.Count == 0) return new(Array.Empty<MarketItemData>(), false);
 
         var results = new List<MarketItemData>();
+        var hadApiError = false;
 
         for (var i = 0; i < itemIds.Count; i += MaxItemsPerBatch)
         {
@@ -61,7 +71,6 @@ public sealed class UniversalisService : IDisposable
                     await Task.Delay(delay, ct);
                 }
 
-                var countBefore = results.Count;
                 var (json, statusCode) = await FetchWithStatusAsync(url, ct);
                 if (json != null)
                 {
@@ -72,6 +81,9 @@ public sealed class UniversalisService : IDisposable
 
                 GatherBuddy.Log.Warning(
                     $"[Marketboard] Batch {i / MaxItemsPerBatch} attempt {attempt}: HTTP {statusCode}. IDs: {sb}");
+
+                if (statusCode != 404)
+                    hadApiError = true;
 
                 if (statusCode == 404) break;
             }
@@ -84,16 +96,20 @@ public sealed class UniversalisService : IDisposable
                     await Task.Delay(InterBatchDelayMs, ct);
 
                     var singleUrl = string.Concat(BaseUrl, "/", worldOrDc, "/", itemIds[j].ToString(), $"?listings={listingCount}&entries=0{hqParam}");
-                    var (singleJson, _) = await FetchWithStatusAsync(singleUrl, ct);
+                    var (singleJson, singleStatusCode) = await FetchWithStatusAsync(singleUrl, ct);
                     if (singleJson != null)
                     {
                         ParseMarketResponse(singleJson, results);
+                    }
+                    else if (singleStatusCode != 404)
+                    {
+                        hadApiError = true;
                     }
                 }
             }
         }
 
-        return results;
+        return new MarketDataFetchResult(results, hadApiError);
     }
 
     private async Task<(string? Json, int StatusCode)> FetchWithStatusAsync(string url, CancellationToken ct)
@@ -169,11 +185,15 @@ public sealed class UniversalisService : IDisposable
         if (itemId == 0) return null;
 
         var listings = new List<MarketListing>();
+        var responseWorldId = GetUInt(el, "worldID");
+        var responseWorldName = GetString(el, "worldName");
         if (el.TryGetProperty("listings", out var listingsEl) &&
             listingsEl.ValueKind == JsonValueKind.Array)
         {
             foreach (var entry in listingsEl.EnumerateArray())
             {
+                var listingWorldId = GetUInt(entry, "worldID");
+                var listingWorldName = GetString(entry, "worldName");
                 listings.Add(new MarketListing
                 {
                     ListingId   = GetULong(entry, "listingID"),
@@ -181,8 +201,8 @@ public sealed class UniversalisService : IDisposable
                     PricePerUnit = GetInt(entry, "pricePerUnit"),
                     Quantity     = GetInt(entry, "quantity"),
                     IsHq         = GetBool(entry, "hq") ?? false,
-                    WorldId      = GetUInt(entry, "worldID"),
-                    WorldName    = GetString(entry, "worldName"),
+                    WorldId      = listingWorldId != 0 ? listingWorldId : responseWorldId,
+                    WorldName    = string.IsNullOrWhiteSpace(listingWorldName) ? responseWorldName : listingWorldName,
                     TotalTax     = GetLong(entry, "tax", "totalTax"),
                     TownId       = GetInt(entry, "retainerCity"),
                     IsMannequin  = GetBool(entry, "onMannequin"),

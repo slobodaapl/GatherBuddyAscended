@@ -208,6 +208,30 @@ public static class RaphaelAssessmentService
         CraftingExecutionContext executionContext,
         out RaphaelAssessment assessment)
     {
+        if (executionContext.EffectiveSolverMode == VulcanSolverMode.Gabriel)
+        {
+            var available = GabrielAssessmentService.TryAssessExecutionContext(
+                recipe,
+                executionContext,
+                queue: false,
+                out var gabrielAssessment);
+            assessment = new RaphaelAssessment(
+                gabrielAssessment.State switch
+                {
+                    GabrielAssessmentState.Unavailable => RaphaelAssessmentState.Unavailable,
+                    GabrielAssessmentState.NotGenerated => RaphaelAssessmentState.NotGenerated,
+                    GabrielAssessmentState.Generating => RaphaelAssessmentState.Generating,
+                    GabrielAssessmentState.Failed => RaphaelAssessmentState.Failed,
+                    GabrielAssessmentState.Ready => RaphaelAssessmentState.Ready,
+                    _ => RaphaelAssessmentState.Unavailable,
+                },
+                RaphaelAssessmentOutcome.None,
+                gabrielAssessment.Summary,
+                gabrielAssessment.Details,
+                SolverName: "Gabriel");
+            return available;
+        }
+
         var solverName = executionContext.EffectiveSolverMode == VulcanSolverMode.Donatello
             ? "Donatello"
             : "Raphael";

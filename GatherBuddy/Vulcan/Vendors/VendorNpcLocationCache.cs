@@ -120,6 +120,21 @@ public static class VendorNpcLocationCache
     public static VendorNpcLocation? TryGetFirstLocation(uint npcId)
         => _locations.TryGetValue(npcId, out var list) && list.Count > 0 ? list[0] : null;
 
+    public static VendorNpcLocation? TryGetPreferredLocation(uint npcId, uint preferredTerritoryId)
+        => SelectPreferredLocation(GetLocations(npcId), preferredTerritoryId);
+
+    internal static VendorNpcLocation? SelectPreferredLocation(
+        IReadOnlyList<VendorNpcLocation> locations,
+        uint preferredTerritoryId)
+    {
+        if (locations.Count == 0)
+            return null;
+        if (preferredTerritoryId == 0)
+            return locations[0];
+        return locations.FirstOrDefault(location => location.TerritoryId == preferredTerritoryId)
+            ?? locations[0];
+    }
+
     public static IReadOnlyList<VendorNpcLocation> GetLocations(uint npcId)
         => _locations.TryGetValue(npcId, out var list)
             ? list

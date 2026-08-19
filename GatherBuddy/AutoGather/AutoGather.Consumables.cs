@@ -181,14 +181,7 @@ namespace GatherBuddy.AutoGather
                 var cordialItemId = Player.Object != null
                     ? CordialSelector.Select(cordial, Player.Object.CurrentGp, Player.Object.MaxGp, GetInventoryItemCount)
                     : 0;
-                if (cordial.Enabled
-                    && cordialItemId > 0
-                    && !IsCordialOnCooldown
-                    && Player.Object != null
-                    && Player.Object.CurrentGp >= cordial.MinGP
-                    && (cordial.PreventGpOvercap || Player.Object.CurrentGp <= cordial.MaxGP)
-                    && Player.Object.CurrentGp < Player.Object.MaxGp
-                )
+                if (cordialItemId > 0 && !IsCordialOnCooldown)
                 {
                     EnqueueActionWithDelay(() => UseItem(cordialItemId));
                     return true;

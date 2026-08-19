@@ -23,16 +23,22 @@ public sealed class LiveAcquisitionExecutor : IDisposable
     private readonly Dictionary<uint, int> _purchasedQuantities = new();
     private readonly Dictionary<uint, int> _purchasedHqQuantities = new();
     private readonly Dictionary<uint, int> _purchasedNqQuantities = new();
+    private readonly Dictionary<uint, int> _currentPlanPurchasedQuantities = new();
+    private readonly Dictionary<uint, int> _currentPlanPurchasedHqQuantities = new();
+    private readonly Dictionary<uint, int> _currentPlanPurchasedNqQuantities = new();
     private readonly Dictionary<string, int> _purchasedByTransaction = new(StringComparer.Ordinal);
     private readonly Dictionary<string, long> _gilSpentByTransaction = new(StringComparer.Ordinal);
     private readonly Dictionary<uint, int> _requiredQuantities = new();
     private readonly Dictionary<uint, int> _requiredHqQuantities = new();
     private readonly Dictionary<uint, int> _requiredNqQuantities = new();
+    private readonly Dictionary<uint, int> _initialPlannedQuantities = new();
     private readonly Dictionary<uint, long> _currencySpent = new();
     private readonly List<LiveAcquisitionDiagnostic> _diagnostics = new();
     private CancellationTokenSource? _activeCancellation;
     private Task<LiveAcquisitionResult>? _activeExecution;
     private long _gilSpent;
+    private long _initialEstimatedGil;
+    private long _runGilCeiling;
     private bool _hasIndeterminatePurchases;
     private bool _requestSubmitted;
     private LiveAcquisitionResult? _currentResult;
@@ -95,6 +101,11 @@ public sealed class LiveAcquisitionExecutor : IDisposable
             if (initial != null)
                 return ReturnResult(initial);
 
+            var estimateEnvelopeFailure = CaptureInitialEstimateEnvelope(planning.SelectedPlan!);
+            if (estimateEnvelopeFailure != null)
+                return ReturnResult(estimateEnvelopeFailure);
+
+            BeginPlanGeneration();
             var currentPlanning = planning;
             TrackRequirements(currentPlanning.SelectedPlan!);
             var replanCount = 0;
@@ -175,6 +186,10 @@ public sealed class LiveAcquisitionExecutor : IDisposable
                 var replanValidation = ValidatePlanningResult(currentPlanning);
                 if (replanValidation != null)
                     return ReturnResult(replanValidation);
+                var replanEnvelopeFailure = ValidateReplanEstimateEnvelope(currentPlanning.SelectedPlan!);
+                if (replanEnvelopeFailure != null)
+                    return ReturnResult(replanEnvelopeFailure);
+                BeginPlanGeneration();
                 TrackRequirements(currentPlanning.SelectedPlan!);
                 AddDiagnostic(LiveAcquisitionStage.Market, $"Global acquisition plan refreshed after stale market data (attempt {replanCount}).");
                 vendorRecovery = true;
@@ -216,7 +231,8 @@ public sealed class LiveAcquisitionExecutor : IDisposable
             {
                 AddDiagnostic(Stage, $"Acquisition cleanup failed: {ex.Message}");
             }
-            await ReturnToStartWorldAfterFailureAsync(startWorldId, startWorldName);
+            if (!cancellationToken.IsCancellationRequested)
+                await ReturnToStartWorldAfterFailureAsync(startWorldId, startWorldName, cancellationToken);
             if (_currentResult != null)
                 _currentResult.Diagnostics = _diagnostics.ToArray();
             _activeCancellation = null;
@@ -296,9 +312,8 @@ public sealed class LiveAcquisitionExecutor : IDisposable
                 partial: _purchasedQuantities.Count > 0 || _hasIndeterminatePurchases));
         }
 
-        // Vendor transactions execute before market transactions regardless of
-        // their order in the planner. Keep one allocation ledger for this pass
-        // so prior same-item purchases cannot be counted twice after a replan.
+        // Keep one allocation ledger for this pass so same-item purchases in
+        // the current plan generation cannot satisfy multiple transactions.
         var allocatedItemQuantities = new Dictionary<uint, int>();
         var allocatedHqQuantities = new Dictionary<uint, int>();
         var allocatedNqQuantities = new Dictionary<uint, int>();
@@ -315,64 +330,35 @@ public sealed class LiveAcquisitionExecutor : IDisposable
             .Select((transaction, index) => (transaction, index))
             .Where(entry => entry.transaction.SourceKind == AcquisitionSourceKind.Vendor)
             .ToArray();
-        if (vendors.Length > 0)
+        var currentMarketRoutes = routePlan.Routes
+            .Where(route => route.IsCurrentWorld)
+            .ToArray();
+        var marketFirst = currentMarketRoutes.Length > 0 && _environment.IsAtMarketBoard;
+        if (!marketFirst && vendors.Length > 0)
         {
-            Stage = vendorRecovery ? LiveAcquisitionStage.VendorRecovery : LiveAcquisitionStage.Vendor;
-            foreach (var (transaction, transactionIndex) in vendors)
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-                var remaining = Remaining(plan, transaction, transactionIndex, allocatedItemQuantities, allocatedHqQuantities, allocatedNqQuantities, reservedHqQuantities, reservedNqQuantities);
-                if (remaining <= 0)
-                    continue;
-
-                _requestSubmitted = true;
-                LiveVendorPurchaseResult purchase;
-                try
-                {
-                    purchase = await _environment.PurchaseVendorAsync(
-                        WithQuantity(transaction, remaining),
-                        _options.TravelTimeout,
-                        cancellationToken);
-                }
-                catch (OperationCanceledException)
-                {
-                    _hasIndeterminatePurchases = true;
-                    AddDiagnostic(Stage, $"Vendor purchase request for {transaction.ItemName} may have been submitted; final state is indeterminate.", transaction.ItemId, transaction.ItemName, transaction.WorldName, transaction.GilCost);
-                    throw;
-                }
-                _requestSubmitted = false;
-                if (purchase.RequestSubmitted && !purchase.Verified)
-                    _hasIndeterminatePurchases = true;
-
-                var vendorFailure = ValidateVendorPurchase(transaction, transactionIndex, remaining, purchase);
-                if (vendorFailure != null)
-                {
-                    RecordKnownVendorPurchase(transaction, transactionIndex, purchase);
-                    return PassResult.Finished(Failure(
-                        purchase.Accepted ? LiveAcquisitionFailureKind.VerificationFailed : LiveAcquisitionFailureKind.PurchaseRejected,
-                        vendorFailure,
-                        Stage,
-                        transaction.ItemId,
-                        transaction.ItemName,
-                        transaction.WorldName,
-                        transaction.GilCost,
-                        null,
-                        null,
-                        _purchasedQuantities.Count > 0 || _hasIndeterminatePurchases));
-                }
-
-                var vendorGil = VendorGilSpent(purchase);
-                RecordPurchase(transaction, transactionIndex, purchase.QuantityPurchased, vendorGil,
-                    purchase.OutputQuantities, purchase.CurrencySpent, purchase.IsHq);
-                AddDiagnostic(Stage, purchase.Message, transaction.ItemId, transaction.ItemName, transaction.WorldName, transaction.GilCost, purchase.GilSpent);
-            }
+            var vendorPass = await ExecuteVendorTransactionsAsync(
+                plan,
+                vendors,
+                vendorRecovery,
+                allocatedItemQuantities,
+                allocatedHqQuantities,
+                allocatedNqQuantities,
+                reservedHqQuantities,
+                reservedNqQuantities,
+                cancellationToken);
+            if (vendorPass.Result != null)
+                return vendorPass;
         }
 
-        foreach (var route in routePlan.Routes)
+        var orderedRoutes = marketFirst
+            ? routePlan.Routes.OrderByDescending(route => route.IsCurrentWorld).ToArray()
+            : routePlan.Routes;
+        foreach (var route in orderedRoutes)
         {
             cancellationToken.ThrowIfCancellationRequested();
             if (route.IsWorldHop)
             {
+                Stage = LiveAcquisitionStage.Travel;
                 AddDiagnostic(Stage, $"Traveling to {route.WorldName} through {route.GatewayName}.", worldName: route.WorldName);
                 if (!await _environment.TravelToWorldAsync(route, _options.TravelTimeout, cancellationToken))
                 {
@@ -427,13 +413,11 @@ public sealed class LiveAcquisitionExecutor : IDisposable
 
                 var listings = listingsResponse.Listings;
                 var candidates = SelectListings(transaction, remaining, listings);
-                var otherReservation = RemainingOtherPlanGilReservation(plan, transactionIndex);
                 var listing = candidates.FirstOrDefault(candidate =>
                     CanPurchaseMarketListing(
                         transaction,
                         remaining,
-                        candidate,
-                        otherReservation));
+                        candidate));
                 if (listing == null)
                 {
                     await _environment.CloseMarketBoardAsync(cancellationToken);
@@ -442,8 +426,8 @@ public sealed class LiveAcquisitionExecutor : IDisposable
                         : (long?)null;
                     return PassResult.ReplanRequested(
                         candidates.Count == 0
-                            ? $"Live market listing for {transaction.ItemName} no longer satisfies the plan."
-                            : $"Live market price for {transaction.ItemName} exceeds its planned unit-price, transaction reservation, or global Gil reservation.",
+                            ? $"The exact planned market listing for {transaction.ItemName} is unavailable or changed."
+                            : $"The exact live market listing for {transaction.ItemName} exceeds its planned price, quantity, or original estimate ceiling.",
                         transaction.ItemId,
                         transaction.ItemName,
                         route.WorldName,
@@ -493,7 +477,6 @@ public sealed class LiveAcquisitionExecutor : IDisposable
                         transactionIndex,
                         remaining,
                         listing,
-                        otherReservation,
                         purchase,
                         allowUnderfill: true);
                     if (underfillFailure != null)
@@ -529,7 +512,6 @@ public sealed class LiveAcquisitionExecutor : IDisposable
                     transactionIndex,
                     remaining,
                     listing,
-                    otherReservation,
                     purchase);
                 if (marketFailure != null)
                 {
@@ -553,6 +535,86 @@ public sealed class LiveAcquisitionExecutor : IDisposable
             }
 
             await _environment.CloseMarketBoardAsync(cancellationToken);
+
+            if (marketFirst && route.IsCurrentWorld && vendors.Length > 0)
+            {
+                var vendorPass = await ExecuteVendorTransactionsAsync(
+                    plan,
+                    vendors,
+                    vendorRecovery,
+                    allocatedItemQuantities,
+                    allocatedHqQuantities,
+                    allocatedNqQuantities,
+                    reservedHqQuantities,
+                    reservedNqQuantities,
+                    cancellationToken);
+                if (vendorPass.Result != null)
+                    return vendorPass;
+            }
+        }
+
+        return PassResult.Finished(null);
+    }
+
+    private async Task<PassResult> ExecuteVendorTransactionsAsync(
+        AcquisitionPlan plan,
+        IReadOnlyList<(AcquisitionTransaction transaction, int index)> vendors,
+        bool vendorRecovery,
+        Dictionary<uint, int> allocatedItemQuantities,
+        Dictionary<uint, int> allocatedHqQuantities,
+        Dictionary<uint, int> allocatedNqQuantities,
+        IReadOnlyDictionary<uint, int> reservedHqQuantities,
+        IReadOnlyDictionary<uint, int> reservedNqQuantities,
+        CancellationToken cancellationToken)
+    {
+        Stage = vendorRecovery ? LiveAcquisitionStage.VendorRecovery : LiveAcquisitionStage.Vendor;
+        foreach (var (transaction, transactionIndex) in vendors)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var remaining = Remaining(plan, transaction, transactionIndex, allocatedItemQuantities, allocatedHqQuantities, allocatedNqQuantities, reservedHqQuantities, reservedNqQuantities);
+            if (remaining <= 0)
+                continue;
+
+            _requestSubmitted = true;
+            LiveVendorPurchaseResult purchase;
+            try
+            {
+                purchase = await _environment.PurchaseVendorAsync(
+                    WithQuantity(transaction, remaining),
+                    _options.TravelTimeout,
+                    cancellationToken);
+            }
+            catch (OperationCanceledException)
+            {
+                _hasIndeterminatePurchases = true;
+                AddDiagnostic(Stage, $"Vendor purchase request for {transaction.ItemName} may have been submitted; final state is indeterminate.", transaction.ItemId, transaction.ItemName, transaction.WorldName, transaction.GilCost);
+                throw;
+            }
+            _requestSubmitted = false;
+            if (purchase.RequestSubmitted && !purchase.Verified)
+                _hasIndeterminatePurchases = true;
+
+            var vendorFailure = ValidateVendorPurchase(transaction, transactionIndex, remaining, purchase);
+            if (vendorFailure != null)
+            {
+                RecordKnownVendorPurchase(transaction, transactionIndex, purchase);
+                return PassResult.Finished(Failure(
+                    purchase.Accepted ? LiveAcquisitionFailureKind.VerificationFailed : LiveAcquisitionFailureKind.PurchaseRejected,
+                    vendorFailure,
+                    Stage,
+                    transaction.ItemId,
+                    transaction.ItemName,
+                    transaction.WorldName,
+                    transaction.GilCost,
+                    null,
+                    null,
+                    _purchasedQuantities.Count > 0 || _hasIndeterminatePurchases));
+            }
+
+            var vendorGil = VendorGilSpent(purchase);
+            RecordPurchase(transaction, transactionIndex, purchase.QuantityPurchased, vendorGil,
+                purchase.OutputQuantities, purchase.CurrencySpent, purchase.IsHq);
+            AddDiagnostic(Stage, purchase.Message, transaction.ItemId, transaction.ItemName, transaction.WorldName, transaction.GilCost, purchase.GilSpent);
         }
 
         return PassResult.Finished(null);
@@ -611,7 +673,10 @@ public sealed class LiveAcquisitionExecutor : IDisposable
         return result;
     }
 
-    private async Task ReturnToStartWorldAfterFailureAsync(uint startWorldId, string startWorldName)
+    private async Task ReturnToStartWorldAfterFailureAsync(
+        uint startWorldId,
+        string startWorldName,
+        CancellationToken cancellationToken)
     {
         try
         {
@@ -621,10 +686,17 @@ public sealed class LiveAcquisitionExecutor : IDisposable
 
             Stage = LiveAcquisitionStage.ReturnToStartWorld;
             var route = new AcquisitionWorldRoute(startWorldId, startWorldName, 0, string.Empty, true, false);
-            if (await _environment.TravelToWorldAsync(route, _options.TravelTimeout, CancellationToken.None))
+            if (await _environment.TravelToWorldAsync(route, _options.TravelTimeout, cancellationToken))
                 AddDiagnostic(Stage, $"Returned to starting world {startWorldName} after acquisition failure.", worldName: startWorldName);
             else
                 AddDiagnostic(Stage, $"Acquisition failed and returning to {startWorldName} was unsuccessful.", worldName: startWorldName);
+        }
+        catch (OperationCanceledException)
+        {
+            AddDiagnostic(
+                LiveAcquisitionStage.Cancelled,
+                $"Cancelled automatic return to {startWorldName}.",
+                worldName: startWorldName);
         }
         catch (Exception ex)
         {
@@ -655,6 +727,7 @@ public sealed class LiveAcquisitionExecutor : IDisposable
             LifestreamAvailable = _environment.IsLifestreamAvailable,
             NonCrossWorldParty = _environment.IsInNonCrossWorldParty,
             TravelProhibited = _environment.IsInDuty,
+            CurrentGatewayId = _environment.CurrentGatewayId,
             CanVisitWorld = _environment.CanVisitWorld,
             IsGatewayAttuned = _environment.IsGatewayAttuned,
             GatewayTeleportCost = _environment.GetGatewayTeleportCost,
@@ -668,35 +741,36 @@ public sealed class LiveAcquisitionExecutor : IDisposable
     {
         if (remaining <= 0)
             return Array.Empty<LiveMarketListing>();
-
-        var requiredNqRemaining = _requiredNqQuantities.TryGetValue(transaction.ItemId, out var requiredNq)
-            && _purchasedNqQuantities.GetValueOrDefault(transaction.ItemId) < requiredNq;
+        if (!long.TryParse(transaction.SourceId, out var plannedListingId) || plannedListingId <= 0)
+            return Array.Empty<LiveMarketListing>();
 
         return listings
             .Where(listing => listing.ItemId == transaction.ItemId
+                && listing.ListingId == plannedListingId
                 && listing.Quantity > 0
-                && listing.Quantity >= remaining
+                && listing.Quantity == remaining
                 && !listing.IsMannequin
                 && !listing.IsSellingAsSet
                 && listing.WorldId != 0
-                && listing.WorldId == _environment.CurrentWorldId)
-            .Where(listing => !_options.CurrentWorldOnly || listing.WorldId == _environment.CurrentWorldId)
-            // IsHq and any still-unfulfilled hard NQ demand are hard
-            // requirements. PreferHQ only changes ordering; it must not
-            // silently reject a cheaper NQ listing when the plan did not
-            // require HQ.
-            .Where(listing => transaction.IsHq
-                ? listing.IsHq
-                : !requiredNqRemaining || !listing.IsHq)
-            .OrderBy(listing => _options.PreferHQ && !listing.IsHq)
-            .ThenBy(listing => listing.TotalGil)
+                && listing.WorldId == _environment.CurrentWorldId
+                && listing.IsHq == transaction.IsHq)
+            .OrderBy(listing => listing.TotalGil)
             .ThenBy(listing => listing.ListingId)
             .ToArray();
     }
 
     private bool WouldExceedBudget(long additionalGil)
-        => _options.MaximumGilSpend.HasValue
-            && additionalGil > _options.MaximumGilSpend.Value - _gilSpent;
+        => additionalGil < 0
+            || _gilSpent > _runGilCeiling
+            || additionalGil > _runGilCeiling - _gilSpent;
+
+    private bool WouldExceedInitialQuantity(uint itemId, int additionalQuantity)
+        => additionalQuantity < 0
+            || _purchasedQuantities.GetValueOrDefault(itemId)
+                > _initialPlannedQuantities.GetValueOrDefault(itemId)
+            || additionalQuantity
+                > _initialPlannedQuantities.GetValueOrDefault(itemId)
+                    - _purchasedQuantities.GetValueOrDefault(itemId);
 
     private bool IsLiveUnitCostHigher(AcquisitionTransaction transaction, LiveMarketListing listing)
     {
@@ -748,7 +822,7 @@ public sealed class LiveAcquisitionExecutor : IDisposable
                         var required = plan.RequiredQuantities.TryGetValue(output.Key, out var demand)
                             ? demand
                             : 0;
-                        var purchased = _purchasedQuantities.GetValueOrDefault(output.Key);
+                        var purchased = _currentPlanPurchasedQuantities.GetValueOrDefault(output.Key);
                         var allocated = AllocatedItem(output.Key);
                         var covered = System.Math.Max(purchased, allocated);
                         var missing = System.Math.Max(0, required - covered);
@@ -759,13 +833,13 @@ public sealed class LiveAcquisitionExecutor : IDisposable
                 var requiredHq = 0;
                 var hasRequiredHq = transaction.IsHq
                     && plan.RequiredHqQuantities.TryGetValue(transaction.ItemId, out requiredHq)
-                    && _purchasedHqQuantities.GetValueOrDefault(transaction.ItemId)
+                    && _currentPlanPurchasedHqQuantities.GetValueOrDefault(transaction.ItemId)
                         - AllocatedHq(transaction.ItemId)
                         < requiredHq;
                 var requiredNq = 0;
                 var hasRequiredNq = !transaction.IsHq
                     && plan.RequiredNqQuantities.TryGetValue(transaction.ItemId, out requiredNq)
-                    && _purchasedNqQuantities.GetValueOrDefault(transaction.ItemId)
+                    && _currentPlanPurchasedNqQuantities.GetValueOrDefault(transaction.ItemId)
                         - AllocatedNq(transaction.ItemId)
                         < requiredNq;
                 if (requiredOutput.Length == 0 && !hasRequiredHq && !hasRequiredNq)
@@ -787,7 +861,7 @@ public sealed class LiveAcquisitionExecutor : IDisposable
                     var hqMissing = System.Math.Max(
                         0,
                         requiredHq
-                        - _purchasedHqQuantities.GetValueOrDefault(transaction.ItemId)
+                        - _currentPlanPurchasedHqQuantities.GetValueOrDefault(transaction.ItemId)
                         + AllocatedHq(transaction.ItemId));
                     unitsNeeded = System.Math.Max(
                         unitsNeeded,
@@ -798,7 +872,7 @@ public sealed class LiveAcquisitionExecutor : IDisposable
                     var nqMissing = System.Math.Max(
                         0,
                         requiredNq
-                        - _purchasedNqQuantities.GetValueOrDefault(transaction.ItemId)
+                        - _currentPlanPurchasedNqQuantities.GetValueOrDefault(transaction.ItemId)
                         + AllocatedNq(transaction.ItemId));
                     unitsNeeded = System.Math.Max(
                         unitsNeeded,
@@ -822,7 +896,7 @@ public sealed class LiveAcquisitionExecutor : IDisposable
                     var hqMissing = System.Math.Max(
                         0,
                         requiredHq
-                        - _purchasedHqQuantities.GetValueOrDefault(transaction.ItemId)
+                        - _currentPlanPurchasedHqQuantities.GetValueOrDefault(transaction.ItemId)
                         + AllocatedHq(transaction.ItemId));
                     allocatedHqQuantities[transaction.ItemId] = checked(
                         AllocatedHq(transaction.ItemId)
@@ -833,7 +907,7 @@ public sealed class LiveAcquisitionExecutor : IDisposable
                     var nqMissing = System.Math.Max(
                         0,
                         requiredNq
-                        - _purchasedNqQuantities.GetValueOrDefault(transaction.ItemId)
+                        - _currentPlanPurchasedNqQuantities.GetValueOrDefault(transaction.ItemId)
                         + AllocatedNq(transaction.ItemId));
                     allocatedNqQuantities[transaction.ItemId] = checked(
                         AllocatedNq(transaction.ItemId)
@@ -851,20 +925,20 @@ public sealed class LiveAcquisitionExecutor : IDisposable
                 : 0;
             var availableHq = System.Math.Max(
                 0,
-                _purchasedHqQuantities.GetValueOrDefault(transaction.ItemId) - allocatedHq);
+                _currentPlanPurchasedHqQuantities.GetValueOrDefault(transaction.ItemId) - allocatedHq);
             covered = System.Math.Min(quantity, System.Math.Max(alreadyPurchasedForTransaction, availableHq));
             allocatedHqQuantities[transaction.ItemId] = checked(allocatedHq + quantity);
         }
         else if (plan.RequiredNqQuantities.TryGetValue(transaction.ItemId, out var requiredNq)
             && requiredNq > 0
-            && _purchasedNqQuantities.GetValueOrDefault(transaction.ItemId)
+            && _currentPlanPurchasedNqQuantities.GetValueOrDefault(transaction.ItemId)
                 - AllocatedNq(transaction.ItemId)
                 < requiredNq)
         {
             var allocatedNq = AllocatedNq(transaction.ItemId);
             var availableNq = System.Math.Max(
                 0,
-                _purchasedNqQuantities.GetValueOrDefault(transaction.ItemId) - allocatedNq);
+                _currentPlanPurchasedNqQuantities.GetValueOrDefault(transaction.ItemId) - allocatedNq);
             covered = System.Math.Min(quantity, System.Math.Max(alreadyPurchasedForTransaction, availableNq));
             allocatedNqQuantities[transaction.ItemId] = checked(allocatedNq + quantity);
         }
@@ -877,7 +951,7 @@ public sealed class LiveAcquisitionExecutor : IDisposable
                 reservedHqQuantities.TryGetValue(transaction.ItemId, out var reservedHq)
                     ? reservedHq
                     : 0,
-                _purchasedHqQuantities.GetValueOrDefault(transaction.ItemId));
+                _currentPlanPurchasedHqQuantities.GetValueOrDefault(transaction.ItemId));
             var allocatedHq = allocatedHqQuantities.TryGetValue(transaction.ItemId, out var allocatedHqValue)
                 ? allocatedHqValue
                 : 0;
@@ -887,13 +961,13 @@ public sealed class LiveAcquisitionExecutor : IDisposable
                     reservedNqQuantities.TryGetValue(transaction.ItemId, out var reservedNq)
                         ? reservedNq
                         : 0,
-                    _purchasedNqQuantities.GetValueOrDefault(transaction.ItemId))
+                    _currentPlanPurchasedNqQuantities.GetValueOrDefault(transaction.ItemId))
                 : 0;
             var allocatedNq = AllocatedNq(transaction.ItemId);
             var heldForNq = System.Math.Max(0, nqReserved - allocatedNq);
             var availableItem = System.Math.Max(
                 0,
-                _purchasedQuantities.GetValueOrDefault(transaction.ItemId)
+                _currentPlanPurchasedQuantities.GetValueOrDefault(transaction.ItemId)
                     - allocatedForItem
                     - heldForHq
                     - heldForNq);
@@ -907,29 +981,15 @@ public sealed class LiveAcquisitionExecutor : IDisposable
     private long RemainingTransactionReservation(AcquisitionTransaction transaction, int transactionIndex)
         => System.Math.Max(0, transaction.GilCost - _gilSpentByTransaction.GetValueOrDefault(TransactionIdentity(transaction, transactionIndex)));
 
-    private long RemainingOtherPlanGilReservation(AcquisitionPlan plan, int currentTransactionIndex)
-        => plan.Transactions
-            .Select((transaction, index) => (transaction, index))
-            .Where(entry => entry.index != currentTransactionIndex)
-            .Sum(entry => RemainingTransactionReservation(entry.transaction, entry.index));
-
     private bool CanPurchaseMarketListing(
         AcquisitionTransaction transaction,
         int remaining,
-        LiveMarketListing listing,
-        long otherReservation)
+        LiveMarketListing listing)
     {
-        if (listing.Quantity < remaining
-            || (listing.Quantity > remaining && !_options.MaximumGilSpend.HasValue)
+        if (listing.Quantity != remaining
             || IsLiveUnitCostHigher(transaction, listing)
+            || WouldExceedInitialQuantity(listing.ItemId, listing.Quantity)
             || WouldExceedBudget(listing.TotalGil))
-            return false;
-
-        // An overbuy consumes the complete listing. When a global cap exists,
-        // keep every other still-planned transaction's reservation intact.
-        if (_options.MaximumGilSpend.HasValue
-            && listing.Quantity > remaining
-            && checked(_gilSpent + listing.TotalGil + otherReservation) > _options.MaximumGilSpend.Value)
             return false;
 
         return true;
@@ -1110,7 +1170,6 @@ public sealed class LiveAcquisitionExecutor : IDisposable
         int transactionIndex,
         int remaining,
         LiveMarketListing listing,
-        long otherReservation,
         LiveMarketPurchaseResult purchase,
         bool allowUnderfill = false)
     {
@@ -1135,10 +1194,7 @@ public sealed class LiveAcquisitionExecutor : IDisposable
         if (gil > listing.TotalGil)
             return $"Market purchase Gil delta {gil:N0} exceeded the live listing total {listing.TotalGil:N0}.";
         var transactionReservation = RemainingTransactionReservation(transaction, transactionIndex);
-        var isAllowedAtomicOverbuy = listing.Quantity > remaining
-            && _options.MaximumGilSpend.HasValue
-            && checked(_gilSpent + gil + otherReservation) <= _options.MaximumGilSpend.Value;
-        if (gil > transactionReservation && !isAllowedAtomicOverbuy)
+        if (gil > transactionReservation)
             return $"Market purchase for {transaction.ItemName} exceeded its planned transaction reservation.";
         if (WouldExceedBudget(gil))
             return $"Market purchase for {transaction.ItemName} exceeded the remaining global Gil reservation.";
@@ -1269,12 +1325,16 @@ public sealed class LiveAcquisitionExecutor : IDisposable
                     continue;
                 _purchasedQuantities[output.Key] = checked(
                     _purchasedQuantities.GetValueOrDefault(output.Key) + output.Value);
+                _currentPlanPurchasedQuantities[output.Key] = checked(
+                    _currentPlanPurchasedQuantities.GetValueOrDefault(output.Key) + output.Value);
             }
         }
         else
         {
             _purchasedQuantities[transaction.ItemId] = checked(
                 _purchasedQuantities.GetValueOrDefault(transaction.ItemId) + normalizedQuantity);
+            _currentPlanPurchasedQuantities[transaction.ItemId] = checked(
+                _currentPlanPurchasedQuantities.GetValueOrDefault(transaction.ItemId) + normalizedQuantity);
         }
         var purchasedIsHqValue = purchasedIsHq ?? transaction.IsHq;
         if (outputs is { Count: > 0 })
@@ -1287,11 +1347,15 @@ public sealed class LiveAcquisitionExecutor : IDisposable
                 {
                     _purchasedHqQuantities[output.Key] = checked(
                         _purchasedHqQuantities.GetValueOrDefault(output.Key) + output.Value);
+                    _currentPlanPurchasedHqQuantities[output.Key] = checked(
+                        _currentPlanPurchasedHqQuantities.GetValueOrDefault(output.Key) + output.Value);
                 }
                 else
                 {
                     _purchasedNqQuantities[output.Key] = checked(
                         _purchasedNqQuantities.GetValueOrDefault(output.Key) + output.Value);
+                    _currentPlanPurchasedNqQuantities[output.Key] = checked(
+                        _currentPlanPurchasedNqQuantities.GetValueOrDefault(output.Key) + output.Value);
                 }
             }
         }
@@ -1299,11 +1363,15 @@ public sealed class LiveAcquisitionExecutor : IDisposable
         {
             _purchasedHqQuantities[transaction.ItemId] = checked(
                 _purchasedHqQuantities.GetValueOrDefault(transaction.ItemId) + normalizedQuantity);
+            _currentPlanPurchasedHqQuantities[transaction.ItemId] = checked(
+                _currentPlanPurchasedHqQuantities.GetValueOrDefault(transaction.ItemId) + normalizedQuantity);
         }
         else
         {
             _purchasedNqQuantities[transaction.ItemId] = checked(
                 _purchasedNqQuantities.GetValueOrDefault(transaction.ItemId) + normalizedQuantity);
+            _currentPlanPurchasedNqQuantities[transaction.ItemId] = checked(
+                _currentPlanPurchasedNqQuantities.GetValueOrDefault(transaction.ItemId) + normalizedQuantity);
         }
         var normalizedGil = System.Math.Max(0, gil);
         _gilSpentByTransaction[transactionId] = checked(_gilSpentByTransaction.GetValueOrDefault(transactionId) + normalizedGil);
@@ -1319,18 +1387,227 @@ public sealed class LiveAcquisitionExecutor : IDisposable
         Stage = LiveAcquisitionStage.Idle;
         _currentResult = null;
         _gilSpent = 0;
+        _initialEstimatedGil = 0;
+        _runGilCeiling = 0;
         _hasIndeterminatePurchases = false;
         _requestSubmitted = false;
         _purchasedQuantities.Clear();
         _purchasedHqQuantities.Clear();
         _purchasedNqQuantities.Clear();
+        _currentPlanPurchasedQuantities.Clear();
+        _currentPlanPurchasedHqQuantities.Clear();
+        _currentPlanPurchasedNqQuantities.Clear();
         _purchasedByTransaction.Clear();
         _gilSpentByTransaction.Clear();
         _requiredQuantities.Clear();
         _requiredHqQuantities.Clear();
         _requiredNqQuantities.Clear();
+        _initialPlannedQuantities.Clear();
         _currencySpent.Clear();
         _diagnostics.Clear();
+    }
+
+    private void BeginPlanGeneration()
+    {
+        _currentPlanPurchasedQuantities.Clear();
+        _currentPlanPurchasedHqQuantities.Clear();
+        _currentPlanPurchasedNqQuantities.Clear();
+        _purchasedByTransaction.Clear();
+        _gilSpentByTransaction.Clear();
+    }
+
+    private LiveAcquisitionResult? CaptureInitialEstimateEnvelope(AcquisitionPlan plan)
+    {
+        if (plan.Estimate.TotalGil < 0)
+        {
+            return Failure(
+                LiveAcquisitionFailureKind.InvalidPlan,
+                "The displayed acquisition estimate has a negative Gil total.",
+                LiveAcquisitionStage.Preconditions);
+        }
+        if (!TryValidateGilEstimate(plan, out var gilFailure))
+        {
+            return Failure(
+                LiveAcquisitionFailureKind.InvalidPlan,
+                gilFailure,
+                LiveAcquisitionStage.Preconditions);
+        }
+
+        _initialEstimatedGil = plan.Estimate.TotalGil;
+        _runGilCeiling = _options.MaximumGilSpend.HasValue
+            ? System.Math.Min(_initialEstimatedGil, System.Math.Max(0, _options.MaximumGilSpend.Value))
+            : _initialEstimatedGil;
+
+        if (!TryGetPlannedPurchaseQuantities(plan, out var quantities, out var failure))
+        {
+            return Failure(
+                LiveAcquisitionFailureKind.InvalidPlan,
+                failure,
+                LiveAcquisitionStage.Preconditions);
+        }
+
+        foreach (var quantity in quantities)
+            _initialPlannedQuantities[quantity.Key] = quantity.Value;
+        return null;
+    }
+
+    private LiveAcquisitionResult? ValidateReplanEstimateEnvelope(AcquisitionPlan plan)
+    {
+        if (plan.Estimate.TotalGil < 0)
+        {
+            return Failure(
+                LiveAcquisitionFailureKind.InvalidPlan,
+                "The refreshed acquisition estimate has a negative Gil total.",
+                LiveAcquisitionStage.Market,
+                partial: HasIrreversiblePurchasesObserved);
+        }
+        if (!TryValidateGilEstimate(plan, out var gilFailure))
+        {
+            return Failure(
+                LiveAcquisitionFailureKind.InvalidPlan,
+                gilFailure,
+                LiveAcquisitionStage.Market,
+                partial: HasIrreversiblePurchasesObserved);
+        }
+
+        if (_gilSpent > _runGilCeiling || plan.Estimate.TotalGil > _runGilCeiling - _gilSpent)
+        {
+            return Failure(
+                LiveAcquisitionFailureKind.GilBudgetExceeded,
+                $"The refreshed acquisition estimate would exceed the original displayed estimate "
+                + $"({_gilSpent:N0} spent + {plan.Estimate.TotalGil:N0} remaining > {_runGilCeiling:N0} Gil). "
+                + "No replacement purchase was submitted.",
+                LiveAcquisitionStage.Market,
+                partial: HasIrreversiblePurchasesObserved);
+        }
+
+        if (!TryGetPlannedPurchaseQuantities(plan, out var quantities, out var failure))
+        {
+            return Failure(
+                LiveAcquisitionFailureKind.InvalidPlan,
+                failure,
+                LiveAcquisitionStage.Market,
+                partial: HasIrreversiblePurchasesObserved);
+        }
+
+        foreach (var quantity in quantities)
+        {
+            var purchased = _purchasedQuantities.GetValueOrDefault(quantity.Key);
+            var initial = _initialPlannedQuantities.GetValueOrDefault(quantity.Key);
+            if (purchased > initial || quantity.Value > initial - purchased)
+            {
+                return Failure(
+                    LiveAcquisitionFailureKind.ListingUnavailable,
+                    $"The refreshed acquisition plan would increase the originally estimated quantity for item {quantity.Key:N0} "
+                    + $"({purchased:N0} purchased + {quantity.Value:N0} remaining > {initial:N0}). "
+                    + "No replacement purchase was submitted.",
+                    LiveAcquisitionStage.Market,
+                    itemId: quantity.Key,
+                    partial: HasIrreversiblePurchasesObserved);
+            }
+        }
+
+        return null;
+    }
+
+    private static bool TryValidateGilEstimate(AcquisitionPlan plan, out string failure)
+    {
+        var transactionGil = 0L;
+        foreach (var transaction in plan.Transactions)
+        {
+            if (transaction.GilCost < 0 || transaction.GilCost > long.MaxValue - transactionGil)
+            {
+                failure = "The acquisition plan contains an invalid or overflowing Gil reservation.";
+                return false;
+            }
+            transactionGil += transaction.GilCost;
+        }
+
+        if (transactionGil != plan.Estimate.TotalGil)
+        {
+            failure = $"The displayed acquisition estimate does not match its transaction reservations "
+                + $"({plan.Estimate.TotalGil:N0} displayed != {transactionGil:N0} planned Gil).";
+            return false;
+        }
+
+        failure = string.Empty;
+        return true;
+    }
+
+    private static bool TryGetPlannedPurchaseQuantities(
+        AcquisitionPlan plan,
+        out Dictionary<uint, int> quantities,
+        out string failure)
+    {
+        var plannedQuantities = new Dictionary<uint, int>();
+        quantities = plannedQuantities;
+        failure = string.Empty;
+
+        static bool TryAdd(IDictionary<uint, int> target, uint itemId, long quantity)
+        {
+            if (itemId == 0 || quantity < 0 || quantity > int.MaxValue)
+                return false;
+            if (quantity == 0)
+                return true;
+            var existing = target.TryGetValue(itemId, out var value) ? value : 0;
+            var total = (long)existing + quantity;
+            if (total > int.MaxValue)
+                return false;
+            target[itemId] = (int)total;
+            return true;
+        }
+
+        foreach (var transaction in plan.Transactions)
+        {
+            if (transaction.Quantity < 0)
+            {
+                failure = $"The acquisition transaction for item {transaction.ItemId:N0} has a negative quantity.";
+                return false;
+            }
+
+            if (transaction.Outputs is not { Count: > 0 })
+            {
+                if (!TryAdd(plannedQuantities, transaction.ItemId, transaction.Quantity))
+                {
+                    failure = "The acquisition plan contains an invalid or overflowing quantity estimate.";
+                    return false;
+                }
+                continue;
+            }
+
+            var units = System.Math.Max(1, transaction.PurchaseUnits);
+            foreach (var output in transaction.Outputs)
+            {
+                if (output == null || !TryAdd(plannedQuantities, output.ItemId, (long)output.Quantity * units))
+                {
+                    failure = "The acquisition plan contains an invalid or overflowing output-quantity estimate.";
+                    return false;
+                }
+            }
+        }
+
+        if (plan.PurchasedQuantities.Count > 0)
+        {
+            var declaredQuantities = new Dictionary<uint, int>();
+            foreach (var quantity in plan.PurchasedQuantities)
+            {
+                if (!TryAdd(declaredQuantities, quantity.Key, quantity.Value))
+                {
+                    failure = "The acquisition plan contains an invalid purchased-quantity estimate.";
+                    return false;
+                }
+            }
+
+            if (declaredQuantities.Count != plannedQuantities.Count
+                || declaredQuantities.Any(quantity =>
+                    plannedQuantities.GetValueOrDefault(quantity.Key) != quantity.Value))
+            {
+                failure = "The acquisition plan's purchased-quantity estimate does not match its transactions.";
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private void TrackRequirements(AcquisitionPlan plan)

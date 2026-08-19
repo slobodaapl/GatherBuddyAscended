@@ -63,6 +63,17 @@ public class RaphaelMacroSolver : Solver
         _craft = craft ?? throw new ArgumentNullException(nameof(craft));
     }
 
+    internal IReadOnlyList<VulcanSkill> RemainingActions
+    {
+        get
+        {
+            var remaining = new List<VulcanSkill>(_solution.ActionIds.Count - _currentActionIndex);
+            for (var index = _currentActionIndex; index < _solution.ActionIds.Count; ++index)
+                remaining.Add(ConvertActionIdToSkill(_solution.ActionIds[index]));
+            return remaining;
+        }
+    }
+
     public override Recommendation Solve(CraftState craft, StepState step)
     {
         if (_currentActionIndex >= _solution.ActionIds.Count)

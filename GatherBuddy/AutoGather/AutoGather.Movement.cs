@@ -25,8 +25,6 @@ namespace GatherBuddy.AutoGather
 {
     public partial class AutoGather
     {
-        private const int RareReductionGatheringReserveSeconds = 60;
-
         private unsafe void EnqueueDismount()
         {
             TaskManager.Enqueue(StopNavigation);
@@ -98,16 +96,16 @@ namespace GatherBuddy.AutoGather
                 var maximizeReduction = config.ChooseBestActionsAutomatically
                     && targetItem.ItemData.AetherialReduce > 0
                     && IsRareReductionTarget(completionItemId);
-                var enoughWindowToWait = targetTime == TimeInterval.Always
-                    || (targetTime != TimeInterval.Invalid
-                     && targetTime != TimeInterval.Never
-                     && targetTime.End > GatherBuddy.Time.ServerTime.AddSeconds(RareReductionGatheringReserveSeconds));
+                var enoughWindowToWait = TimedNodeGpWaitPolicy.CanWaitBeforeGathering(
+                    targetTime,
+                    GatherBuddy.Time.ServerTime);
                 var waitForMaximumGp = maximizeReduction && enoughWindowToWait;
                 if (waitForMaximumGp)
                     collectableMinGp = Math.Max(collectableMinGp, (int)Player.Object.MaxGp);
 
-                var waitGP = targetItem.ItemData.IsCollectable && Player.Object.CurrentGp < collectableMinGp;
-                waitGP |= !targetItem.ItemData.IsCollectable && Player.Object.CurrentGp < config.GatherableMinGP;
+                var waitGP = enoughWindowToWait
+                          && (targetItem.ItemData.IsCollectable && Player.Object.CurrentGp < collectableMinGp
+                           || !targetItem.ItemData.IsCollectable && Player.Object.CurrentGp < config.GatherableMinGP);
 
                 if (Dalamud.Conditions[ConditionFlag.Mounted] && (waitGP || GetConsumablesWithCastTime(config) > 0))
                 {

@@ -96,6 +96,7 @@ public enum VulcanSolverMode
     StandardSolver,  // Dynamic standard solver
     ProgressOnly,    // Progress-only solver (no quality actions)
     Donatello,       // Adaptive globally optimizing solver
+    Gabriel,         // Per-item-only stochastic Expert solver
 }
 
 public class RaphaelSolveCoordinatorConfig
@@ -109,7 +110,9 @@ public class RaphaelSolveCoordinatorConfig
     public bool DonatelloMinimizeSteps { get; set; } = false;
     public bool DonatelloExperimentalProgressPriority { get; set; } = false;
     public int DonatelloOptimizationThresholdMs { get; set; } = DonatelloSolver.DefaultLiveReplanDeadlineMillis;
+    public int DonatelloImprovementQuietSeconds { get; set; } = DonatelloSolver.DefaultImprovementQuietPeriodSeconds;
     public int DonatelloCacheMemoryMiB { get; set; } = 512;
+    public int GabrielWorkerThreads { get; set; } = DonatelloNative.DefaultGabrielWorkerThreads;
     public bool AutoClearSolutionCache { get; set; } = true;
     public int SolutionCacheMaxAgeDays { get; set; } = 30;
     public VulcanSolverMode SolverMode { get; set; } = VulcanSolverMode.Donatello;

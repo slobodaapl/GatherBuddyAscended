@@ -1112,8 +1112,17 @@ public static class VendorShopResolver
 
     public static bool MatchesCurrentGrandCompany(VendorShopEntry entry)
     {
+        if (entry.ShopType != VendorShopType.GrandCompanySeals)
+            return entry.ShopType != VendorShopType.GrandCompanySeals;
+
+        return TryGetCurrentGrandCompanyId(out var gameGrandCompanyId)
+            && MatchesGrandCompany(entry, gameGrandCompanyId);
+    }
+
+    public static bool MatchesGrandCompany(VendorShopEntry entry, byte gameGrandCompanyId)
+    {
         if (entry.ShopType != VendorShopType.GrandCompanySeals
-            || !TryGetCurrentGrandCompanyId(out var gameGrandCompanyId))
+            || gameGrandCompanyId > 2)
             return entry.ShopType != VendorShopType.GrandCompanySeals;
 
         if (GetSealCurrencyItemIdForGameGrandCompany(gameGrandCompanyId) == 0

@@ -11,7 +11,9 @@ using Dalamud.Interface.Windowing;
 using ElliLib;
 using ElliLib.Raii;
 using ElliLib.Text;
+using GatherBuddy.AutoGather.Lists;
 using GatherBuddy.Crafting;
+using GatherBuddy.Crafting.Acquisition;
 using GatherBuddy.Plugin;
 using GatherBuddy.Vulcan.Vendors;
 using Lumina.Excel;
@@ -56,9 +58,17 @@ public class CraftingMaterialsWindow : Window
         int EffectiveAvailable,
         string Name,
         ushort IconId,
+        uint ClassJobId,
         bool IsPrecraft,
         IReadOnlyList<CurrencyOption> CurrencyOptions,
-        MobDropItemInfo DropInfo);
+        MobDropItemInfo DropInfo,
+        string RowContext = "",
+        int TreeDepth = 0,
+        string TreePrefix = "",
+        bool QuantityUnknown = false,
+        uint ReductionSourceItemId = 0,
+        uint ReductionSourceClassJobId = 0,
+        string ReductionSourceName = "");
     private sealed record MaterialPanel(
         string Id,
         string Label,
@@ -78,7 +88,14 @@ public class CraftingMaterialsWindow : Window
         VendorCurrencyGroup Group);
     private readonly record struct CurrencyTotal(uint CurrencyItemId, ulong Amount, string Name, ushort IconId);
 
-    private readonly Dictionary<uint, string> _userSelectedCurrencyByItem = new();
+    private readonly AutoGatherListsManager _autoGatherListsManager;
+    private readonly CraftingMaterialSelection _materialSelection = new();
+    private readonly CraftingMaterialAcquisitionSelection _materialAcquisitionSelection = new();
+    private List<CraftingMaterialRowKey> _cachedMaterialDisplayOrder = [];
+    private Dictionary<uint, int> _pendingGatherListMaterials = [];
+    private bool _openGatherListModal;
+    private string _gatherListSearch = string.Empty;
+    private string _newGatherListName = string.Empty;
     private bool _cachedMaterialViewValid;
     private bool _cachedHasMaterials;
     private bool _cachedHasVisibleEntries;
@@ -92,8 +109,9 @@ public class CraftingMaterialsWindow : Window
     private bool _cachedMobDropInfoInitialized;
     private List<MaterialPanel> _cachedPanels = [];
 
-    public CraftingMaterialsWindow() : base("Materials###CraftingMaterials")
+    public CraftingMaterialsWindow(AutoGatherListsManager autoGatherListsManager) : base("Materials###CraftingMaterials")
     {
+        _autoGatherListsManager = autoGatherListsManager;
         Size           = VulcanUiScaling.Scaled(560f, 520f);
         SizeCondition  = ImGuiCond.FirstUseEver;
         SizeConstraints = new WindowSizeConstraints
@@ -106,7 +124,10 @@ public class CraftingMaterialsWindow : Window
     public void SetEditor(CraftingListEditor? editor)
     {
         if (!ReferenceEquals(_editor, editor))
+        {
             InvalidateMaterialView();
+            _materialSelection.Clear();
+        }
         _editor = editor;
     }
 
@@ -177,7 +198,7 @@ public class CraftingMaterialsWindow : Window
         SameLineIfFits(precraftsCheckboxWidth);
         ImGui.Checkbox("Precrafts##precrafts", ref _matsShowPrecrafts);
         if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("Include intermediate craftable components and non-gear final craftables");
+            ImGui.SetTooltip("Include intermediate craftable components");
         SameLineIfFits(keepFulfilledCheckboxWidth);
         ImGui.Checkbox("Keep Fulfilled##keepFulfilled", ref _matsKeepFulfilled);
         if (ImGui.IsItemHovered())
@@ -217,6 +238,8 @@ public class CraftingMaterialsWindow : Window
             if (panelColumns == 2 && !spanFull && i % 2 == 0)
                 ImGui.SameLine();
         }
+
+        DrawGatherListModal();
     }
 
     private void InvalidateMaterialView()
@@ -229,6 +252,7 @@ public class CraftingMaterialsWindow : Window
         _cachedMaterialViewEditor = null;
         _cachedMaterialViewVersion = -1;
         _cachedPanels = [];
+        _cachedMaterialDisplayOrder = [];
     }
 
     private bool ShouldRebuildMaterialView(bool showRetainer)
@@ -266,6 +290,7 @@ public class CraftingMaterialsWindow : Window
 
             if (!_cachedHasMaterials)
             {
+                UpdateMaterialSelectionOrder();
                 UpdateMaterialViewCacheMetadata(showRetainer);
                 return;
             }
@@ -273,6 +298,7 @@ public class CraftingMaterialsWindow : Window
             var itemSheet = Dalamud.GameData.GetExcelSheet<Item>();
             if (itemSheet == null)
             {
+                UpdateMaterialSelectionOrder();
                 UpdateMaterialViewCacheMetadata(showRetainer);
                 return;
             }
@@ -282,7 +308,22 @@ public class CraftingMaterialsWindow : Window
             var craftMaterials = _matsShowPrecrafts
                 ? _editor.GetDisplayPrecraftMaterials()
                 : null;
-            var snapshotItemIds = materials.Keys.Concat(craftMaterials != null ? craftMaterials.Keys : Enumerable.Empty<uint>());
+            var craftMaterialFinalRoots = _matsShowPrecrafts
+                ? _editor.GetDisplayCraftMaterialFinalRoots()
+                : new CraftingMaterialFinalRoots([]);
+            var reductionPresentations = new Dictionary<uint, AetherialReductionPresentation>();
+            foreach (var (itemId, needed) in materials)
+            {
+                if (AetherialReductionSourceResolver.TryCreatePresentation(
+                        itemId,
+                        needed,
+                        outputItemId => AcquisitionPlanningInputBuilder.ResolvePath(outputItemId, null),
+                        out var presentation))
+                    reductionPresentations[itemId] = presentation;
+            }
+            var snapshotItemIds = materials.Keys
+                .Concat(craftMaterials != null ? craftMaterials.Keys : Enumerable.Empty<uint>())
+                .Concat(reductionPresentations.Values.Select(presentation => presentation.SourceItemId));
             var retainerSnapshot = showRetainer
                 ? _editor.GetRetainerSnapshot(snapshotItemIds)
                 : RetainerItemSnapshot.Empty;
@@ -291,9 +332,10 @@ public class CraftingMaterialsWindow : Window
             var dropList = new List<MaterialEntry>();
             var shopList = new List<MaterialEntry>();
             var vendorList = new List<MaterialEntry>();
+            var reductionGatherGroups = new List<List<MaterialEntry>>();
             List<MaterialEntry>? craftList = _matsShowPrecrafts ? [] : null;
 
-            void AddEntry(MaterialEntry entry)
+            bool TrackEntry(MaterialEntry entry)
             {
                 if (entry.EffectiveAvailable < entry.Needed)
                     _cachedTotalMissing++;
@@ -301,9 +343,14 @@ public class CraftingMaterialsWindow : Window
                     _cachedTotalReady++;
 
                 if (hideSatisfiedRows && entry.EffectiveAvailable >= entry.Needed)
-                    return;
+                    return false;
 
                 _cachedHasVisibleEntries = true;
+                return true;
+            }
+
+            void RouteEntry(MaterialEntry entry)
+            {
                 switch (MaterialSourceClassifier.Classify(entry.ItemId))
                 {
                     case MaterialSource.Gatherable:
@@ -327,27 +374,103 @@ public class CraftingMaterialsWindow : Window
                 }
             }
 
-            foreach (var (itemId, needed) in materials)
+            void AddEntry(MaterialEntry entry)
             {
-                if (TryCreateMaterialEntry(itemSheet, itemId, needed, false, retainerSnapshot, countRetainersTowardNeed, out var entry))
-                    AddEntry(entry);
+                if (TrackEntry(entry))
+                    RouteEntry(entry);
             }
 
-            if (craftMaterials != null)
+            void AddReductionPresentation(
+                AetherialReductionPresentation presentation,
+                MaterialEntry source,
+                MaterialEntry output)
             {
-                foreach (var (itemId, needed) in craftMaterials)
+                if (!TrackEntry(output))
+                    return;
+
+                var context = $"reduction/{presentation.OutputItemId}/{presentation.SourceItemId}";
+                reductionGatherGroups.Add(
+                [
+                    source with
+                    {
+                        Needed = 0,
+                        RowContext = $"{context}/source",
+                        TreeDepth = 0,
+                        TreePrefix = string.Empty,
+                        QuantityUnknown = presentation.SourceQuantityUnknown,
+                    },
+                    output with
+                    {
+                        RowContext = $"{context}/output",
+                        TreeDepth = 1,
+                        TreePrefix = "└─ ",
+                    },
+                ]);
+            }
+
+            foreach (var (itemId, needed) in materials)
+            {
+                if (!TryCreateMaterialEntry(itemSheet, itemId, needed, false, retainerSnapshot, countRetainersTowardNeed, out var entry))
+                    continue;
+                if (reductionPresentations.TryGetValue(itemId, out var presentation)
+                    && TryCreateMaterialEntry(
+                        itemSheet,
+                        presentation.SourceItemId,
+                        0,
+                        false,
+                        retainerSnapshot,
+                        countRetainersTowardNeed,
+                        out var sourceEntry))
+                {
+                    entry = entry with
+                    {
+                        ReductionSourceItemId = presentation.SourceItemId,
+                        ReductionSourceClassJobId = presentation.SourceClassJobId,
+                        ReductionSourceName = sourceEntry.Name,
+                    };
+                    if (_materialAcquisitionSelection.ShouldUseReduction(
+                            itemId,
+                            reductionAvailable: true,
+                            currencyAvailable: entry.CurrencyOptions.Count > 0))
+                        AddReductionPresentation(presentation, sourceEntry, entry);
+                    else if (TrackEntry(entry))
+                        shopList.Add(entry);
+                    continue;
+                }
+                AddEntry(entry);
+            }
+
+            if (craftMaterials != null && craftList != null)
+            {
+                var treeItemIds = craftMaterials.Keys
+                    .Where(itemId => MaterialSourceClassifier.Classify(itemId) == MaterialSource.Craftable)
+                    .ToHashSet();
+                var craftEntries = BuildPrecraftEntries(
+                    itemSheet,
+                    CraftingPrecraftPresentation.FromFinalRoots(craftMaterialFinalRoots, treeItemIds),
+                    retainerSnapshot,
+                    countRetainersTowardNeed);
+                AllocateRepeatedPrecraftAvailability(craftEntries);
+                foreach (var entry in craftEntries)
+                    AddEntry(entry);
+                foreach (var (itemId, needed) in craftMaterials.Where(material => !treeItemIds.Contains(material.Key)))
                 {
                     if (TryCreateMaterialEntry(itemSheet, itemId, needed, true, retainerSnapshot, countRetainersTowardNeed, out var entry))
                         AddEntry(entry);
                 }
             }
 
-            SortEntries(gatherList);
+            var gatherGroups = gatherList
+                .Select(entry => new List<MaterialEntry> { entry })
+                .Concat(reductionGatherGroups)
+                .ToList();
+            gatherGroups.Sort((left, right) => CompareEntries(left[0], right[0]));
+            gatherList.Clear();
+            foreach (var group in gatherGroups)
+                gatherList.AddRange(group);
             SortEntries(dropList);
             SortEntries(shopList);
             SortEntries(vendorList);
-            if (craftList != null)
-                SortEntries(craftList);
 
             var nonCraftRetainerMode = showRetainer ? RetainerColumnMode.Total : RetainerColumnMode.None;
             var craftRetainerMode = showRetainer ? RetainerColumnMode.Split : RetainerColumnMode.None;
@@ -357,6 +480,7 @@ public class CraftingMaterialsWindow : Window
             if (vendorList.Count > 0) _cachedPanels.Add(new MaterialPanel("##vendor", "Vendor", AccentVendor, vendorList, nonCraftRetainerMode, BuildVendorBuyListTargets(vendorList)));
             if (craftList is { Count: > 0 }) _cachedPanels.Add(new MaterialPanel("##craft", "Craft", AccentCraft, craftList, craftRetainerMode, null));
 
+            UpdateMaterialSelectionOrder();
             UpdateMaterialViewCacheMetadata(showRetainer);
         }
         catch (Exception ex)
@@ -377,6 +501,15 @@ public class CraftingMaterialsWindow : Window
         _cachedMobDropInfoInitialized = MobDropInfoCache.IsInitialized;
     }
 
+    private void UpdateMaterialSelectionOrder()
+    {
+        _cachedMaterialDisplayOrder = _cachedPanels
+            .SelectMany(panel => panel.Entries)
+            .Select(MaterialRowKey)
+            .ToList();
+        _materialSelection.RetainVisible(_cachedMaterialDisplayOrder);
+    }
+
     private bool TryCreateMaterialEntry(ExcelSheet<Item> itemSheet, uint itemId, int needed, bool isPrecraft,
         RetainerItemSnapshot retainerSnapshot, bool countRetainersTowardNeed, out MaterialEntry entry)
     {
@@ -393,7 +526,17 @@ public class CraftingMaterialsWindow : Window
         var skipExtras = CraftingRowIcons.IsElementalCrystal(itemId);
         var currencyOptions = skipExtras ? Array.Empty<CurrencyOption>() : ResolveCurrencyOptions(itemId);
         var dropInfo = skipExtras ? MobDropItemInfo.Empty : MobDropInfoCache.GetDropInfoForItem(itemId);
-        entry = new MaterialEntry(itemId, have, retNQ, retHQ, needed, effectiveAvailable, item.Name.ExtractText(), item.Icon, isPrecraft, currencyOptions, dropInfo);
+        var selectedPrecraftRecipe = isPrecraft
+            ? _editor?.PlanningList.ResolveRecipeForItem(itemId)
+            : null;
+        var classItemId = !isPrecraft
+                       && CraftingGatherBridge.TryResolvePersistentGatherItem(itemId, out var gatherable, out _)
+            ? gatherable.ItemId
+            : itemId;
+        var classJobId = selectedPrecraftRecipe.HasValue
+            ? selectedPrecraftRecipe.Value.CraftType.RowId + 8
+            : CraftingRowIcons.GetMaterialClassJobId(classItemId, isPrecraft);
+        entry = new MaterialEntry(itemId, have, retNQ, retHQ, needed, effectiveAvailable, item.Name.ExtractText(), item.Icon, classJobId, isPrecraft, currencyOptions, dropInfo);
         return true;
     }
 
@@ -444,7 +587,7 @@ public class CraftingMaterialsWindow : Window
     {
         if (entry.CurrencyOptions.Count == 0)
             return null;
-        if (_userSelectedCurrencyByItem.TryGetValue(entry.ItemId, out var selected))
+        if (_materialAcquisitionSelection.TryGetCurrencyOffer(entry.ItemId, out var selected))
         {
             foreach (var option in entry.CurrencyOptions)
                 if (option.OfferKey == selected)
@@ -460,18 +603,143 @@ public class CraftingMaterialsWindow : Window
         return entry.CurrencyOptions[0];
     }
 
-    private static void SortEntries(List<MaterialEntry> entries)
+    private List<MaterialEntry> BuildPrecraftEntries(
+        ExcelSheet<Item> itemSheet,
+        IReadOnlyList<CraftingMaterialDemandNode> roots,
+        RetainerItemSnapshot retainerSnapshot,
+        bool countRetainersTowardNeed)
     {
-        entries.Sort((left, right) =>
+        var result = new List<MaterialEntry>();
+        AppendChildren(roots, 0, [], "craft");
+        return result;
+
+        void AppendChildren(
+            IReadOnlyList<CraftingMaterialDemandNode> nodes,
+            int depth,
+            IReadOnlyList<bool> ancestorHasFollowingSibling,
+            string parentContext)
         {
-            var leftReady = left.EffectiveAvailable >= left.Needed;
-            var rightReady = right.EffectiveAvailable >= right.Needed;
-            var readyComparison = leftReady.CompareTo(rightReady);
-            if (readyComparison != 0)
-                return readyComparison;
-            return string.Compare(left.Name, right.Name, StringComparison.Ordinal);
-        });
+            var siblings = new List<(CraftingMaterialDemandNode Node, MaterialEntry Entry)>();
+            foreach (var node in nodes)
+            {
+                if (TryCreateMaterialEntry(
+                        itemSheet,
+                        node.ItemId,
+                        node.Demand.Total,
+                        true,
+                        retainerSnapshot,
+                        countRetainersTowardNeed,
+                        out var entry))
+                    siblings.Add((node, entry));
+            }
+
+            siblings.Sort((left, right) => CompareEntries(left.Entry, right.Entry));
+            for (var i = 0; i < siblings.Count; i++)
+            {
+                var (node, entry) = siblings[i];
+                var isLastSibling = i == siblings.Count - 1;
+                var context = $"{parentContext}/{node.ItemId}";
+                result.Add(entry with
+                {
+                    RowContext = context,
+                    TreeDepth = depth,
+                    TreePrefix = BuildTreePrefix(depth, isLastSibling, ancestorHasFollowingSibling),
+                });
+
+                IReadOnlyList<bool> childAncestors = ancestorHasFollowingSibling;
+                if (depth > 0)
+                {
+                    var continuation = new bool[ancestorHasFollowingSibling.Count + 1];
+                    for (var ancestor = 0; ancestor < ancestorHasFollowingSibling.Count; ancestor++)
+                        continuation[ancestor] = ancestorHasFollowingSibling[ancestor];
+                    continuation[^1] = !isLastSibling;
+                    childAncestors = continuation;
+                }
+
+                AppendChildren(node.Children, depth + 1, childAncestors, context);
+            }
+        }
+
+        static string BuildTreePrefix(
+            int depth,
+            bool isLastSibling,
+            IReadOnlyList<bool> ancestorHasFollowingSibling)
+        {
+            if (depth == 0)
+                return string.Empty;
+
+            var prefix = string.Empty;
+            for (var ancestor = 0; ancestor < depth - 1; ancestor++)
+                prefix += ancestor < ancestorHasFollowingSibling.Count && ancestorHasFollowingSibling[ancestor]
+                    ? "│  "
+                    : "   ";
+            return prefix + (isLastSibling ? "└─ " : "├─ ");
+        }
     }
+
+    private static void AllocateRepeatedPrecraftAvailability(List<MaterialEntry> entries)
+    {
+        foreach (var group in entries
+                     .Select((entry, index) => (Entry: entry, Index: index))
+                     .GroupBy(value => value.Entry.ItemId)
+                     .Where(group => group.Count() > 1))
+        {
+            var occurrences = group
+                .OrderByDescending(value => value.Entry.TreeDepth)
+                .ThenBy(value => value.Index)
+                .ToArray();
+            var remainingHave = Math.Max(0, occurrences[0].Entry.Have);
+            var remainingRetNQ = Math.Max(0, occurrences[0].Entry.RetNQ);
+            var remainingRetHQ = Math.Max(0, occurrences[0].Entry.RetHQ);
+            var remainingEffective = Math.Max(0, occurrences[0].Entry.EffectiveAvailable);
+
+            for (var i = 0; i < occurrences.Length; i++)
+            {
+                var occurrence = occurrences[i];
+                var isLast = i == occurrences.Length - 1;
+                var needed = Math.Max(0, occurrence.Entry.Needed);
+                var have = Take(ref remainingHave, needed, isLast);
+                var retNQ = Take(ref remainingRetNQ, needed, isLast);
+                var retHQ = Take(ref remainingRetHQ, Math.Max(0, needed - retNQ), isLast);
+                var effective = Take(ref remainingEffective, needed, isLast);
+                entries[occurrence.Index] = occurrence.Entry with
+                {
+                    Have = have,
+                    RetNQ = retNQ,
+                    RetHQ = retHQ,
+                    EffectiveAvailable = effective,
+                };
+            }
+        }
+
+        static int Take(ref int remaining, int capacity, bool takeAll)
+        {
+            var amount = takeAll ? remaining : Math.Min(remaining, capacity);
+            remaining -= amount;
+            return amount;
+        }
+    }
+
+    private static void SortEntries(List<MaterialEntry> entries)
+        => entries.Sort(CompareEntries);
+
+    private static int CompareEntries(MaterialEntry left, MaterialEntry right)
+    {
+        var leftClass = left.ClassJobId == 0 ? uint.MaxValue : left.ClassJobId;
+        var rightClass = right.ClassJobId == 0 ? uint.MaxValue : right.ClassJobId;
+        var classComparison = leftClass.CompareTo(rightClass);
+        if (classComparison != 0)
+            return classComparison;
+        var leftReady = left.EffectiveAvailable >= left.Needed;
+        var rightReady = right.EffectiveAvailable >= right.Needed;
+        var readyComparison = leftReady.CompareTo(rightReady);
+        if (readyComparison != 0)
+            return readyComparison;
+        return string.Compare(left.Name, right.Name, StringComparison.Ordinal);
+    }
+
+    private static CraftingMaterialRowKey MaterialRowKey(MaterialEntry entry)
+        => new(entry.ItemId, entry.IsPrecraft, entry.RowContext);
 
     private void DrawMaterialPanel(
         string id, string label, Vector4 accent,
@@ -576,7 +844,8 @@ public class CraftingMaterialsWindow : Window
                     var maxNameWidth = 0f;
                     for (var i = 0; i < entries.Count; i++)
                     {
-                        var w = ImGui.CalcTextSize(entries[i].Name).X;
+                        var w = ImGui.CalcTextSize(entries[i].TreePrefix).X
+                              + ImGui.CalcTextSize(entries[i].Name).X;
                         if (w > maxNameWidth)
                             maxNameWidth = w;
                     }
@@ -609,10 +878,13 @@ public class CraftingMaterialsWindow : Window
         var name              = entry.Name;
         var iconId            = entry.IconId;
         var effectiveAvailable = entry.EffectiveAvailable;
-        var satisfied         = effectiveAvailable >= needed;
+        var quantityUnknown   = entry.QuantityUnknown;
+        var satisfied         = !quantityUnknown && effectiveAvailable >= needed;
         var isPrecraft        = entry.IsPrecraft;
         ImGui.TableNextRow();
-        Vector4 rowColor = (satisfied, isPrecraft) switch
+        Vector4 rowColor = quantityUnknown
+            ? new Vector4(0.55f, 0.35f, 0.05f, 0.25f)
+            : (satisfied, isPrecraft) switch
         {
             (true,  false) => new Vector4(0.15f, 0.50f, 0.15f, 0.25f),
             (true,  true)  => new Vector4(0.05f, 0.40f, 0.45f, 0.25f),
@@ -624,18 +896,28 @@ public class CraftingMaterialsWindow : Window
         var lineH    = ImGui.GetTextLineHeight();
         var iconSize = new Vector2(lineH, lineH);
 
-        static string Trunc(int v) => v > 9999 ? "9999" : v.ToString();
+        void CenterText(string text, Vector4 color)
+        {
+            var off = (ImGui.GetColumnWidth() - ImGui.CalcTextSize(text).X) * 0.5f;
+            if (off > 0f) ImGui.SetCursorPosX(ImGui.GetCursorPosX() + off);
+            ImGui.TextColored(color, text);
+        }
         void CenterNum(int raw, Vector4 color)
         {
-            var s   = Trunc(raw);
-            var off = (ImGui.GetColumnWidth() - ImGui.CalcTextSize(s).X) * 0.5f;
-            if (off > 0f) ImGui.SetCursorPosX(ImGui.GetCursorPosX() + off);
-            ImGui.TextColored(color, s);
+            CenterText(FormatMaterialQuantity(raw, false), color);
             if (raw > 9999 && ImGui.IsItemHovered())
                 ImGui.SetTooltip(raw.ToString());
         }
 
         ImGui.TableNextColumn();
+        var treePrefixWidth = 0f;
+        if (entry.TreePrefix.Length > 0)
+        {
+            treePrefixWidth = ImGui.CalcTextSize(entry.TreePrefix).X;
+            ImGui.TextDisabled(entry.TreePrefix);
+            ImGui.SameLine(0, 0);
+        }
+
         var icon = Icons.DefaultStorage.TextureProvider.GetFromGameIcon(new GameIconLookup(iconId));
         if (icon.TryGetWrap(out var wrap, out _))
             ImGui.Image(wrap.Handle, iconSize);
@@ -643,13 +925,15 @@ public class CraftingMaterialsWindow : Window
             ImGui.Dummy(iconSize);
         ImGui.SameLine(0, MaterialRowIconSpacing);
         var nameTextStartX = ImGui.GetCursorScreenPos().X;
-        if (ImGui.Selectable(name, false, ImGuiSelectableFlags.AllowItemOverlap))
-        {
-            try { ImGui.SetClipboardText(name); } catch { /* ignored */ }
-        }
+        var rowKey = MaterialRowKey(entry);
+        var isSelected = _materialSelection.Contains(rowKey);
+        if (ImGui.Selectable($"{name}##material_row_{itemId}_{entry.RowContext}", isSelected, ImGuiSelectableFlags.AllowItemOverlap))
+            _materialSelection.Click(rowKey, _cachedMaterialDisplayOrder, ImGui.GetIO().KeyCtrl, ImGui.GetIO().KeyShift);
+        if (ImGui.IsItemClicked(ImGuiMouseButton.Right))
+            _materialSelection.RightClick(rowKey);
         if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("Click to copy to clipboard.");
-        if (ImGui.BeginPopupContextItem($"##mbctx_{itemId}_{(isPrecraft ? 1 : 0)}_{(int)retainerColumnMode}"))
+            ImGui.SetTooltip("Click to select. Ctrl-click toggles; Shift-click selects a range.");
+        if (ImGui.BeginPopupContextItem($"##mbctx_{itemId}_{(isPrecraft ? 1 : 0)}_{(int)retainerColumnMode}_{entry.RowContext}"))
         {
             if (ImGui.Selectable("Create Link"))
                 Communicator.Print(SeString.CreateItemLink(itemId));
@@ -658,7 +942,7 @@ public class CraftingMaterialsWindow : Window
                 GatherBuddy.MarketboardService?.QueueLookup(itemId, name, iconId);
                 GatherBuddy.VulcanWindow?.OpenToMarketboardItem(itemId);
             }
-            if (ImGui.Selectable("Add to Marketplace Buy List"))
+            if (ImGui.Selectable("Add to Buy List"))
             {
                 var manager = GatherBuddy.MarketplaceBuyListManager;
                 var active = manager?.ActiveList;
@@ -666,16 +950,21 @@ public class CraftingMaterialsWindow : Window
                     manager.AddItem(active.Id, itemId, name, iconId, 1);
             }
 
+            if (isPrecraft)
+                DrawCraftListSelectionContext();
+            else
+                DrawGatherListSelectionContext();
             DrawVendorBuyListPopup(entry, vendorTargets);
             ImGui.EndPopup();
         }
 
         var sourceIcons = GetVisibleSourceIcons(entry);
+        var hasReductionChoice = entry.ReductionSourceClassJobId != 0;
         var hasCurrencyOrDrop = entry.CurrencyOptions.Count > 0 || entry.DropInfo.HasData;
-        var hasTrailingIcons = sourceIcons.Count > 0 || hasCurrencyOrDrop;
+        var hasTrailingIcons = sourceIcons.Count > 0 || hasReductionChoice || hasCurrencyOrDrop;
         if (hasTrailingIcons)
         {
-            var iconColumnTargetX = nameTextStartX + maxNameWidth + MaterialRowIconGutter;
+            var iconColumnTargetX = nameTextStartX + maxNameWidth - treePrefixWidth + MaterialRowIconGutter;
             ImGui.SameLine(0, 0);
             var currentX = ImGui.GetCursorScreenPos().X;
             var gap = iconColumnTargetX - currentX;
@@ -695,6 +984,12 @@ public class CraftingMaterialsWindow : Window
             {
                 CraftingRowIcons.DrawIconsRightAligned(sourceIcons, lineH, MaterialRowIconSpacing);
                 hasDrawnIcon = true;
+            }
+            if (hasReductionChoice)
+            {
+                if (hasDrawnIcon)
+                    ImGui.SameLine(0, MaterialRowIconSpacing);
+                hasDrawnIcon = DrawReductionSourcePicker(entry);
             }
             if (entry.CurrencyOptions.Count > 0)
             {
@@ -747,17 +1042,23 @@ public class CraftingMaterialsWindow : Window
         }
 
         ImGui.TableNextColumn();
-        CenterNum(needed, new Vector4(1f, 1f, 1f, 1f));
+        CenterText(
+            FormatMaterialQuantity(needed, quantityUnknown),
+            quantityUnknown ? new Vector4(1f, 0.75f, 0.2f, 1f) : new Vector4(1f, 1f, 1f, 1f));
 
         ImGui.TableNextColumn();
-        var ratio    = needed > 0 ? (float)effectiveAvailable / needed : 1f;
-        var progress = Math.Clamp(ratio, 0f, 1f);
+        var ratio    = !quantityUnknown && needed > 0 ? (float)effectiveAvailable / needed : 0f;
+        var progress = quantityUnknown ? 1f : Math.Clamp(ratio, 0f, 1f);
         ImGui.PushStyleColor(ImGuiCol.PlotHistogram,
-            satisfied ? new Vector4(0.2f, 0.65f, 0.2f, 0.9f) : new Vector4(0.65f, 0.2f, 0.2f, 0.9f));
+            quantityUnknown
+                ? new Vector4(0.75f, 0.45f, 0.08f, 0.9f)
+                : satisfied
+                    ? new Vector4(0.2f, 0.65f, 0.2f, 0.9f)
+                    : new Vector4(0.65f, 0.2f, 0.2f, 0.9f));
         ImGui.PushStyleColor(ImGuiCol.FrameBg, new Vector4(0.12f, 0.12f, 0.12f, 0.9f));
         ImGui.ProgressBar(progress, new Vector2(ImGui.GetContentRegionAvail().X, lineH), "");
         ImGui.PopStyleColor(2);
-        var pctText = _matsOvercapPercent ? $"{ratio * 100f:F0}%" : $"{progress * 100f:F0}%";
+        var pctText = FormatMaterialPercent(ratio, progress, _matsOvercapPercent, quantityUnknown);
         var pctSize = ImGui.CalcTextSize(pctText);
         var barMin  = ImGui.GetItemRectMin();
         var barMax  = ImGui.GetItemRectMax();
@@ -767,6 +1068,212 @@ public class CraftingMaterialsWindow : Window
                 barMin.Y + (barMax.Y - barMin.Y - pctSize.Y) * 0.5f),
             ImGui.GetColorU32(ImGuiCol.Text),
             pctText);
+    }
+
+    internal static string FormatMaterialQuantity(int quantity, bool unknown)
+        => unknown ? "?" : quantity > 9999 ? "9999" : quantity.ToString();
+
+    internal static string FormatMaterialPercent(float ratio, float progress, bool overcap, bool unknown)
+        => unknown ? "?" : overcap ? $"{ratio * 100f:F0}%" : $"{progress * 100f:F0}%";
+
+    private void DrawGatherListSelectionContext()
+    {
+        var selectedMaterials = GetSelectedMaterialRequirements();
+        var hasGatherTarget = selectedMaterials.Any(material =>
+            material.Value > 0
+         && CraftingGatherBridge.TryResolvePersistentGatherItem(material.Key, out _, out _));
+        if (!hasGatherTarget)
+            return;
+
+        ImGui.Separator();
+        if (ImGui.MenuItem("Add to Gather List..."))
+            OpenGatherListModal(selectedMaterials);
+
+        if (ImGui.MenuItem("As Gather List to Clipboard"))
+            CopySelectedAsGatherList(selectedMaterials);
+    }
+
+    private void DrawCraftListSelectionContext()
+    {
+        var list = BuildSelectedCraftList();
+        if (list.Recipes.Count == 0)
+            return;
+
+        ImGui.Separator();
+        if (ImGui.MenuItem("As Craft List to Clipboard"))
+            CopySelectedAsCraftList(list);
+    }
+
+    private Dictionary<uint, int> GetSelectedMaterialRequirements()
+        => _cachedPanels
+            .SelectMany(panel => panel.Entries)
+            .Where(entry => _materialSelection.Contains(MaterialRowKey(entry)))
+            .GroupBy(entry => entry.ItemId)
+            .ToDictionary(group => group.Key, group => group.Sum(entry => entry.Needed));
+
+    private string DefaultGatherListName()
+        => string.IsNullOrWhiteSpace(_editor?.ListName)
+            ? "Crafting Materials"
+            : $"{_editor.ListName} Materials";
+
+    private string DefaultCraftListName()
+        => string.IsNullOrWhiteSpace(_editor?.ListName)
+            ? "Selected Crafts"
+            : $"{_editor.ListName} Crafts";
+
+    private CraftingListDefinition BuildSelectedCraftList()
+    {
+        if (_editor == null)
+            return new CraftingListDefinition { Name = DefaultCraftListName() };
+
+        var sources = new List<CraftingMaterialCraftListSource>();
+        foreach (var group in _cachedPanels
+                     .SelectMany(panel => panel.Entries)
+                     .Where(entry => entry.IsPrecraft && _materialSelection.Contains(MaterialRowKey(entry)))
+                     .GroupBy(entry => entry.ItemId))
+        {
+            var recipe = _editor.PlanningList.ResolveRecipeForItem(group.Key);
+            var needed = group.Sum(entry => entry.Needed);
+            if (!recipe.HasValue || recipe.Value.AmountResult == 0 || needed <= 0)
+                continue;
+
+            sources.Add(new CraftingMaterialCraftListSource(
+                recipe.Value.RowId,
+                needed,
+                recipe.Value.AmountResult));
+        }
+
+        return CraftingMaterialCraftListExport.Build(DefaultCraftListName(), sources);
+    }
+
+    private void OpenGatherListModal(Dictionary<uint, int> selectedMaterials)
+    {
+        _pendingGatherListMaterials = new Dictionary<uint, int>(selectedMaterials);
+        _gatherListSearch = string.Empty;
+        _newGatherListName = DefaultGatherListName();
+        _openGatherListModal = true;
+    }
+
+    private AutoGatherList BuildPendingGatherList(string name)
+        => CraftingGatherBridge.BuildPersistentGatherList(name, _pendingGatherListMaterials);
+
+    private void DrawGatherListModal()
+    {
+        const string popupId = "Add Selected Materials to Gather List##CraftingMaterials";
+        if (_openGatherListModal)
+        {
+            ImGui.OpenPopup(popupId);
+            _openGatherListModal = false;
+        }
+
+        if (!ImGui.BeginPopupModal(popupId, ImGuiWindowFlags.AlwaysAutoResize))
+            return;
+
+        ImGui.TextUnformatted($"{_pendingGatherListMaterials.Count:N0} selected material type(s)");
+        ImGui.Spacing();
+        ImGui.TextColored(new Vector4(0.7f, 1f, 0.7f, 1f), "Create New List:");
+        ImGui.SetNextItemWidth(VulcanUiScaling.Scaled(360f));
+        var createEnter = ImGui.InputTextWithHint(
+            "##NewMaterialGatherListName",
+            "List name...",
+            ref _newGatherListName,
+            128,
+            ImGuiInputTextFlags.EnterReturnsTrue);
+        var canCreate = !string.IsNullOrWhiteSpace(_newGatherListName);
+        if ((ImGuiUtil.DrawDisabledButton(
+                    "Create & Add",
+                    new Vector2(-1, 0),
+                    "Enter a list name.",
+                    !canCreate)
+             || createEnter)
+         && canCreate)
+        {
+            var list = BuildPendingGatherList(_newGatherListName.Trim());
+            if (list.Items.Count > 0)
+            {
+                _autoGatherListsManager.AddList(list);
+                Communicator.Print($"Created auto-gather list '{list.Name}' with {list.Items.Count:N0} selected material(s).");
+                ImGui.CloseCurrentPopup();
+            }
+        }
+
+        ImGui.Spacing();
+        ImGui.Separator();
+        ImGui.TextColored(new Vector4(1f, 0.9f, 0.6f, 1f), "Add to Existing List:");
+        ImGui.SetNextItemWidth(VulcanUiScaling.Scaled(360f));
+        ImGui.InputTextWithHint("##MaterialGatherListSearch", "Search lists...", ref _gatherListSearch, 128);
+
+        var filteredLists = _autoGatherListsManager.Lists
+            .Where(list => string.IsNullOrWhiteSpace(_gatherListSearch)
+                || list.Name.Contains(_gatherListSearch, StringComparison.OrdinalIgnoreCase)
+                || list.FolderPath.Contains(_gatherListSearch, StringComparison.OrdinalIgnoreCase))
+            .OrderBy(list => list.FolderPath, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(list => list.Name, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        var rowHeight = ImGui.GetTextLineHeightWithSpacing();
+        var childHeight = Math.Min(
+            Math.Max(1, filteredLists.Count) * rowHeight + ImGui.GetStyle().WindowPadding.Y * 2f,
+            VulcanUiScaling.Scaled(180f));
+        ImGui.BeginChild("##MaterialGatherLists", new Vector2(VulcanUiScaling.Scaled(360f), childHeight), true);
+        if (filteredLists.Count == 0)
+        {
+            ImGui.TextDisabled("No matching gather lists");
+        }
+        else
+        {
+            foreach (var destination in filteredLists)
+            {
+                var displayName = string.IsNullOrWhiteSpace(destination.FolderPath)
+                    ? destination.Name
+                    : $"{destination.FolderPath}/{destination.Name}";
+                if (!ImGui.MenuItem(string.IsNullOrWhiteSpace(displayName) ? "<Unnamed>" : displayName))
+                    continue;
+
+                var source = BuildPendingGatherList(DefaultGatherListName());
+                var result = _autoGatherListsManager.MergeItems(destination, source);
+                Communicator.Print(
+                    $"Added selected materials to '{destination.Name}': {result.Added:N0} new, {result.Merged:N0} merged, {result.Skipped:N0} skipped.");
+                ImGui.CloseCurrentPopup();
+                break;
+            }
+        }
+        ImGui.EndChild();
+
+        if (ImGui.Button("Cancel", new Vector2(-1, 0)))
+            ImGui.CloseCurrentPopup();
+        ImGui.EndPopup();
+    }
+
+    private void CopySelectedAsGatherList(IReadOnlyDictionary<uint, int> selectedMaterials)
+    {
+        var list = CraftingGatherBridge.BuildPersistentGatherList(DefaultGatherListName(), selectedMaterials);
+        if (list.Items.Count == 0)
+            return;
+
+        try
+        {
+            var payload = new AutoGatherList.Config(list).ToBase64();
+            ImGui.SetClipboardText(payload);
+            Communicator.PrintClipboardMessage("Auto-gather list ", list.Name);
+        }
+        catch (Exception ex)
+        {
+            Communicator.PrintClipboardMessage("Auto-gather list ", list.Name, ex);
+        }
+    }
+
+    private static void CopySelectedAsCraftList(CraftingListDefinition list)
+    {
+        try
+        {
+            var payload = CraftingListManager.SerializeExport(list);
+            ImGui.SetClipboardText(payload);
+            Communicator.PrintClipboardMessage("Craft list ", list.Name);
+        }
+        catch (Exception ex)
+        {
+            Communicator.PrintClipboardMessage("Craft list ", list.Name, ex);
+        }
     }
 
     private void DrawVendorBuyListPopup(MaterialEntry entry, IReadOnlyList<VendorBuyListManager.VendorTargetRequest>? vendorTargets)
@@ -945,21 +1452,69 @@ public class CraftingMaterialsWindow : Window
 
     private static IReadOnlyList<CraftingRowIcons.RowIcon> GetVisibleSourceIcons(MaterialEntry entry)
     {
-        var sourceIcons = CraftingRowIcons.GetMaterialIcons(entry.ItemId, entry.IsPrecraft);
-        if (entry.CurrencyOptions.Count == 0 || sourceIcons.Count == 0)
+        var sourceIcons = CraftingRowIcons.GetMaterialIcons(entry.ItemId, entry.IsPrecraft, entry.ClassJobId);
+        if (sourceIcons.Count == 0)
             return sourceIcons;
 
-        var currencyIconIds = new HashSet<uint>();
+        var interactiveIconIds = new HashSet<uint>();
         foreach (var option in entry.CurrencyOptions)
             foreach (var iconId in option.IconIds)
-                currencyIconIds.Add(iconId);
+                interactiveIconIds.Add(iconId);
+        if (entry.ReductionSourceClassJobId != 0)
+            interactiveIconIds.Add(CraftingRowIcons.GetClassJobIcon(entry.ReductionSourceClassJobId).IconId);
+
+        if (interactiveIconIds.Count == 0)
+            return sourceIcons;
 
         var filtered = new List<CraftingRowIcons.RowIcon>(sourceIcons.Count);
         foreach (var sourceIcon in sourceIcons)
-            if (!currencyIconIds.Contains(sourceIcon.IconId))
+            if (!interactiveIconIds.Contains(sourceIcon.IconId))
                 filtered.Add(sourceIcon);
 
         return filtered;
+    }
+
+    private bool DrawReductionSourcePicker(MaterialEntry entry)
+    {
+        var rowIcon = CraftingRowIcons.GetClassJobIcon(entry.ReductionSourceClassJobId);
+        var lineH = ImGui.GetTextLineHeight();
+        var iconSize = new Vector2(lineH, lineH);
+        var cursorPosBefore = ImGui.GetCursorScreenPos();
+        var drawList = ImGui.GetWindowDrawList();
+
+        ImGui.PushStyleVar(ImGuiStyleVar.FramePadding, Vector2.Zero);
+        ImGui.PushStyleColor(ImGuiCol.Button, Vector4.Zero);
+        ImGui.PushStyleColor(ImGuiCol.ButtonHovered, new Vector4(1f, 1f, 1f, 0.15f));
+        ImGui.PushStyleColor(ImGuiCol.ButtonActive, new Vector4(1f, 1f, 1f, 0.30f));
+        ImGui.PushID($"##matred_{entry.ItemId}_{entry.ReductionSourceItemId}");
+        var clicked = false;
+        var icon = Icons.DefaultStorage.TextureProvider.GetFromGameIcon(new GameIconLookup(rowIcon.IconId));
+        if (icon.TryGetWrap(out var wrap, out _))
+            clicked = ImGui.ImageButton(wrap.Handle, iconSize);
+        else
+            ImGui.Dummy(iconSize);
+        ImGui.PopID();
+        ImGui.PopStyleColor(3);
+        ImGui.PopStyleVar();
+
+        var isSelected = _materialAcquisitionSelection.ShouldUseReduction(
+            entry.ItemId,
+            reductionAvailable: true,
+            currencyAvailable: entry.CurrencyOptions.Count > 0);
+        if (!isSelected)
+            drawList.AddRectFilled(cursorPosBefore, cursorPosBefore + iconSize,
+                ImGui.ColorConvertFloat4ToU32(new Vector4(0f, 0f, 0f, 0.55f)));
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip(
+                $"{rowIcon.Tooltip} via Aetherial Reduction\nGather {entry.ReductionSourceName}. Reduction yield varies.\nClick to use gathering.");
+
+        if (clicked)
+        {
+            _materialAcquisitionSelection.SelectReduction(entry.ItemId);
+            InvalidateMaterialView();
+        }
+
+        return true;
     }
 
     private bool DrawCurrencyPicker(MaterialEntry entry, bool preferBicolorDefault)
@@ -982,7 +1537,10 @@ public class CraftingMaterialsWindow : Window
             if (i > 0)
                 ImGui.SameLine(0, MaterialRowIconSpacing);
             var option = entry.CurrencyOptions[i];
-            var isSelected = selectedOption is { } selected
+            var currencySourceSelected = entry.ReductionSourceItemId == 0
+                                      || _materialAcquisitionSelection.IsCurrencySelected(entry.ItemId);
+            var isSelected = currencySourceSelected
+                          && selectedOption is { } selected
                           && selected.OfferKey == option.OfferKey;
 
             ImGui.PushID($"##matcur_{entry.ItemId}_{option.OfferKey}");
@@ -1035,7 +1593,11 @@ public class CraftingMaterialsWindow : Window
             }
 
             if (clicked)
-                _userSelectedCurrencyByItem[entry.ItemId] = option.OfferKey;
+            {
+                _materialAcquisitionSelection.SelectCurrency(entry.ItemId, option.OfferKey);
+                if (entry.ReductionSourceItemId != 0)
+                    InvalidateMaterialView();
+            }
 
             ImGui.PopID();
         }

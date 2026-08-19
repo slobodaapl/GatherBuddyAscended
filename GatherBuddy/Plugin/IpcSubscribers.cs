@@ -219,7 +219,6 @@ namespace GatherBuddy.Plugin
                 Debug.Assert(AethernetTeleport != null);
                 Debug.Assert(ChangeCharacter != null);
                 Debug.Assert(CanVisitSameDC != null);
-                Debug.Assert(TPAndChangeWorld != null);
             }
 
         internal static bool Enabled
@@ -255,8 +254,73 @@ namespace GatherBuddy.Plugin
         [EzIPC("Lifestream.CanVisitSameDC", applyPrefix: false)]
         internal static readonly Func<string, bool>? CanVisitSameDC;
 
-        [EzIPC("Lifestream.TPAndChangeWorld", applyPrefix: false)]
-        internal static readonly Action<string, bool, string, bool, int?, bool?, bool?>? TPAndChangeWorld;
+        internal static bool TryTpAndChangeWorld(
+            string world,
+            bool isDcTransfer,
+            string secondaryTeleport,
+            bool noSecondaryTeleport,
+            int? gateway,
+            bool? doNotify,
+            bool? returnToGateway,
+            out string error)
+        {
+            try
+            {
+                Dalamud.PluginInterface
+                    .GetIpcSubscriber<string, bool, string, bool, int?, bool?, bool?, object>("Lifestream.TPAndChangeWorld")
+                    .InvokeAction(
+                        world,
+                        isDcTransfer,
+                        secondaryTeleport,
+                        noSecondaryTeleport,
+                        gateway,
+                        doNotify,
+                        returnToGateway);
+                error = string.Empty;
+                return true;
+            }
+            catch (Exception exception)
+            {
+                error = exception.Message;
+                return false;
+            }
+        }
+
+        internal static bool TryAethernetTeleportById(uint aethernetId, out string error)
+        {
+            try
+            {
+                var accepted = Dalamud.PluginInterface
+                    .GetIpcSubscriber<uint, bool>("Lifestream.AethernetTeleportById")
+                    .InvokeFunc(aethernetId);
+                error = accepted
+                    ? string.Empty
+                    : "Lifestream rejected the aethernet request.";
+                return accepted;
+            }
+            catch (Exception exception)
+            {
+                error = exception.Message;
+                return false;
+            }
+        }
+
+        internal static bool TryAbort(out string error)
+        {
+            try
+            {
+                Dalamud.PluginInterface
+                    .GetIpcSubscriber<object>("Lifestream.Abort")
+                    .InvokeAction();
+                error = string.Empty;
+                return true;
+            }
+            catch (Exception exception)
+            {
+                error = exception.Message;
+                return false;
+            }
+        }
 
         internal static uint ActiveAetheryteId
             => GetActiveAetheryte?.Invoke() ?? 0;

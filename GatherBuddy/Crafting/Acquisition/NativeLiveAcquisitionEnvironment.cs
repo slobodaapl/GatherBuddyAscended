@@ -14,6 +14,7 @@ using FFXIVClientStructs.FFXIV.Client.Game.UI;
 using FFXIVClientStructs.FFXIV.Client.UI;
 using FFXIVClientStructs.FFXIV.Client.UI.Agent;
 using FFXIVClientStructs.FFXIV.Client.UI.Info;
+using FFXIVClientStructs.FFXIV.Component.GUI;
 using GatherBuddy.Automation;
 using GatherBuddy.Helpers;
 using GatherBuddy.Plugin;
@@ -36,13 +37,24 @@ namespace GatherBuddy.Crafting.Acquisition;
 /// </summary>
 public sealed class NativeLiveAcquisitionEnvironment : ILiveAcquisitionEnvironment
 {
-    public const uint MarketBoardDataId = 2_000_442;
     private static readonly TimeSpan WorldTravelRetryCooldown = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan MarketBoardNavigationPollInterval = TimeSpan.FromMilliseconds(500);
+    private static readonly TimeSpan MarketBoardInteractionRetryCooldown = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan MarketRequestStartRetryInterval = TimeSpan.FromMilliseconds(250);
 
     private readonly Func<AcquisitionTransaction, TimeSpan, CancellationToken, Task<LiveVendorPurchaseResult>>? _vendorPurchase;
     private readonly Func<VendorCurrencyGroup, uint, string, VendorCurrencyAvailability> _currencyAvailability;
     private int _marketRequestGeneration;
     private byte? _activeMarketRequestId;
+    private uint _marketBoardGatewayId;
+    private bool _marketBoardAethernetRequested;
+    private bool _marketBoardDetectedLogged;
+    private bool _marketBoardInteractionRequested;
+    private DateTime _marketBoardInteractionRequestedUtc;
+    private bool _marketBoardPathRequested;
+    private uint _marketBoardTeleportTerritoryId;
+    private bool _marketBoardTeleportRequested;
+    private bool _marketBoardShortcutRequested;
 
     public NativeLiveAcquisitionEnvironment(
         Func<AcquisitionTransaction, TimeSpan, CancellationToken, Task<LiveVendorPurchaseResult>>? vendorPurchase = null,
@@ -50,6 +62,7 @@ public sealed class NativeLiveAcquisitionEnvironment : ILiveAcquisitionEnvironme
     {
         _vendorPurchase = vendorPurchase;
         _currencyAvailability = currencyAvailability ?? ResolveCurrencyAvailability;
+        MarketBoardGameDataCatalog.WarmInBackground();
     }
 
     public uint CurrentWorldId
@@ -70,11 +83,17 @@ public sealed class NativeLiveAcquisitionEnvironment : ILiveAcquisitionEnvironme
     public bool IsVendorAutomationAvailable
         => _vendorPurchase != null;
 
+    public bool IsAtMarketBoard
+        => RunOnFrameworkThread(IsAtMarketBoardNative);
+
     public bool IsInDuty
         => RunOnFrameworkThread(Functions.BoundByDuty);
 
     public bool IsInNonCrossWorldParty
         => RunOnFrameworkThread(IsInNonCrossWorldPartyNative);
+
+    public uint CurrentGatewayId
+        => RunOnFrameworkThread(GetCurrentGatewayIdNative);
 
     public bool CanVisitWorld(uint worldId)
     {
@@ -196,12 +215,21 @@ public sealed class NativeLiveAcquisitionEnvironment : ILiveAcquisitionEnvironme
             return false;
         if (route.WorldId == CurrentWorldId)
             return true;
-        if (!IsLifestreamAvailable || !CanVisitWorld(route.WorldId))
+        if (!IsLifestreamAvailable)
+        {
+            GatherBuddy.Log.Warning($"[Acquisition] Cannot travel to {route.WorldName}: Lifestream is unavailable.");
             return false;
+        }
+        if (!CanVisitWorld(route.WorldId))
+        {
+            GatherBuddy.Log.Warning($"[Acquisition] Cannot travel to {route.WorldName}: Lifestream reports that the world is unreachable.");
+            return false;
+        }
 
         var deadline = DateTime.UtcNow + timeout;
         var nextAttemptUtc = DateTime.MinValue;
         var attemptCount = 0;
+        string? lastWaitReason = null;
         try
         {
             while (DateTime.UtcNow < deadline)
@@ -211,32 +239,41 @@ public sealed class NativeLiveAcquisitionEnvironment : ILiveAcquisitionEnvironme
                 var snapshot = RunOnFrameworkThread(() =>
                 {
                     var lifestreamReady = Lifestream.Enabled
-                        && Lifestream.IsBusy != null
-                        && Lifestream.TPAndChangeWorld != null;
+                        && Lifestream.IsBusy != null;
                     var isBusy = lifestreamReady && Lifestream.IsBusy!();
                     var currentWorldId = GetCurrentWorldIdNative();
+                    var betweenAreas = Functions.BetweenAreas();
+                    var screenReady = GenericHelpers.IsScreenReady();
                     var canAttempt = currentWorldId != route.WorldId
                         && lifestreamReady
                         && !isBusy
-                        && !Functions.BetweenAreas()
-                        && GenericHelpers.IsScreenReady()
+                        && !betweenAreas
+                        && screenReady
                         && now >= nextAttemptUtc;
                     if (canAttempt)
                     {
-                        Lifestream.TPAndChangeWorld!(
-                            route.WorldName,
-                            false,
-                            string.Empty,
-                            false,
-                            route.GatewayId == 0 ? null : (int)route.GatewayId,
-                            true,
-                            true);
+                        if (!Lifestream.TryTpAndChangeWorld(
+                                route.WorldName,
+                                false,
+                                string.Empty,
+                                false,
+                                route.GatewayId == 0 ? null : (int)route.GatewayId,
+                                true,
+                                true,
+                                out var error))
+                        {
+                            throw new InvalidOperationException(
+                                $"Lifestream TPAndChangeWorld IPC failed: {error}");
+                        }
                     }
 
                     return new WorldTravelSnapshot(
                         currentWorldId,
                         isBusy,
-                        canAttempt);
+                        canAttempt,
+                        lifestreamReady,
+                        betweenAreas,
+                        screenReady);
                 }, cancellationToken);
 
                 if (snapshot.CurrentWorldId == route.WorldId && !snapshot.IsBusy)
@@ -257,12 +294,29 @@ public sealed class NativeLiveAcquisitionEnvironment : ILiveAcquisitionEnvironme
                             $"[Acquisition] Retrying Lifestream travel to {route.WorldName} via {route.GatewayName} (attempt {attemptCount}, current world {snapshot.CurrentWorldId}).");
                     }
                 }
+                else if (attemptCount == 0)
+                {
+                    var waitReason = DescribeWorldTravelWait(snapshot);
+                    if (!string.Equals(lastWaitReason, waitReason, StringComparison.Ordinal))
+                    {
+                        lastWaitReason = waitReason;
+                        GatherBuddy.Log.Information(
+                            $"[Acquisition] Waiting to start Lifestream travel to {route.WorldName}: {waitReason}.");
+                    }
+                }
 
                 await Task.Delay(250, cancellationToken);
             }
 
-            return RunOnFrameworkThread(() => GetCurrentWorldIdNative() == route.WorldId
+            var completed = RunOnFrameworkThread(() => GetCurrentWorldIdNative() == route.WorldId
                 && !(Lifestream.IsBusy?.Invoke() ?? false), cancellationToken);
+            if (!completed)
+            {
+                GatherBuddy.Log.Warning(attemptCount == 0
+                    ? $"[Acquisition] Lifestream travel to {route.WorldName} never started before timeout. Last blocker: {lastWaitReason ?? "unknown"}."
+                    : $"[Acquisition] Lifestream travel to {route.WorldName} did not complete before timeout after {attemptCount} request(s).");
+            }
+            return completed;
         }
         catch (OperationCanceledException)
         {
@@ -275,6 +329,21 @@ public sealed class NativeLiveAcquisitionEnvironment : ILiveAcquisitionEnvironme
         }
     }
 
+    private static string DescribeWorldTravelWait(WorldTravelSnapshot snapshot)
+    {
+        if (!snapshot.LifestreamReady)
+            return "Lifestream IPC is unavailable";
+        if (snapshot.IsBusy)
+            return "Lifestream is busy";
+        if (snapshot.BetweenAreas)
+            return "the character is between areas";
+        if (!snapshot.ScreenReady)
+            return "the game screen is loading or fading";
+        if (snapshot.CurrentWorldId == 0)
+            return "the current world is unavailable";
+        return "the world-travel request gate is not ready";
+    }
+
     public async Task<bool> NavigateToMarketBoardAsync(
         AcquisitionWorldRoute route,
         TimeSpan timeout,
@@ -285,7 +354,25 @@ public sealed class NativeLiveAcquisitionEnvironment : ILiveAcquisitionEnvironme
             || CurrentWorldId != route.WorldId)
             return false;
 
+        RunOnFrameworkThread(() =>
+        {
+            StopNativeNavigation();
+            _marketBoardGatewayId = route.GatewayId;
+            _marketBoardAethernetRequested = false;
+            _marketBoardDetectedLogged = false;
+            _marketBoardInteractionRequested = false;
+            _marketBoardInteractionRequestedUtc = DateTime.MinValue;
+            _marketBoardPathRequested = false;
+            _marketBoardTeleportRequested = false;
+            _marketBoardTeleportTerritoryId = 0;
+            _marketBoardShortcutRequested = false;
+        }, cancellationToken);
+
         var deadline = DateTime.UtcNow + timeout;
+        var aethernetBusyObserved = false;
+        var aethernetCompleted = false;
+        var resolvedTerritoryId = 0u;
+        MarketBoardTerritoryData? territoryData = null;
         while (DateTime.UtcNow < deadline)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -293,17 +380,64 @@ public sealed class NativeLiveAcquisitionEnvironment : ILiveAcquisitionEnvironme
                 return false;
             if (RunOnFrameworkThread(() => Lifestream.IsBusy?.Invoke() ?? false, cancellationToken))
             {
-                await Task.Delay(250, cancellationToken);
+                aethernetBusyObserved |= _marketBoardAethernetRequested;
+                await Task.Delay(MarketBoardNavigationPollInterval, cancellationToken);
+                continue;
+            }
+            if (aethernetBusyObserved && !aethernetCompleted)
+            {
+                aethernetCompleted = true;
+                deadline = DateTime.UtcNow + timeout;
+                var completedTerritoryId = RunOnFrameworkThread(() => Dalamud.ClientState.TerritoryType, cancellationToken);
+                GatherBuddy.Log.Information(
+                    $"[Acquisition] Market-board aethernet completed in territory {completedTerritoryId}; starting the {timeout.TotalSeconds:N0}-second interaction window.");
+            }
+            if (!RunOnFrameworkThread(
+                    () => GenericHelpers.IsScreenReady() && Dalamud.Objects.LocalPlayer != null,
+                    cancellationToken))
+            {
+                await Task.Delay(MarketBoardNavigationPollInterval, cancellationToken);
                 continue;
             }
 
-            var step = RunOnFrameworkThread(() => TryNavigateToMarketBoardNative(route), cancellationToken);
+            var territoryId = RunOnFrameworkThread(() => Dalamud.ClientState.TerritoryType, cancellationToken);
+            if (territoryId == 0)
+            {
+                await Task.Delay(MarketBoardNavigationPollInterval, cancellationToken);
+                continue;
+            }
+            if (territoryId != resolvedTerritoryId)
+            {
+                territoryData = await Task.Run(
+                    () => MarketBoardGameDataCatalog.ResolveTerritory(territoryId),
+                    cancellationToken);
+                resolvedTerritoryId = territoryId;
+                _marketBoardDetectedLogged = false;
+                _marketBoardPathRequested = false;
+                if (territoryData.Positions.Count > 0)
+                {
+                    GatherBuddy.Log.Information(
+                        $"[Acquisition] Resolved {territoryData.Positions.Count} market-board placement(s) "
+                        + $"and {territoryData.DefinitionIds.Count} definition(s) from game data for territory {territoryId}.");
+                }
+                else
+                {
+                    GatherBuddy.Log.Warning(
+                        $"[Acquisition] No game-data market-board placement is available in territory {territoryId}; "
+                        + $"using gateway fallback. {territoryData.UnavailableReason}");
+                }
+            }
+
+            var step = RunOnFrameworkThread(
+                () => TryNavigateToMarketBoardNative(route, territoryData!),
+                cancellationToken);
             if (step == MarketBoardNavigationStep.Open)
                 return true;
             if (step == MarketBoardNavigationStep.Unavailable)
                 return false;
-            await Task.Delay(250, cancellationToken);
+            await Task.Delay(MarketBoardNavigationPollInterval, cancellationToken);
         }
+        RunOnFrameworkThread(() => LogMarketBoardNavigationTimeout(territoryData), cancellationToken);
         return false;
     }
 
@@ -315,24 +449,53 @@ public sealed class NativeLiveAcquisitionEnvironment : ILiveAcquisitionEnvironme
         if (itemId == 0)
             return LiveMarketListingsResponse.Failure("Cannot request market-board listings for world item 0.");
 
+        var itemName = RunOnFrameworkThread(() => ResolveMarketItemName(itemId), cancellationToken);
+        if (string.IsNullOrWhiteSpace(itemName))
+            return LiveMarketListingsResponse.Failure($"Could not resolve market-board item {itemId:N0} in the current client language.");
+
         var generation = checked(++_marketRequestGeneration);
-        var requestStart = RunOnFrameworkThread(() =>
+        var deadline = DateTime.UtcNow + timeout;
+        var startState = new NativeMarketRequestStartState();
+        NativeMarketRequestEvidence? requestEvidence = null;
+        var lastStartFailure = "the market-board search interface is not ready";
+        while (DateTime.UtcNow < deadline)
         {
-            var started = TryBeginMarketRequest(itemId, generation, out var evidence);
-            return (Started: started, Evidence: evidence);
-        }, cancellationToken);
-        if (!requestStart.Started)
-            return LiveMarketListingsResponse.Failure($"Could not start a fresh market-board listing request for item {itemId:N0}.");
-        _activeMarketRequestId = requestStart.Evidence.RequestId;
+            cancellationToken.ThrowIfCancellationRequested();
+            var requestStart = RunOnFrameworkThread(() =>
+            {
+                var started = TryAdvanceMarketRequest(
+                    itemId,
+                    itemName,
+                    generation,
+                    startState,
+                    out var evidence,
+                    out var failure);
+                return (Started: started, Evidence: evidence, Failure: failure);
+            }, cancellationToken);
+            if (requestStart.Started)
+            {
+                requestEvidence = requestStart.Evidence;
+                break;
+            }
+
+            lastStartFailure = requestStart.Failure;
+            await Task.Delay(MarketRequestStartRetryInterval, cancellationToken);
+        }
+
+        if (requestEvidence is not { } evidence)
+        {
+            return LiveMarketListingsResponse.Failure(
+                $"Could not start a fresh market-board listing request for item {itemId:N0} before timeout: {lastStartFailure}.");
+        }
+        _activeMarketRequestId = evidence.RequestId;
 
         var sawWaiting = false;
-        var deadline = DateTime.UtcNow + timeout;
         while (DateTime.UtcNow < deadline)
         {
             cancellationToken.ThrowIfCancellationRequested();
             if (_marketRequestGeneration != generation
-                || requestStart.Evidence.Generation != generation
-                || requestStart.Evidence.ItemId != itemId)
+                || evidence.Generation != generation
+                || evidence.ItemId != itemId)
                 return LiveMarketListingsResponse.Failure($"Market-board listing request generation {generation} was superseded; stale proxy data was discarded.");
             var proxyState = RunOnFrameworkThread(() =>
             {
@@ -345,13 +508,15 @@ public sealed class NativeLiveAcquisitionEnvironment : ILiveAcquisitionEnvironme
             if (state.SearchItemId != itemId)
                 return LiveMarketListingsResponse.Failure($"Market-board listing request generation {generation} returned item {state.SearchItemId:N0} instead of {itemId:N0}.");
             if (!state.WaitingForListings
-                && (state.CurrentRequestId == requestStart.Evidence.PreviousCurrentRequestId
-                    || state.CurrentRequestId != requestStart.Evidence.RequestId))
+                && state.CurrentRequestId != evidence.PreviousCurrentRequestId
+                && state.CurrentRequestId != evidence.RequestId)
                 return LiveMarketListingsResponse.Failure($"Market-board listing request generation {generation} did not produce a correlated InfoProxy result; stale proxy data was discarded.");
 
             sawWaiting |= state.WaitingForListings;
-            var sawFreshResult = DateTime.UtcNow > requestStart.Evidence.StartedAtUtc
-                && (sawWaiting || state.ListingCount > requestStart.Evidence.InitialListingCount);
+            var correlatedCompletion = state.CurrentRequestId == evidence.RequestId
+                && state.CurrentRequestId != evidence.PreviousCurrentRequestId;
+            var sawFreshResult = DateTime.UtcNow > evidence.StartedAtUtc
+                && (sawWaiting || correlatedCompletion || state.ListingCount > evidence.InitialListingCount);
             if (!state.WaitingForListings && sawFreshResult)
             {
                 if (_marketRequestGeneration != generation)
@@ -359,7 +524,7 @@ public sealed class NativeLiveAcquisitionEnvironment : ILiveAcquisitionEnvironme
                 var listings = RunOnFrameworkThread(() =>
                     ReadCurrentListings(
                         itemId,
-                        requestStart.Evidence.RequestId,
+                        evidence.RequestId,
                         GetCurrentWorldIdNative(),
                         GetCurrentWorldNameNative()), cancellationToken);
                 if (listings.Any(listing => listing.WorldId == 0))
@@ -467,6 +632,8 @@ public sealed class NativeLiveAcquisitionEnvironment : ILiveAcquisitionEnvironme
         {
             RunOnFrameworkThread(() =>
             {
+                if (Lifestream.Enabled && !Lifestream.TryAbort(out var abortError))
+                    GatherBuddy.Log.Debug($"[Acquisition] Lifestream cleanup warning: {abortError}");
                 StopNativeNavigation();
                 HideMarketBoard();
             }, cancellationToken);
@@ -478,35 +645,148 @@ public sealed class NativeLiveAcquisitionEnvironment : ILiveAcquisitionEnvironme
         return Task.CompletedTask;
     }
 
-    private static unsafe bool TryBeginMarketRequest(
+    private static unsafe bool TryAdvanceMarketRequest(
         uint itemId,
+        string itemName,
         int generation,
-        out NativeMarketRequestEvidence evidence)
+        NativeMarketRequestStartState startState,
+        out NativeMarketRequestEvidence evidence,
+        out string failure)
     {
         evidence = default;
+        var agent = AgentItemSearch.Instance();
         var proxy = GetItemSearchProxy();
-        if (proxy == null)
+        if (agent == null || proxy == null)
+        {
+            failure = "AgentItemSearch or InfoProxyItemSearch is unavailable";
             return false;
+        }
 
-        proxy->SearchItemId = itemId;
-        proxy->ClearListData();
-        var initialCount = System.Math.Max(0, (int)proxy->ListingCount);
-        var previousCurrentRequestId = proxy->CurrentRequestId;
-        var previousNextRequestId = proxy->NextRequestId;
-        var startedAtUtc = DateTime.UtcNow;
-        if (!proxy->RequestData())
+        if (startState.ResultSelected)
+        {
+            if (proxy->SearchItemId != itemId)
+            {
+                failure = $"the UI selected item {proxy->SearchItemId:N0} instead of {itemId:N0}";
+                return false;
+            }
+            if (proxy->NextRequestId == startState.PreviousNextRequestId)
+            {
+                failure = "waiting for the UI selection to assign a fresh request id";
+                return false;
+            }
+
+            evidence = new NativeMarketRequestEvidence(
+                generation,
+                itemId,
+                startState.InitialListingCount,
+                startState.SelectedAtUtc,
+                startState.PreviousCurrentRequestId,
+                proxy->NextRequestId);
+            failure = string.Empty;
+            return true;
+        }
+
+        if (!GenericHelpers.TryGetAddonByName<AddonItemSearch>("ItemSearch", out var addon)
+            || addon == null
+            || !addon->AtkUnitBase.IsVisible)
+        {
+            failure = "the ItemSearch addon is not visible";
             return false;
-        var requestId = proxy->NextRequestId;
-        if (requestId == previousNextRequestId)
+        }
+
+        if (!string.IsNullOrEmpty(startState.SearchSubmissionFailure))
+        {
+            failure = startState.SearchSubmissionFailure;
             return false;
-        evidence = new NativeMarketRequestEvidence(
-            generation,
-            itemId,
-            initialCount,
-            startedAtUtc,
-            previousCurrentRequestId,
-            requestId);
-        return true;
+        }
+
+        if (addon->SearchTextInput == null
+            || addon->SearchButton == null
+            || addon->ResultsList == null)
+        {
+            failure = "the ItemSearch text input, search button, or results list is unavailable";
+            return false;
+        }
+
+        if (!startState.SearchIssued)
+        {
+            addon->SearchTextInput->SetText(itemName);
+            var enteredText = addon->SearchTextInput->RawString.ToString();
+            if (!string.Equals(enteredText, itemName, StringComparison.Ordinal))
+            {
+                failure = $"the ItemSearch text input contains '{enteredText}' instead of '{itemName}'";
+                return false;
+            }
+
+            // RunSearch(true) emits callback opcode 1 without the search text,
+            // mode, or filter; in the live ItemSearch addon that opens the
+            // Wishlist. False emits the normal-search opcode 0 and complete
+            // search arguments.
+            addon->RunSearch(false);
+            startState.SearchIssued = true;
+            var submittedText = addon->SearchText.ToString();
+            if (string.Equals(submittedText, itemName, StringComparison.Ordinal))
+            {
+                GatherBuddy.Log.Information(
+                    $"[Acquisition] Submitted market-board text search for {itemName} ({itemId:N0}); waiting for the exact game result.");
+            }
+            else
+            {
+                startState.SearchSubmissionFailure = $"the ItemSearch callback did not retain search text '{itemName}' "
+                    + $"(mode={addon->Mode}, filter={addon->SelectedFilter}, text='{submittedText}')";
+                failure = startState.SearchSubmissionFailure;
+                return false;
+            }
+            failure = "waiting for the ItemSearch results";
+            return false;
+        }
+
+        if (addon->ResultsList == null)
+        {
+            failure = "the ItemSearch result list is unavailable";
+            return false;
+        }
+
+        var resultCount = System.Math.Max(0, addon->ResultsList->GetItemCount());
+        var resultIndex = -1;
+        for (var index = 0; index < resultCount; index++)
+        {
+            var resultName = addon->ResultsList->GetItemLabel(index).ToString();
+            if (string.Equals(resultName, itemName, StringComparison.Ordinal))
+            {
+                resultIndex = index;
+                break;
+            }
+        }
+        if (resultIndex < 0 && resultCount == 1)
+            resultIndex = 0;
+        if (resultIndex < 0)
+        {
+            failure = resultCount == 0
+                ? "waiting for the ItemSearch results"
+                : $"the ItemSearch results do not contain exact name '{itemName}'";
+            return false;
+        }
+
+        startState.InitialListingCount = System.Math.Max(0, (int)proxy->ListingCount);
+        startState.PreviousCurrentRequestId = proxy->CurrentRequestId;
+        startState.PreviousNextRequestId = proxy->NextRequestId;
+        startState.SelectedAtUtc = DateTime.UtcNow;
+        addon->ResultsList->DispatchItemEvent(resultIndex, AtkEventType.ListItemClick);
+        startState.ResultSelected = true;
+        GatherBuddy.Log.Information(
+            $"[Acquisition] Activated market-board result candidate for {itemName} ({itemId:N0}) at index {resultIndex}; "
+            + "waiting for the game to confirm the exact item and start its listing request.");
+        failure = "waiting for the activated UI result to start the exact-item listing request";
+        return false;
+    }
+
+    private static string ResolveMarketItemName(uint itemId)
+    {
+        var items = Dalamud.GameData.GetExcelSheet<Item>();
+        return items?.TryGetRow(itemId, out var item) == true
+            ? item.Name.ExtractText().Trim()
+            : string.Empty;
     }
 
     private static unsafe bool TryReadMarketProxyState(out NativeMarketProxyState state)
@@ -574,10 +854,17 @@ public sealed class NativeLiveAcquisitionEnvironment : ILiveAcquisitionEnvironme
             failure = "Market-board InfoProxy is unavailable.";
             return false;
         }
-        if (GetCurrentWorldIdNative() == 0)
+        var currentWorldId = GetCurrentWorldIdNative();
+        if (currentWorldId == 0)
         {
             stale = true;
             failure = "The current world is unknown; market-board purchase was rejected safely.";
+            return false;
+        }
+        if (requested.WorldId == 0 || currentWorldId != requested.WorldId)
+        {
+            stale = true;
+            failure = $"The current world {currentWorldId} does not match listing world {requested.WorldId}; market-board purchase was rejected safely.";
             return false;
         }
         if (!expectedRequestId.HasValue || proxy->CurrentRequestId != expectedRequestId.Value)
@@ -609,6 +896,10 @@ public sealed class NativeLiveAcquisitionEnvironment : ILiveAcquisitionEnvironme
 
             var inventoryBefore = GetInventoryCountNative(requested.ItemId, requested.IsHq);
             var gilBefore = GetGilBalanceNative();
+            GatherBuddy.Log.Information(
+                $"[Acquisition] Submitting exact market listing {requested.ListingId:N0}: "
+                + $"{requested.Quantity:N0}x item {requested.ItemId:N0} at {requested.PricePerUnit:N0} each "
+                + $"+ {requested.TotalTax:N0} tax = {requested.TotalGil:N0} Gil on world {requested.WorldId}.");
             fixed (MarketBoardListing* listingPointer = &nativeListing)
             {
                 if (!proxy->SetLastPurchasedItem(listingPointer) || !proxy->SendPurchaseRequestPacket())
@@ -641,7 +932,9 @@ public sealed class NativeLiveAcquisitionEnvironment : ILiveAcquisitionEnvironme
             && addon->AtkUnitBase.IsVisible;
     }
 
-    private static unsafe MarketBoardNavigationStep TryNavigateToMarketBoardNative(AcquisitionWorldRoute route)
+    private unsafe MarketBoardNavigationStep TryNavigateToMarketBoardNative(
+        AcquisitionWorldRoute route,
+        MarketBoardTerritoryData territoryData)
     {
         if (route.WorldId == 0
             || string.IsNullOrWhiteSpace(route.WorldName)
@@ -650,12 +943,27 @@ public sealed class NativeLiveAcquisitionEnvironment : ILiveAcquisitionEnvironme
             return MarketBoardNavigationStep.Unavailable;
 
         if (IsMarketBoardAddonVisibleNative())
-            return MarketBoardNavigationStep.Open;
+            return GetItemSearchProxy() != null
+                ? MarketBoardNavigationStep.Open
+                : MarketBoardNavigationStep.Continue;
 
-        var board = Dalamud.Objects.FirstOrDefault(obj => obj.BaseId == MarketBoardDataId);
+        var player = Dalamud.Objects.LocalPlayer;
+        var board = player == null
+            ? Dalamud.Objects.FirstOrDefault(obj => territoryData.IsMarketBoardDefinition(obj.BaseId))
+            : Dalamud.Objects
+                .Where(obj => territoryData.IsMarketBoardDefinition(obj.BaseId))
+                .MinBy(obj => Vector3.DistanceSquared(player.Position, obj.Position));
         if (board != null)
         {
-            var player = Dalamud.Objects.LocalPlayer;
+            var distance = player == null
+                ? 0f
+                : MathF.Sqrt(Vector3.DistanceSquared(player.Position, board.Position));
+            if (!_marketBoardDetectedLogged)
+            {
+                _marketBoardDetectedLogged = true;
+                GatherBuddy.Log.Information(
+                    $"[Acquisition] Detected market board {board.BaseId} at {distance:N1} yalms; targetable={board.IsTargetable}.");
+            }
             if (player != null && Vector3.DistanceSquared(player.Position, board.Position) > 16f)
             {
                 if (!IsVNavmeshAvailableNative())
@@ -663,31 +971,210 @@ public sealed class NativeLiveAcquisitionEnvironment : ILiveAcquisitionEnvironme
                 if (VNavmesh.Path.IsRunning() || VNavmesh.SimpleMove.PathfindInProgress())
                     return MarketBoardNavigationStep.Continue;
                 VNavmesh.SimpleMove.PathfindAndMoveCloseTo?.Invoke(board.Position, false, 3f);
+                if (!_marketBoardPathRequested)
+                {
+                    _marketBoardPathRequested = true;
+                    GatherBuddy.Log.Information("[Acquisition] Requested vnavmesh path to the detected market board.");
+                }
+                return MarketBoardNavigationStep.Continue;
             }
             else
             {
-                OpenMarketBoardObject(board.Address);
+                var now = DateTime.UtcNow;
+                if (now - _marketBoardInteractionRequestedUtc >= MarketBoardInteractionRetryCooldown)
+                {
+                    _marketBoardInteractionRequestedUtc = now;
+                    if (OpenMarketBoardObject(board.Address) && !_marketBoardInteractionRequested)
+                    {
+                        _marketBoardInteractionRequested = true;
+                        GatherBuddy.Log.Information(
+                            "[Acquisition] Requested market-board interaction; waiting for ItemSearch and InfoProxyItemSearch readiness.");
+                    }
+                }
+                return MarketBoardNavigationStep.Continue;
             }
         }
-        else if (Lifestream.Enabled && !(Lifestream.IsBusy?.Invoke() ?? false))
+
+        if (player == null)
+            return MarketBoardNavigationStep.Continue;
+
+        if (territoryData.Positions.Count > 0)
         {
-            // A world-hop route arrives in its selected GatewayName city. The
-            // unqualified /li mb command therefore stays in that city/current
-            // world instead of introducing another teleport.
-            Lifestream.ExecuteCommand?.Invoke("mb");
+            var position = territoryData.Positions.MinBy(candidate =>
+                Vector3.DistanceSquared(player.Position, candidate));
+            var distanceSquared = Vector3.DistanceSquared(player.Position, position);
+            if (distanceSquared <= 16f)
+                return MarketBoardNavigationStep.Continue;
+            if (!IsVNavmeshAvailableNative())
+                return MarketBoardNavigationStep.Unavailable;
+            if (VNavmesh.Path.IsRunning() || VNavmesh.SimpleMove.PathfindInProgress())
+                return MarketBoardNavigationStep.Continue;
+
+            VNavmesh.SimpleMove.PathfindAndMoveCloseTo?.Invoke(position, false, 3f);
+            if (!_marketBoardPathRequested)
+            {
+                _marketBoardPathRequested = true;
+                GatherBuddy.Log.Information(
+                    $"[Acquisition] Requested vnavmesh path to the nearest game-data market board "
+                    + $"({MathF.Sqrt(distanceSquared):N1} yalms away).");
+            }
+            return MarketBoardNavigationStep.Continue;
+        }
+
+        if (Lifestream.Enabled && !(Lifestream.IsBusy?.Invoke() ?? false))
+        {
+            if (_marketBoardTeleportRequested)
+            {
+                if (_marketBoardTeleportTerritoryId == Dalamud.ClientState.TerritoryType)
+                {
+                    _marketBoardTeleportRequested = false;
+                    _marketBoardTeleportTerritoryId = 0;
+                }
+                else
+                {
+                    return MarketBoardNavigationStep.Continue;
+                }
+            }
+
+            if (_marketBoardGatewayId == 0)
+            {
+                var activeAetheryteId = Lifestream.ActiveAetheryteId;
+                if (GetMarketBoardAethernetId(activeAetheryteId) != 0)
+                {
+                    _marketBoardGatewayId = activeAetheryteId;
+                }
+                else
+                {
+                    var destination = FindCheapestMarketBoardGateway();
+                    if (destination.Id != 0)
+                    {
+                        _marketBoardGatewayId = destination.Id;
+                        if (destination.TerritoryId != Dalamud.ClientState.TerritoryType)
+                        {
+                            if (!Teleporter.Teleport(destination.Id))
+                                return MarketBoardNavigationStep.Unavailable;
+                            _marketBoardTeleportRequested = true;
+                            _marketBoardTeleportTerritoryId = destination.TerritoryId;
+                            GatherBuddy.Log.Information(
+                                $"[Acquisition] Teleporting to {destination.Name} for its market-board aethernet route ({destination.Cost:N0} Gil).");
+                            return MarketBoardNavigationStep.Continue;
+                        }
+                    }
+                }
+            }
+
+            var marketBoardAethernetId = GetMarketBoardAethernetId(_marketBoardGatewayId);
+            if (marketBoardAethernetId != 0 && !_marketBoardAethernetRequested)
+            {
+                if (!Lifestream.TryAethernetTeleportById(marketBoardAethernetId, out var error))
+                {
+                    GatherBuddy.Log.Warning(
+                        $"[Acquisition] Could not request market-board aethernet {marketBoardAethernetId}: {error}");
+                    return MarketBoardNavigationStep.Unavailable;
+                }
+
+                _marketBoardAethernetRequested = true;
+                GatherBuddy.Log.Information(
+                    $"[Acquisition] Requested market-board aethernet {marketBoardAethernetId} from gateway {_marketBoardGatewayId}.");
+                return MarketBoardNavigationStep.Continue;
+            }
+
+            if (marketBoardAethernetId == 0 && !_marketBoardShortcutRequested)
+            {
+                Lifestream.ExecuteCommand?.Invoke("mb");
+                _marketBoardShortcutRequested = true;
+                GatherBuddy.Log.Information(
+                    "[Acquisition] No supported market-board gateway was available; requested Lifestream's market-board shortcut.");
+            }
         }
 
         return MarketBoardNavigationStep.Continue;
     }
 
+    private static void LogMarketBoardNavigationTimeout(MarketBoardTerritoryData? territoryData)
+    {
+        var player = Dalamud.Objects.LocalPlayer;
+        var nearby = player == null
+            ? Array.Empty<string>()
+            : Dalamud.Objects
+                .Where(obj => obj.BaseId != 0)
+                .Select(obj => new
+                {
+                    obj.BaseId,
+                    obj.ObjectKind,
+                    obj.IsTargetable,
+                    Distance = MathF.Sqrt(Vector3.DistanceSquared(player.Position, obj.Position)),
+                })
+                .Where(obj => obj.Distance <= 50f)
+                .OrderBy(obj => obj.Distance)
+                .Take(16)
+                .Select(obj => $"{obj.ObjectKind}/{obj.BaseId}@{obj.Distance:N1}y/targetable={obj.IsTargetable}")
+                .ToArray();
+        GatherBuddy.Log.Warning(
+            $"[Acquisition] Market-board navigation timed out in territory {Dalamud.ClientState.TerritoryType}; "
+            + $"gameDataPlacements={territoryData?.Positions.Count ?? 0}; "
+            + $"activeAetheryte={Lifestream.ActiveAetheryteId}; nearby=[{string.Join(", ", nearby)}].");
+    }
+
+    private static bool IsAtMarketBoardNative()
+    {
+        if (IsMarketBoardAddonVisibleNative())
+            return true;
+
+        var board = Dalamud.Objects.FirstOrDefault(obj => MarketBoardGameDataCatalog.IsKnownDefinition(obj.BaseId));
+        var player = Dalamud.Objects.LocalPlayer;
+        return board != null
+            && player != null
+            && Vector3.DistanceSquared(player.Position, board.Position) <= 16f;
+    }
+
+    private static uint GetMarketBoardAethernetId(uint gatewayId)
+        => gatewayId switch
+        {
+            AcquisitionWorldGateways.Gridania => 26,
+            AcquisitionWorldGateways.LimsaLominsa => 49,
+            AcquisitionWorldGateways.Uldah => 125,
+            _ => 0,
+        };
+
+    private static unsafe (uint Id, uint TerritoryId, string Name, long Cost) FindCheapestMarketBoardGateway()
+    {
+        var sheet = Dalamud.GameData.GetExcelSheet<Aetheryte>();
+        if (sheet == null)
+            return default;
+
+        var candidates = new List<(uint Id, uint TerritoryId, string Name, long Cost)>();
+        foreach (var gatewayId in AcquisitionWorldGateways.Preferred)
+        {
+            if (!sheet.TryGetRow(gatewayId, out var aetheryte)
+                || !Teleporter.IsAttuned(gatewayId))
+                continue;
+
+            var cost = ReadTeleportCost(gatewayId);
+            if (cost < 0 || cost == long.MaxValue)
+                continue;
+            var placeName = aetheryte.PlaceName.ValueNullable?.Name.ExtractText() ?? string.Empty;
+            candidates.Add((gatewayId, aetheryte.Territory.RowId, placeName, cost));
+        }
+
+        return candidates
+            .OrderBy(candidate => candidate.Cost)
+            .ThenBy(candidate => candidate.TerritoryId)
+            .ThenBy(candidate => candidate.Id)
+            .FirstOrDefault();
+    }
+
     private static bool IsVNavmeshAvailableNative()
         => VNavmesh.Enabled && (VNavmesh.Nav.IsReady?.Invoke() ?? false);
 
-    private static unsafe void OpenMarketBoardObject(nint address)
+    private static unsafe bool OpenMarketBoardObject(nint address)
     {
         var target = TargetSystem.Instance();
-        if (target != null)
-            target->OpenObjectInteraction((GameObjectStruct*)address);
+        if (target == null)
+            return false;
+
+        target->OpenObjectInteraction((GameObjectStruct*)address);
+        return true;
     }
 
     private static unsafe void HideMarketBoard()
@@ -712,20 +1199,36 @@ public sealed class NativeLiveAcquisitionEnvironment : ILiveAcquisitionEnvironme
     private static unsafe long GetGilBalanceNative()
         => InventoryManager.Instance()->GetGil();
 
-    private static unsafe long ReadTeleportCost(uint gatewayId)
-    {
-        var telepo = Telepo.Instance();
-        if (telepo == null)
-            return long.MaxValue;
+    private static long ReadTeleportCost(uint gatewayId)
+        => Teleporter.TryGetTeleportCost(gatewayId, out var gilCost)
+            ? gilCost
+            : long.MaxValue;
 
-        telepo->UpdateAetheryteList();
-        for (var i = 0; i < telepo->TeleportList.Count; i++)
+    private static uint GetCurrentGatewayIdNative()
+    {
+        var currentTerritoryId = (uint)Dalamud.ClientState.TerritoryType;
+        if (currentTerritoryId == 0)
+            return 0;
+
+        var aetherytes = Dalamud.GameData.GetExcelSheet<Aetheryte>();
+        if (aetherytes == null)
+            return 0;
+
+        var currentAethernetGroups = aetherytes
+            .Where(aetheryte => aetheryte.Territory.RowId == currentTerritoryId)
+            .Select(aetheryte => aetheryte.AethernetGroup)
+            .Where(group => group != 0)
+            .ToHashSet();
+        foreach (var gatewayId in AcquisitionWorldGateways.Preferred)
         {
-            var entry = telepo->TeleportList[i];
-            if (entry.AetheryteId == gatewayId)
-                return entry.GilCost;
+            if (!aetherytes.TryGetRow(gatewayId, out var gateway))
+                continue;
+            if (gateway.Territory.RowId == currentTerritoryId
+                || gateway.AethernetGroup != 0 && currentAethernetGroups.Contains(gateway.AethernetGroup))
+                return gatewayId;
         }
-        return long.MaxValue;
+
+        return 0;
     }
 
     private static unsafe bool IsInNonCrossWorldPartyNative()
@@ -845,6 +1348,17 @@ public sealed class NativeLiveAcquisitionEnvironment : ILiveAcquisitionEnvironme
         Unavailable,
     }
 
+    private sealed class NativeMarketRequestStartState
+    {
+        public bool SearchIssued { get; set; }
+        public string SearchSubmissionFailure { get; set; } = string.Empty;
+        public bool ResultSelected { get; set; }
+        public int InitialListingCount { get; set; }
+        public DateTime SelectedAtUtc { get; set; }
+        public byte PreviousCurrentRequestId { get; set; }
+        public byte PreviousNextRequestId { get; set; }
+    }
+
     private readonly record struct NativeMarketRequestEvidence(
         int Generation,
         uint ItemId,
@@ -871,5 +1385,8 @@ public sealed class NativeLiveAcquisitionEnvironment : ILiveAcquisitionEnvironme
     private readonly record struct WorldTravelSnapshot(
         uint CurrentWorldId,
         bool IsBusy,
-        bool Attempted);
+        bool Attempted,
+        bool LifestreamReady,
+        bool BetweenAreas,
+        bool ScreenReady);
 }

@@ -44,6 +44,7 @@ public sealed class AcquisitionRouteInput
     public bool LifestreamAvailable { get; init; }
     public bool NonCrossWorldParty { get; init; }
     public bool TravelProhibited { get; init; }
+    public uint CurrentGatewayId { get; init; }
     public Func<uint, bool> CanVisitWorld { get; init; } = _ => true;
     public Func<uint, bool> IsGatewayAttuned { get; init; } = _ => true;
     public Func<uint, long> GatewayTeleportCost { get; init; } = _ => long.MaxValue;
@@ -129,16 +130,22 @@ public static class AcquisitionRoutePlanner
             if (!isCurrent)
             {
                 var gateway = AcquisitionWorldGateways.Preferred
-                    .Select((id, preference) => new
+                    .Select((id, preference) =>
                     {
-                        Id = id,
-                        Preference = preference,
-                        Cost = input.GatewayTeleportCost(id),
+                        var isCurrent = id == input.CurrentGatewayId;
+                        return new
+                        {
+                            Id = id,
+                            Preference = preference,
+                            IsCurrent = isCurrent,
+                            Cost = isCurrent ? 0 : input.GatewayTeleportCost(id),
+                        };
                     })
                     .Where(candidate => input.IsGatewayAttuned(candidate.Id)
                         && candidate.Cost >= 0
                         && candidate.Cost != long.MaxValue)
-                    .OrderBy(candidate => candidate.Cost)
+                    .OrderByDescending(candidate => candidate.IsCurrent)
+                    .ThenBy(candidate => candidate.Cost)
                     .ThenBy(candidate => candidate.Preference)
                     .FirstOrDefault();
                 if (gateway == null)

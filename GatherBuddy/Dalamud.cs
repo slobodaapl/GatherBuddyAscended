@@ -20,6 +20,7 @@ public class Dalamud
     [PluginService] public static IObjectTable            Objects         { get; private set; } = null!;
     [PluginService] public static IPlayerState            PlayerState     { get; private set; } = null!;
     [PluginService] public static IUnlockState            UnlockState     { get; private set; } = null!;
+    [PluginService] public static IAetheryteList           Aetherytes      { get; private set; } = null!;
     [PluginService] public static IChatGui                Chat            { get; private set; } = null!;
     [PluginService] public static IFramework              Framework       { get; private set; } = null!;
     [PluginService] public static ICondition              Conditions      { get; private set; } = null!;
@@ -32,6 +33,7 @@ public class Dalamud
     [PluginService] public static INotificationManager    Notifications   { get; private set; } = null!;
     [PluginService] public static IPluginLog              Log             { get; private set; } = null!;
     [PluginService] public static IAddonLifecycle         AddonLifecycle  { get; private set; } = null!;
+    [PluginService] public static IAddonEventManager      AddonEventManager { get; private set; } = null!;
     [PluginService] public static IGamepadState           GamepadState    { get; private set; } = null!;
     [PluginService] public static IGameConfig             GameConfig      { get; private set; } = null!;
     [PluginService] public static IGameInteropProvider    Hooking         { get; private set; } = null!;

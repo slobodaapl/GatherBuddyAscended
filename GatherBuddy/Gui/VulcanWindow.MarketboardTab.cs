@@ -96,7 +96,7 @@ public partial class VulcanWindow
             if (ImGui.SmallButton("Refresh All##mbrefreshall"))
                 svc.RefreshAll(_mbCurrentWorldOnly ? svc.GetCurrentWorld() : svc.GetDataCenter());
             ImGui.SameLine(0, VulcanUiScaling.Scaled(6f));
-            if (ImGui.SmallButton("Open Marketplace Buy List##mbopenbuylist"))
+            if (ImGui.SmallButton("Open Buy List##mbopenbuylist"))
                 GatherBuddy.MarketplaceBuyListWindow?.Open();
 
             ImGui.Separator();
@@ -199,8 +199,7 @@ public partial class VulcanWindow
                 }
                 if (ImGui.BeginPopupContextItem("##resultContext"))
                 {
-                    if (ImGui.Selectable("Add to Marketplace Buy List"))
-                        AddToActiveMarketplaceList(result.ItemId, result.Name, result.IconId);
+                    DrawMarketplaceBuyListContextMenu(result.ItemId, result.Name, result.IconId);
                     ImGui.EndPopup();
                 }
                 ImGui.PopID();
@@ -367,7 +366,7 @@ public partial class VulcanWindow
         ImGui.SetCursorPosY(ImGui.GetCursorPosY() + (largeIcon.Y - lineH * 2f) / 2f);
         ImGui.TextColored(ImGuiColors.ParsedGold, name);
 
-        if (ImGui.SmallButton("Add to Marketplace Buy List##mbaddtolist"))
+            if (ImGui.SmallButton("Add to Buy List##mbaddtolist"))
             AddToActiveMarketplaceList(itemId, name, iconId);
 
         var currentScopeLabel = (isDcScope ? $"DC: " : string.Empty) + scope;
@@ -443,6 +442,34 @@ public partial class VulcanWindow
         if (manager == null || active == null)
             return;
         manager.AddItem(active.Id, itemId, name, iconId, 1);
+    }
+
+    private static void DrawMarketplaceBuyListContextMenu(uint itemId, string name, uint iconId)
+    {
+        var manager = GatherBuddy.MarketplaceBuyListManager;
+        if (manager == null)
+            return;
+
+        if (ImGui.BeginMenu("Add to Buy List", manager.Lists.Count > 0))
+        {
+            foreach (var list in manager.Lists.OrderByDescending(list => list.CreatedAt))
+            {
+                if (ImGui.Selectable(list.Name))
+                {
+                    manager.AddItem(list.Id, itemId, name, iconId, 1);
+                    manager.SelectList(list.Id);
+                    GatherBuddy.MarketplaceBuyListWindow?.Open();
+                }
+            }
+            ImGui.EndMenu();
+        }
+
+        if (ImGui.Selectable("Create New Buy List"))
+        {
+            var list = manager.CreateList("Buy List");
+            manager.AddItem(list.Id, itemId, name, iconId, 1);
+            GatherBuddy.MarketplaceBuyListWindow?.Open();
+        }
     }
 
     private void SelectHistoryItem(MarketboardService svc, uint itemId, string scope)

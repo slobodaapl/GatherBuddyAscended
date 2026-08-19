@@ -5,7 +5,7 @@ namespace GatherBuddy.AutoGather;
 internal static class TimedLegendaryGpPolicy
 {
     internal const int GpRegenerationTickSeconds = 3;
-    internal const int SafetyMarginSeconds = 5;
+    internal const int SafetyMarginSeconds = TimedNodeGpWaitPolicy.GatheringReserveSeconds;
 
     internal static bool ShouldWaitForFullGp(
         TimeInterval currentWindow,

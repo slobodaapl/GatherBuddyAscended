@@ -849,16 +849,18 @@ public partial class VulcanWindow
             ImGui.TextColored(GetRaphaelAssessmentColor(raphaelAssessment), raphaelAssessment.Summary);
             if (ImGui.IsItemHovered())
                 ImGui.SetTooltip(raphaelAssessment.Details);
-            ImGui.SetCursorPosX(ImGui.GetCursorPosX() + VulcanUiScaling.Scaled(24f));
-            ImGui.PushTextWrapPos(0f);
-            ImGui.TextColored(new Vector4(0.65f, 0.65f, 0.65f, 1.0f), raphaelAssessment.Details);
-            ImGui.PopTextWrapPos();
-            if (raphaelAssessment.State == RaphaelAssessmentState.NotGenerated)
+            if (raphaelAssessment.State == RaphaelAssessmentState.NotGenerated
+             || raphaelAssessment.SolverName == "Gabriel" && raphaelAssessment.State == RaphaelAssessmentState.Failed)
             {
                 ImGui.Spacing();
                 ImGui.SetCursorPosX(ImGui.GetCursorPosX() + VulcanUiScaling.Scaled(24f));
-                if (ImGui.Button($"Queue {raphaelAssessment.SolverName} Validation", new Vector2(0f, footerButtonHeight)))
+                var action = raphaelAssessment.State == RaphaelAssessmentState.Failed ? "Retry" : "Queue";
+                if (ImGui.Button($"{action} {raphaelAssessment.SolverName} Validation", new Vector2(0f, footerButtonHeight)))
+                {
                     RaphaelAssessmentService.TryQueueWarmupForRecipe(recipe.Recipe.RowId, settings);
+                    if (raphaelAssessment.SolverName == "Gabriel")
+                        GabrielAssessmentService.TryAssessRecipe(recipe.Recipe.RowId, settings, queue: true, out _);
+                }
             }
             ImGui.Spacing();
         }
@@ -927,6 +929,21 @@ public partial class VulcanWindow
             _craftSettingsPopup.Open(recipe.Recipe.RowId, recipe.Name);
 
         ImGui.SetCursorPosX(ImGui.GetCursorPosX() + detailInset);
+        var trialBlockReason = artisanLoaded
+            ? "Artisan plugin is loaded. Please unload Artisan to use Vulcan's crafting system."
+            : CraftingGameInterop.GetTrialSynthesisStartBlockReason();
+        if (ImGuiUtil.DrawDisabledButton(
+                "Begin Trial Synthesis",
+                new Vector2(-1, footerButtonHeight),
+                trialBlockReason
+                    ?? "Start Trial Synthesis and autosolve it using this recipe's configured solver and overrides.",
+                trialBlockReason != null))
+        {
+            StartBrowserTrialSynthesis(recipe.Recipe);
+            MinimizeWindow();
+        }
+
+        ImGui.SetCursorPosX(ImGui.GetCursorPosX() + detailInset);
         if (ImGui.Button("Add to Craft List", new Vector2(-1, footerButtonHeight)))
         {
             _contextMenuListSearch = string.Empty;
@@ -980,7 +997,7 @@ public partial class VulcanWindow
             CraftSettings = settings?.Clone(),
         };
         var executionContext = CraftingContextResolver.ResolveExecutionContext(item, recipe, null);
-        return CraftingContextResolver.UsesRaphaelSolver(executionContext);
+        return CraftingContextResolver.UsesSolverAssessment(executionContext);
     }
 
     private static void DrawIngredientSectionHeader(string title, bool showRetainer)

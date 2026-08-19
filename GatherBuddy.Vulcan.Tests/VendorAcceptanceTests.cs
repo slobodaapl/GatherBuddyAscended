@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Numerics;
 using GatherBuddy.Vulcan.Vendors;
 
 namespace GatherBuddy.Vulcan.Tests;
@@ -17,6 +18,14 @@ public static class VendorAcceptanceTests
                 throw new InvalidOperationException(message);
             assertions++;
         }
+
+        var uldahLocation = new VendorNpcLocation(1, "Scrip Exchange", 130, 1, Vector3.Zero);
+        var tuliyollalLocation = new VendorNpcLocation(1, "Scrip Exchange", 1185, 2, Vector3.One);
+        var sharedVendorLocations = new[] { uldahLocation, tuliyollalLocation };
+        Require(VendorNpcLocationCache.SelectPreferredLocation(sharedVendorLocations, 1185) == tuliyollalLocation,
+            "a vendor NPC present in the current territory must use that local route instead of the cache's first remote route");
+        Require(VendorNpcLocationCache.SelectPreferredLocation(sharedVendorLocations, 9999) == uldahLocation,
+            "vendor location selection must retain the deterministic cache fallback when no current-territory route exists");
 
         var costs = new List<VendorCurrencyCost>
         {
@@ -315,6 +324,21 @@ public static class VendorAcceptanceTests
                 && VendorShopResolver.GetSealCurrencyItemIdForSheetGrandCompany(3u) == 22u,
             "unknown seal currencies must not resolve and Lumina sheet IDs must remain one-based");
 
+        var grandCompanyOffer = new VendorShopEntry(
+            5501u,
+            "Potash",
+            1,
+            200u,
+            VendorShopResolver.GetSealCurrencyItemIdForGameGrandCompany(0),
+            "Maelstrom Seals",
+            new List<VendorNpc>(),
+            VendorShopType.GrandCompanySeals,
+            VendorCurrencyGroup.GrandCompanySeals);
+        Require(VendorShopResolver.MatchesGrandCompany(grandCompanyOffer, 0)
+                && !VendorShopResolver.MatchesGrandCompany(grandCompanyOffer, 1)
+                && !VendorShopResolver.MatchesGrandCompany(grandCompanyOffer, 2),
+            "Grand Company vendor offers must select the quartermaster matching the character's seal currency");
+
         // Production fixtures: Kojin shop 1769818 uses currency 21081 and
         // society 9; Ananta shop 1769847 uses currency 21935 and society 10.
         var alliedSocietyCurrencyMap = VendorShopResolver.BuildUniqueAlliedSocietyCurrencyMap(
@@ -425,6 +449,14 @@ public static class VendorAcceptanceTests
             new StubAvailabilityQueries());
         Require(unknownAlliedRouteResult.State == VendorAvailabilityState.Unknown,
             "inclusion-shop routes without authoritative allied-society metadata must remain unknown");
+
+        var scripExchangeResult = VendorAvailabilityResolver.Resolve(
+            entry with { Group = VendorCurrencyGroup.Scrips },
+            new VendorNpc(1u, "Scrip Exchange", 2u, VendorMenuShopType.InclusionShop,
+                AlliedRequirementKnown: false),
+            new StubAvailabilityQueries());
+        Require(scripExchangeResult.State == VendorAvailabilityState.Available,
+            "generic scrip exchanges must remain available when their inclusion route has no allied-society gate");
 
         var contentUnknown = new StubAvailabilityQueries
         {

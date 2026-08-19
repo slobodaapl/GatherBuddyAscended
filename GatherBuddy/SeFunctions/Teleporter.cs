@@ -1,4 +1,3 @@
-using FFXIVClientStructs.FFXIV.Client.Game.Control;
 using FFXIVClientStructs.FFXIV.Client.Game.UI;
 using GatherBuddy.Plugin;
 
@@ -8,23 +7,35 @@ public static unsafe class Teleporter
 {
     public static bool IsAttuned(uint aetheryte)
     {
-        var teleport = Telepo.Instance();
-        if (teleport == null)
-        {
-            GatherBuddy.Log.Error("Could not check attunement: Telepo is missing.");
+        if (aetheryte == 0 || !Dalamud.ClientState.IsLoggedIn)
             return false;
+
+        var aetherytes = Dalamud.Aetherytes;
+        for (var i = 0; i < aetherytes.Length; i++)
+        {
+            var entry = aetherytes[i];
+            if (entry?.AetheryteId == aetheryte)
+                return true;
         }
 
-        if (Control.Instance()->LocalPlayer == null)
-            return true;
+        return false;
+    }
 
-        teleport->UpdateAetheryteList();
+    public static bool TryGetTeleportCost(uint aetheryte, out uint gilCost)
+    {
+        gilCost = 0;
+        if (aetheryte == 0 || !Dalamud.ClientState.IsLoggedIn)
+            return false;
 
-        var endPtr = teleport->TeleportList.Last;
-        for (var it = teleport->TeleportList.First; it != endPtr; ++it)
+        var aetherytes = Dalamud.Aetherytes;
+        for (var i = 0; i < aetherytes.Length; i++)
         {
-            if (it->AetheryteId == aetheryte)
-                return true;
+            var entry = aetherytes[i];
+            if (entry == null || entry.AetheryteId != aetheryte)
+                continue;
+
+            gilCost = entry.GilCost;
+            return true;
         }
 
         return false;
@@ -32,21 +43,35 @@ public static unsafe class Teleporter
 
     public static bool Teleport(uint aetheryte)
     {
-        if (IsAttuned(aetheryte))
+        if (!IsAttuned(aetheryte))
         {
-            Telepo.Instance()->Teleport(aetheryte, 0);
-            return true;
+            Communicator.PrintError("Could not teleport to ",
+                GatherBuddy.GameData.Aetherytes.TryGetValue(aetheryte, out var a) ? a.Name : "Unknown Aetheryte", GatherBuddy.Config.SeColorNames,
+                " not attuned.");
+            return false;
         }
 
-        Communicator.PrintError("Could not teleport to ",
-            GatherBuddy.GameData.Aetherytes.TryGetValue(aetheryte, out var a) ? a.Name : "Unknown Aetheryte", GatherBuddy.Config.SeColorNames,
-            " not attuned.");
-        return false;
+        var telepo = Telepo.Instance();
+        if (telepo == null)
+        {
+            GatherBuddy.Log.Error("Could not teleport: Telepo is missing.");
+            return false;
+        }
+
+        telepo->Teleport(aetheryte, 0);
+        return true;
     }
 
     // Teleport without checking for attunement. Use at own risk.
     public static void TeleportUnchecked(uint aetheryte)
     {
-        Telepo.Instance()->Teleport(aetheryte, 0);
+        var telepo = Telepo.Instance();
+        if (telepo == null)
+        {
+            GatherBuddy.Log.Error("Could not teleport: Telepo is missing.");
+            return;
+        }
+
+        telepo->Teleport(aetheryte, 0);
     }
 }

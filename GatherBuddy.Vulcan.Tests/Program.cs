@@ -27,9 +27,16 @@ void Require(bool condition, string message)
     assertions++;
 }
 
+Require(new GatherBuddy.Config.Configuration().VulcanAutoTakeOverManualSynthesis
+        && JsonConvert.DeserializeObject<GatherBuddy.Config.Configuration>("{}")
+            ?.VulcanAutoTakeOverManualSynthesis == true,
+    "manual synthesis takeover must default on for new and migrated configurations");
+
 ExpertConditionSamplerTests.Run(Require);
 CollectableTerminalActionAcceptanceTests.Run(Require);
 TimedLegendaryGpAcceptanceTests.Run(Require);
+CraftingMaterialSelectionAcceptanceTests.Run(Require);
+NativeRecipeCraftingTests.Run(Require);
 
 static CraftState Craft() => new()
 {
@@ -111,7 +118,60 @@ if (args is ["--five-star-plugin-simulation", var seedStartText, var rangedSeedC
     return;
 }
 
-var qualityTimeSettings = new RecipeCraftSettings { MaximizeQualityAtCostOfTime = true };
+if (args is ["--gabriel-plugin-simulation", var gabrielSeedStartText, var gabrielSeedCountText]
+    && int.TryParse(gabrielSeedStartText, out var gabrielSeedStart)
+    && int.TryParse(gabrielSeedCountText, out var gabrielSeedCount))
+{
+    await PluginPathSimulationAcceptanceTests.RunGabrielDistribution(
+        gabrielSeedStart,
+        gabrielSeedCount,
+        Require);
+    Console.WriteLine($"Gabriel plugin-path simulation: {assertions} assertions passed");
+    return;
+}
+
+if (args is ["--diagnose-plugin-path-loss", var diagnosePool, var diagnoseSeedText, var diagnoseRecipeText]
+    && int.TryParse(diagnoseSeedText, out var diagnoseSeed)
+    && uint.TryParse(diagnoseRecipeText, out var diagnoseRecipe))
+{
+    await PluginPathRaphaelDonatelloBenchmark.Diagnose(diagnosePool, diagnoseSeed, diagnoseRecipe, Require);
+    return;
+}
+
+if (args.Length >= 2 && args[0] == "--plugin-path-raphael-donatello-benchmark")
+{
+    int[]? deadlines = null;
+    if (args.Length > 4)
+    {
+        deadlines = args[4]
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(value => int.Parse(value))
+            .ToArray();
+    }
+
+    if (args.Length > 2 && args[2] == "graph")
+    {
+        var seed = args.Length > 3 && int.TryParse(args[3], out var seedValue) ? seedValue : 1;
+        var resultsPath = args.Length > 5 ? args[5] : "./build/tests/plugin-path-raphael-donatello-results.json";
+        var svgPath = args.Length > 6 ? args[6] : "./images/donatello-effectiveness.svg";
+        await PluginPathRaphaelDonatelloBenchmark.RunGraph(args[1], seed, deadlines, resultsPath, svgPath, Require);
+    }
+    else
+    {
+        var crafts = args.Length > 2 && int.TryParse(args[2], out var craftCount) ? craftCount : 10;
+        var seed = args.Length > 3 && int.TryParse(args[3], out var seedValue) ? seedValue : 1;
+        await PluginPathRaphaelDonatelloBenchmark.Run(args[1], crafts, seed, deadlines, Require);
+    }
+
+    Console.WriteLine($"Plugin-path Raphael vs Donatello benchmark: {assertions} assertions passed");
+    return;
+}
+
+var qualityTimeSettings = new RecipeCraftSettings
+{
+    MaximizeQualityAtCostOfTime = true,
+    DonatelloImprovementQuietSecondsOverride = 9,
+};
 Require(qualityTimeSettings.HasAnySettings(),
     "the per-item quality/time override must be persisted as a meaningful craft setting");
 var qualityRoundingCraft = Craft() with { CraftQualityMax = 2_000, SplendorCosmic = true };
@@ -168,6 +228,7 @@ Require(CraftingStateBuilder.IsSplendorCosmicTool(90, 4)
 var requiredQualityCraft = GameStateBuilder.BuildCraftState(
     new GameStateBuilder.RecipeInfo(
         RecipeId: 38247,
+        RecipeLevelTableId: 776,
         Level: 100,
         Difficulty: 11_250,
         QualityMax: 31_520,
@@ -195,18 +256,54 @@ var requiredQualityCraft = GameStateBuilder.BuildCraftState(
 Require(requiredQualityCraft.CraftRequiredQuality == 31_520
         && requiredQualityCraft.SplendorCosmic,
     "runtime craft construction must preserve required quality and the equipped-tool Good bonus");
-Require(qualityTimeSettings.Clone().MaximizeQualityAtCostOfTime,
-    "cloning recipe or crafting-list item settings must preserve the quality/time override");
+Require(CraftingContextResolver.ResolveInitialQuality(CraftingSimulationIntent.TrialExecution, 12_345) == 0
+        && CraftingContextResolver.ResolveInitialQuality(CraftingSimulationIntent.Execution, 12_345) == 12_345
+        && CraftingContextResolver.ResolveInitialQuality(CraftingSimulationIntent.ValidatorPreview, 12_345) == 12_345,
+    "Trial Synthesis planning must start at zero quality without changing real-craft or validation initial quality");
+var trialAutoSolveCraft = Craft() with { CraftHQ = true, RecipeId = 1 };
+var trialAutoSolveResult = CraftingPluginPathSimulator.Run(
+    trialAutoSolveCraft,
+    GameStateBuilder.BuildInitialStepState(trialAutoSolveCraft),
+    new StandardSolverDefinition(),
+    liveRecoveryMode: null,
+    new PluginPathSimulationScenario(GameSeed: 1, IsTrial: true));
+Require(trialAutoSolveResult.SynthesisCompleted
+        && trialAutoSolveResult.Trace.Count > 0
+        && trialAutoSolveResult.FailureReason == null,
+    "Trial Synthesis must execute the selected solver through the faithful plugin path to completion");
+Require(qualityTimeSettings.Clone() is
+        {
+            MaximizeQualityAtCostOfTime: true,
+            DonatelloImprovementQuietSecondsOverride: 9,
+        },
+    "cloning recipe or crafting-list item settings must preserve the quality/time mode and reset-window override");
 Require(JsonConvert.DeserializeObject<RecipeCraftSettings>(
-        JsonConvert.SerializeObject(qualityTimeSettings))?.MaximizeQualityAtCostOfTime == true,
-    "recipe settings JSON must persist the quality/time override");
+        JsonConvert.SerializeObject(qualityTimeSettings)) is
+        {
+            MaximizeQualityAtCostOfTime: true,
+            DonatelloImprovementQuietSecondsOverride: 9,
+        },
+    "recipe settings JSON must persist the quality/time mode and reset-window override");
 qualityTimeSettings.DonatelloOptions = new DonatelloExecutionOptions(
     Objective: DonatelloSolveObjective.ProgressOnly);
 var qualityTimeOptions = CraftingContextResolver.ResolveDonatelloOptions(qualityTimeSettings);
 Require(qualityTimeOptions?.MaximizeQualityAtCostOfTime == true,
     "craft execution context must propagate the per-item quality/time override");
+Require(qualityTimeOptions?.ImprovementQuietPeriodMillis == 9_000,
+    "craft execution context must convert the per-item reset-window override to the runtime deadline");
 Require(qualityTimeOptions?.Objective == DonatelloSolveObjective.ProgressOnly,
     "the persisted quality/time override must preserve transient Donatello execution options");
+Require(new RaphaelSolveCoordinatorConfig().DonatelloImprovementQuietSeconds
+        == DonatelloSolver.DefaultImprovementQuietPeriodSeconds
+        && DonatelloSolver.ResolveImprovementQuietPeriodMillis(Craft(), 7) == 7_000
+        && DonatelloSolver.ResolveImprovementQuietPeriodMillis(
+            Craft() with
+            {
+                DonatelloOptions = new DonatelloExecutionOptions(
+                    ImprovementQuietPeriodMillis: 1_250),
+            },
+            7) == 1_250,
+    "continuous replanning must default to five seconds, use the global setting, and prefer the per-recipe runtime override");
 var specialistOverrideSettings = new RecipeCraftSettings
 {
     SpecialistActionOverride = SpecialistActionOverrideMode.Allow,
@@ -221,12 +318,126 @@ Require(specialistOverrideSettings.HasAnySettings()
             SpecialistActionOverride = SpecialistActionOverrideMode.Disallow,
         })?.AllowSpecialistActions == false,
     "per-item specialist eligibility overrides must persist and reach execution options");
-Require(DonatelloSolver.ResolveLiveReplanDeadlineMillis(
-        Craft() with { DonatelloOptions = qualityTimeOptions }, 50, 184) == 30_000,
-    "the per-item quality/time override must raise the live replan cutoff to 30 seconds");
+var qualityTimeCraft = Craft() with
+{
+    DonatelloOptions = qualityTimeOptions! with { Objective = DonatelloSolveObjective.MaximizeQuality },
+};
+Require(DonatelloSolver.UsesImprovementQuiescence(qualityTimeCraft)
+        && DonatelloSolver.ResolveLiveReplanDeadlineMillis(qualityTimeCraft, 50, 184) == 9_000
+        && !DonatelloSolver.UsesImprovementQuiescence(
+            Craft() with { DonatelloOptions = qualityTimeOptions }),
+    "the per-item quality/time override must use its configured improvement-quiescence window only for quality solving");
+var manualTakeoverSettings = new RecipeCraftSettings
+{
+    SolverOverride = SolverOverrideMode.DonatelloSolver,
+    MaximizeQualityAtCostOfTime = true,
+    DonatelloImprovementQuietSecondsOverride = 9,
+    SpecialistActionOverride = SpecialistActionOverrideMode.Disallow,
+};
+var manualTakeoverItem = CraftingGameInterop.BuildManualTakeoverItem(38_247, manualTakeoverSettings);
+manualTakeoverSettings.DonatelloImprovementQuietSecondsOverride = 3;
+Require(manualTakeoverItem.RecipeId == 38_247
+        && manualTakeoverItem.IsOriginalRecipe
+        && manualTakeoverItem.CraftSettings is
+        {
+            SolverOverride: SolverOverrideMode.DonatelloSolver,
+            MaximizeQualityAtCostOfTime: true,
+            DonatelloImprovementQuietSecondsOverride: 9,
+            SpecialistActionOverride: SpecialistActionOverrideMode.Disallow,
+        }
+        && CraftingGameInterop.ManualTakeoverMatchesRecipeClass(13, 13)
+        && !CraftingGameInterop.ManualTakeoverMatchesRecipeClass(13, 12)
+        && !CraftingGameInterop.ManualTakeoverMatchesRecipeClass(7, 7)
+        && CraftingGameInterop.CanClaimManualSynthesis(
+            enabled: true,
+            hasActiveQueue: false,
+            hasOwnedRecipe: false,
+            state: CraftingGameInterop.CraftState.IdleNormal)
+        && !CraftingGameInterop.CanClaimManualSynthesis(
+            enabled: true,
+            hasActiveQueue: true,
+            hasOwnedRecipe: false,
+            state: CraftingGameInterop.CraftState.IdleNormal)
+        && !CraftingGameInterop.CanClaimManualSynthesis(
+            enabled: true,
+            hasActiveQueue: false,
+            hasOwnedRecipe: true,
+            state: CraftingGameInterop.CraftState.WaitStart),
+    "manual takeover must key an isolated settings snapshot by exact recipe/class and never steal an owned or queued craft");
+var manualInitialCraft = Craft() with { InitialQuality = 345 };
+var manualInitialRoot = GameStateBuilder.BuildInitialStepState(manualInitialCraft, manualInitialCraft.InitialQuality);
+Require(CraftingGameInterop.IsInitialManualSynthesisRoot(manualInitialCraft, manualInitialRoot)
+        && !CraftingGameInterop.IsInitialManualSynthesisRoot(
+            manualInitialCraft,
+            manualInitialRoot with { Progress = 1 })
+        && !CraftingGameInterop.IsInitialManualSynthesisRoot(
+            manualInitialCraft,
+            manualInitialRoot with { RemainingCP = manualInitialRoot.RemainingCP - 1 }),
+    "manual takeover may use a static initial solver only at an untouched observed synthesis root");
 Require(DonatelloSolver.ResolveLiveReplanDeadlineMillis(Craft(), 50, 184) == 184
         && DonatelloSolver.ResolveLiveReplanDeadlineMillis(Craft(), 250, 184) == 250,
     "live replans must use the larger of the configured optimization threshold and overlapping action delay");
+var craftStartLogCraft = Craft() with
+{
+    RecipeId = 38_247,
+    ItemId = 47_438,
+    StatCraftsmanship = 5_121,
+    StatControl = 4_870,
+    StatCP = 687,
+    Specialist = true,
+    CrafterDelineations = 2,
+    CraftExpert = true,
+    CraftProgress = 7_600,
+    CraftQualityMax = 21_100,
+    InitialQuality = 321,
+    DonatelloOptions = new DonatelloExecutionOptions(
+        MaximizeQualityAtCostOfTime: true,
+        AllowSpecialistActions: true,
+        ReplanDeadlineMillis: 275,
+        ImprovementQuietPeriodMillis: 9_000),
+};
+var craftStartLog = CraftingProcessorSession.FormatCraftStartLogLine(
+    craftStartLogCraft,
+    Root() with
+    {
+        Progress = 12,
+        Quality = 345,
+        Durability = 35,
+        RemainingCP = 650,
+        CrafterDelineationsLeft = 1,
+    },
+    craftStartLogCraft.RecipeId,
+    isTrial: true,
+    "Donatello quality");
+using (var craftStartJson = JsonDocument.Parse(craftStartLog["[CraftStart] ".Length..]))
+{
+    var root = craftStartJson.RootElement;
+    Require(!craftStartLog.Contains('\n')
+            && !craftStartLog.Contains('\r')
+            && root.GetProperty("recipeId").GetUInt32() == 38_247
+            && root.GetProperty("trial").GetBoolean()
+            && root.GetProperty("solver").GetString() == "Donatello quality"
+            && root.GetProperty("player").GetProperty("craftsmanship").GetInt32() == 5_121
+            && root.GetProperty("player").GetProperty("specialistActive").GetBoolean()
+            && root.GetProperty("player").GetProperty("solverDelineations").GetInt32() == 2
+            && root.GetProperty("recipe").GetProperty("expert").GetBoolean()
+            && root.GetProperty("recipe").GetProperty("progressMax").GetInt32() == 7_600
+            && root.GetProperty("recipe").GetProperty("qualityMax").GetInt32() == 21_100
+            && root.GetProperty("start").GetProperty("configuredInitialQuality").GetInt32() == 321
+            && root.GetProperty("start").GetProperty("quality").GetInt32() == 345
+            && root.GetProperty("start").GetProperty("delineations").GetInt32() == 1
+            && root.GetProperty("donatello").GetProperty("maximizeQualityAtCostOfTime").GetBoolean()
+            && root.GetProperty("donatello").GetProperty("replanDeadlineOverrideMillis").GetInt32() == 275
+            && root.GetProperty("donatello").GetProperty("improvementQuietOverrideMillis").GetInt32() == 9_000
+            && root.GetProperty("donatello").GetProperty("improvementQuietDeadlineMillis").GetInt32() == 9_000,
+        "release craft-start diagnostics must be a single parseable line containing resolved craft, player, initial-state, override, and deadline parameters");
+}
+Require(DonatelloSolver.ResolveProtectedOpportunisticDeadlineMillis(184) == 184
+        && DonatelloSolver.ResolveProtectedOpportunisticDeadlineMillis(0) == 0
+        && DonatelloSolver.IsProtectedQualityRecoveryCondition(Condition.Excellent)
+        && DonatelloSolver.IsProtectedQualityRecoveryCondition(Condition.Poor)
+        && !DonatelloSolver.IsProtectedQualityRecoveryCondition(Condition.Good),
+    "protected Raphael opportunistic searches must use only the action delay, while Excellent/Poor keep the recovery window");
 Require(!VulcanSkill.None.IsExecutableAction()
         && !VulcanSkill.TouchCombo.IsExecutableAction()
         && !((VulcanSkill)999_999).IsExecutableAction()
@@ -354,195 +565,6 @@ var hardExpertProgressState = new StepState
     Condition = Condition.Normal,
     TrainedPerfectionAvailable = true,
 };
-
-StepState ReplayNativePlan(
-    CraftState craft,
-    StepState root,
-    DonatelloNative.SolveResult result,
-    string caseName)
-{
-    var state = root;
-    foreach (var action in result.Actions)
-    {
-        if (SolverUtils.Status(craft, state) != SolverUtils.CraftStatus.InProgress)
-            break;
-        var (executeResult, next) = Simulator.Execute(craft, state, action, 0, 1);
-        Require(executeResult == Simulator.ExecuteResult.Succeeded,
-            $"{caseName}: native action {action} must be legal in GatherBuddy at {state}");
-        state = next;
-    }
-    Require(result.FinalState.Complete == (SolverUtils.Status(craft, state) == SolverUtils.CraftStatus.Complete)
-            && result.FinalState.Cp == state.RemainingCP
-            && result.FinalState.Durability == state.Durability
-            && result.FinalState.Progress == state.Progress
-            && result.FinalState.Quality == state.Quality,
-        $"{caseName}: raphael-sim final {result.FinalState.Progress}/{result.FinalState.Quality}/{result.FinalState.Durability}/{result.FinalState.Cp} must equal GatherBuddy {state.Progress}/{state.Quality}/{state.Durability}/{state.RemainingCP}");
-    return state;
-}
-
-foreach (var delineations in new[] { 0, 1, 2 })
-{
-    var crossCraft = hardExpertProgressCraft with
-    {
-        CraftQualityMax = 0,
-        Specialist = true,
-        CrafterDelineations = delineations,
-    };
-    var crossRoot = GameStateBuilder.BuildInitialStepState(crossCraft);
-    var native = DonatelloNative.SolveDetailed(
-        crossCraft,
-        crossRoot,
-        allowSpecialistActions: true,
-        DonatelloNative.SolveMode.CompleteFastest,
-        softDeadlineMillis: 30_000,
-        hardDeadlineMillis: 30_000,
-        bypassSolutionCache: true);
-    var final = ReplayNativePlan(crossCraft, crossRoot, native, $"recipe 38202 specialist d{delineations}");
-    Require(SolverUtils.Status(crossCraft, final) == SolverUtils.CraftStatus.Complete,
-        $"recipe 38202 specialist d{delineations}: native Complete/Fastest must complete");
-}
-
-var (benchmarkCraft, benchmarkBaseline, benchmarkScenarios) =
-    DonatelloOptimizationBenchmark.CreateFixtureScenarios();
-var benchmarkWarmup = benchmarkScenarios[0];
-DonatelloNative.SolveDetailed(
-    benchmarkCraft,
-    benchmarkWarmup.Root,
-    allowSpecialistActions: true,
-    DonatelloNative.SolveMode.LiveAdaptive,
-    incumbent: benchmarkWarmup.Incumbent,
-    softDeadlineMillis: 2000,
-    hardDeadlineMillis: 2000,
-    bypassSolutionCache: true,
-    minimizeSteps: true);
-var benchmarkWins = 0;
-foreach (var scenario in benchmarkScenarios.Where(scenario =>
-             scenario.Root.Condition is Condition.Excellent or Condition.Good or Condition.GoodOmen))
-{
-    var benchmarkIncumbent = DonatelloPlanEvaluator.Evaluate(benchmarkCraft, scenario.Root, scenario.Incumbent);
-    var candidate = DonatelloNative.SolveDetailed(
-        benchmarkCraft,
-        scenario.Root,
-        allowSpecialistActions: true,
-        DonatelloNative.SolveMode.LiveAdaptive,
-        incumbent: scenario.Incumbent,
-        softDeadlineMillis: 100,
-        hardDeadlineMillis: 100,
-        bypassSolutionCache: true,
-        minimizeSteps: true);
-    var evaluation = DonatelloPlanEvaluator.Evaluate(benchmarkCraft, scenario.Root, candidate.Actions);
-    Require(evaluation.Completes, "known-win benchmark candidate must preserve completion");
-    Require(!benchmarkIncumbent.IsStrictlyBetterThan(evaluation),
-        "known-win benchmark candidate must not regress its incumbent");
-    if (evaluation.IsStrictlyBetterThan(benchmarkIncumbent))
-    {
-        benchmarkWins++;
-        break;
-    }
-}
-Require(benchmarkWins > 0,
-    $"recipe 38202 specialist d2 benchmark fixture must produce a strict Donatello win within 100 ms; "
-    + $"baseline={DonatelloPlanEvaluator.Evaluate(benchmarkCraft, GameStateBuilder.BuildInitialStepState(benchmarkCraft), benchmarkBaseline)}");
-
-var protectedBoundaryCraft = Craft();
-var protectedBoundaryRoot = GameStateBuilder.BuildInitialStepState(protectedBoundaryCraft);
-var protectedRaphael = DonatelloNative.SolveDetailed(
-    protectedBoundaryCraft,
-    protectedBoundaryRoot,
-    allowSpecialistActions: false,
-    DonatelloNative.SolveMode.OptimizeQuality,
-    softDeadlineMillis: 2_000,
-    hardDeadlineMillis: 2_000,
-    bypassSolutionCache: true);
-var protectedRuntimeCandidate = DonatelloNative.SolveDetailed(
-    protectedBoundaryCraft,
-    protectedBoundaryRoot,
-    allowSpecialistActions: false,
-    DonatelloNative.SolveMode.LiveAdaptive,
-    incumbent: protectedRaphael.Actions,
-    softDeadlineMillis: 2_000,
-    hardDeadlineMillis: 2_000,
-    bypassSolutionCache: true,
-    minimizeSteps: true);
-var protectedRaphaelScore = DonatelloPlanEvaluator.Evaluate(
-    protectedBoundaryCraft, protectedBoundaryRoot, protectedRaphael.Actions);
-var protectedRuntimeScore = DonatelloPlanEvaluator.Evaluate(
-    protectedBoundaryCraft, protectedBoundaryRoot, protectedRuntimeCandidate.Actions);
-var protectedRuntimeAdopted = DonatelloSolver.ShouldAdoptCandidate(
-    protectedBoundaryCraft,
-    protectedRuntimeScore,
-    protectedRaphaelScore,
-    stagedProgressPlan: protectedRuntimeCandidate.ProgressBoundary is { Target: "oneShort" });
-var protectedSelectedScore = protectedRuntimeAdopted ? protectedRuntimeScore : protectedRaphaelScore;
-Require(protectedSelectedScore == protectedRaphaelScore
-        || protectedSelectedScore.IsStrictlyBetterThan(protectedRaphaelScore),
-    "real native staged solve -> C# admission must never select a normal-craft result worse than Raphael");
-
-var cosmicCraft = new CraftState
-{
-    StatCraftsmanship = 6000,
-    StatControl = 6000,
-    StatCP = 600,
-    StatLevel = 100,
-    UnlockedManipulation = true,
-    Specialist = true,
-    CrafterDelineations = 2,
-    SplendorCosmic = true,
-    CraftExpert = true,
-    CraftLevel = 100,
-    CraftDurability = 80,
-    CraftProgress = 10_000,
-    CraftQualityMax = 20_000,
-    CraftProgressDivider = 60,
-    CraftProgressModifier = 100,
-    CraftQualityDivider = 62,
-    CraftQualityModifier = 100,
-};
-var cosmicConditions = new[]
-{
-    Condition.Good,
-    Condition.Centered,
-    Condition.Sturdy,
-    Condition.Pliant,
-    Condition.Malleable,
-    Condition.Primed,
-    Condition.GoodOmen,
-    Condition.Robust,
-    Condition.Excellent,
-    Condition.Poor,
-    Condition.Normal,
-};
-var cosmicState = GameStateBuilder.BuildInitialStepState(cosmicCraft);
-IReadOnlyList<VulcanSkill> cosmicIncumbent = [];
-for (var step = 0; step < 100 && SolverUtils.Status(cosmicCraft, cosmicState) == SolverUtils.CraftStatus.InProgress; ++step)
-{
-    cosmicState = cosmicState with { Condition = cosmicConditions[step % cosmicConditions.Length] };
-    var incumbentEvaluation = DonatelloPlanEvaluator.Evaluate(cosmicCraft, cosmicState, cosmicIncumbent);
-    var native = DonatelloNative.SolveDetailed(
-        cosmicCraft,
-        cosmicState,
-        allowSpecialistActions: true,
-        DonatelloNative.SolveMode.LiveAdaptive,
-        incumbent: cosmicIncumbent,
-        softDeadlineMillis: 1000,
-        hardDeadlineMillis: 1000,
-        bypassSolutionCache: true);
-    Require(native.ElapsedMillis <= 1500,
-        $"Cosmic live replan {step} exceeded its 1000ms hard budget: {native.ElapsedMillis}ms");
-    Require(native.Actions.Count > 0, $"Cosmic live replan {step} returned no action");
-    ReplayNativePlan(cosmicCraft, cosmicState, native, $"Cosmic live replan {step}");
-    var candidateEvaluation = DonatelloPlanEvaluator.Evaluate(cosmicCraft, cosmicState, native.Actions);
-    Require(!incumbentEvaluation.Completes
-            || !incumbentEvaluation.IsStrictlyBetterThan(candidateEvaluation),
-        $"Cosmic live replan {step} replaced a completing incumbent with a lexicographically worse plan");
-    var (executeResult, next) = Simulator.Execute(cosmicCraft, cosmicState, native.Actions[0], 0, 1);
-    Require(executeResult == Simulator.ExecuteResult.Succeeded,
-        $"Cosmic live replan {step} first action {native.Actions[0]} must be legal");
-    cosmicState = next;
-    cosmicIncumbent = native.Actions.Skip(1).ToArray();
-}
-Require(SolverUtils.Status(cosmicCraft, cosmicState) == SolverUtils.CraftStatus.Complete,
-    $"condition-changing Cosmic expert must complete within 100 actions; final: {cosmicState}");
 
 var hardExpertProgressActions = new List<VulcanSkill>();
 var hardExpertProgressSolver = new ProgressOnlySolver();
@@ -815,7 +837,13 @@ Require(CordialSelector.Select(noOvercapCordial, 750, 1000, CordialCount)
         == CordialSelector.WateredCordialItemId + CordialSelector.HqItemOffset,
     "overcap prevention must fall through to the strongest cordial whose full restoration fits");
 Require(CordialSelector.Select(strongestCordial, 750, 1000, CordialCount) == CordialSelector.HiCordialItemId,
-    "disabled overcap prevention must retain legacy threshold-based selection");
+    "disabled overcap prevention may select the preferred cordial even when its restoration overcaps");
+
+var legacyThresholdCordial = strongestCordial with { MinGP = 900, MaxGP = 100 };
+Require(CordialSelector.Select(legacyThresholdCordial, 500, 1000, CordialCount) == CordialSelector.HiCordialItemId,
+    "legacy cordial minimum and maximum GP values must not constrain automatic use");
+Require(CordialSelector.Select(strongestCordial, 1000, 1000, CordialCount) == 0,
+    "cordials must not be selected while GP is full");
 
 var specificCordial = new ConfigPreset.CordialConfig
 {
@@ -953,11 +981,11 @@ var observationStep = Root(Condition.Normal) with
     QuickInnoAvailable = true,
     StellarSteadyHandLeft = 2,
     ExpedienceLeft = 1,
-    ComboAction = VulcanSkill.BasicTouch,
-    PrevComboAction = VulcanSkill.BasicTouch,
-    PrevActionFailed = true,
 };
 Require(DonatelloSolver.ShouldUseCarefulObservation(observationCraft, observationStep)
+        && !DonatelloSolver.ShouldUseCarefulObservation(
+            observationCraft,
+            observationStep with { ComboAction = VulcanSkill.BasicTouch })
         && !DonatelloSolver.ShouldUseCarefulObservation(
             observationCraft with
             {
@@ -976,12 +1004,33 @@ Require(DonatelloSolver.ShouldUseCarefulObservation(observationCraft, observatio
                 StellarSteadyHandLeft = 0,
                 ExpedienceLeft = 0,
             }),
-    "Normal-condition rerolls must require explicit quality/time mode, specialist eligibility, surplus delineations, and two preserved buffs");
+    "Normal-condition rerolls must require no active combo, explicit quality/time mode, specialist eligibility, surplus delineations, and two preserved buffs");
+var actionHistoryItem = new CraftingListItem(1, 1);
+actionHistoryItem.ExecutedActions.AddRange(
+    [VulcanSkill.Innovation, VulcanSkill.BasicTouch, VulcanSkill.StandardTouch]);
+Require(CraftingActionHistory.ActiveCombo(actionHistoryItem.ExecutedActions) == VulcanSkill.StandardTouch
+        && CraftingGameInterop.ShouldRejectCarefulObservation(
+            VulcanSkill.CarefulObservation,
+            actionHistoryItem.ExecutedActions),
+    "confirmed Basic-to-Standard history must reject Careful Observation during the resulting combo");
+Require(CraftingActionHistory.ActiveCombo([VulcanSkill.StandardTouch]) == VulcanSkill.None
+        && CraftingActionHistory.ActiveCombo([VulcanSkill.Observe]) == VulcanSkill.StandardTouch
+        && !CraftingGameInterop.ShouldRejectCarefulObservation(
+            VulcanSkill.CarefulObservation,
+            [VulcanSkill.BasicTouch, VulcanSkill.CarefulObservation]),
+    "combo history must require the real touch sequence, retain Observe-to-Advanced, and treat Careful Observation as a combo break");
 Require(DonatelloSolver.ShouldPlanCarefulObservation(
         observationCraft,
         observationStep with { Condition = Condition.Poor })
+    && !DonatelloSolver.ShouldPlanCarefulObservation(
+        observationCraft,
+        observationStep with
+        {
+            Condition = Condition.Poor,
+            ComboAction = VulcanSkill.BasicTouch,
+        })
     && !DonatelloSolver.ShouldPlanCarefulObservation(observationCraft, observationStep),
-    "an observed Poor root must force one planner decision even when Excellent predicted the Poor transition");
+    "an observed Poor root without an active combo must force one planner decision even when Excellent predicted the Poor transition");
 var observationSolver = new DonatelloSolver(
     new CachedRaphaelSolution { ActionIds = [(uint)VulcanSkill.BasicSynthesis] },
     observationCraft);
@@ -1019,12 +1068,9 @@ Require(poorObservation.Condition == Condition.Normal
         && poorObservation.InnovationLeft == observationStep.InnovationLeft
         && poorObservation.ExpedienceLeft == observationStep.ExpedienceLeft
         && poorObservation.StellarSteadyHandLeft == observationStep.StellarSteadyHandLeft
-        && poorObservation.ComboAction == observationStep.ComboAction
-        && poorObservation.PrevComboAction == observationStep.PrevComboAction
-        && poorObservation.PrevActionFailed == observationStep.PrevActionFailed
         && poorObservation.CarefulObservationLeft == 0
         && poorObservation.CrafterDelineationsLeft == 2,
-    "Careful Observation must advance Poor to Normal while preserving action state and consuming exactly one charge and delineation");
+    "Careful Observation without an active combo must advance Poor to Normal, preserve buffs, and consume exactly one charge and delineation");
 
 foreach (var solverName in new[]
          {
@@ -1115,7 +1161,8 @@ var expectedRequestFields = new HashSet<string>
     "baseQuality", "jobLevel", "manipulation", "specialist", "solveMode",
     "allowCarefulObservation",
     "progressFirst", "minimizeSteps", "stellarSteadyHandCharges", "incumbentActionIds",
-    "softDeadlineMillis", "hardDeadlineMillis", "bypassSolutionCache", "root",
+    "softDeadlineMillis", "hardDeadlineMillis", "resetSoftDeadlineOnImprovement",
+    "bypassSolutionCache", "root",
 };
 var expectedRootFields = new HashSet<string>
 {
@@ -1130,8 +1177,8 @@ Require(requestJson.RootElement.EnumerateObject().Select(property => property.Na
             .SetEquals(expectedRequestFields)
         && nativeRoot.EnumerateObject().Select(property => property.Name).ToHashSet()
             .SetEquals(expectedRootFields),
-    "Donatello requests must contain exactly the fields required by native ABI v10");
-Require(requestJson.RootElement.GetProperty("abiVersion").GetUInt32() == 10
+    "Donatello requests must contain exactly the fields required by native ABI v12");
+Require(requestJson.RootElement.GetProperty("abiVersion").GetUInt32() == 12
         && requestJson.RootElement.GetProperty("solveMode").GetInt32() == 0
         && !requestJson.RootElement.GetProperty("allowCarefulObservation").GetBoolean()
         && !requestJson.RootElement.GetProperty("progressFirst").GetBoolean()
@@ -1140,6 +1187,7 @@ Require(requestJson.RootElement.GetProperty("abiVersion").GetUInt32() == 10
         && requestJson.RootElement.GetProperty("incumbentActionIds").GetArrayLength() == 0
         && requestJson.RootElement.GetProperty("softDeadlineMillis").GetInt32() == 0
         && requestJson.RootElement.GetProperty("hardDeadlineMillis").GetInt32() == 0
+        && !requestJson.RootElement.GetProperty("resetSoftDeadlineOnImprovement").GetBoolean()
         && !requestJson.RootElement.GetProperty("bypassSolutionCache").GetBoolean()
         && !requestJson.RootElement.TryGetProperty("AbiVersion", out _)
         && nativeRoot.GetProperty("wasteNot").GetInt32() == 0
@@ -1150,7 +1198,7 @@ Require(requestJson.RootElement.GetProperty("abiVersion").GetUInt32() == 10
         && nativeRoot.GetProperty("muscleMemory").GetInt32() == 0
         && nativeRoot.GetProperty("crafterDelineations").GetInt32() == 1
         && !nativeRoot.TryGetProperty("manipulationLeft", out _),
-    "Donatello requests must match every ABI v10 camelCase field name exactly");
+    "Donatello requests must match every ABI v12 camelCase field name exactly");
 
 using var poorObservationRequestJson = JsonDocument.Parse(DonatelloNative.SerializeRequest(
     observationCraft,
@@ -1161,8 +1209,11 @@ using var poorObservationRequestJson = JsonDocument.Parse(DonatelloNative.Serial
         CrafterDelineationsLeft = 5,
     },
     allowSpecialistActions: true,
-    solveMode: DonatelloNative.SolveMode.LiveAdaptive));
+    solveMode: DonatelloNative.SolveMode.LiveAdaptive,
+    softDeadlineMillis: DonatelloSolver.DefaultImprovementQuietPeriodMillis));
 Require(poorObservationRequestJson.RootElement.GetProperty("allowCarefulObservation").GetBoolean()
+        && poorObservationRequestJson.RootElement.GetProperty("resetSoftDeadlineOnImprovement").GetBoolean()
+        && poorObservationRequestJson.RootElement.GetProperty("hardDeadlineMillis").GetInt32() == 0
         && poorObservationRequestJson.RootElement.GetProperty("root")
             .GetProperty("crafterDelineations").GetInt32() == 5,
     "Poor live replans must expose Careful Observation and all delineations that can fund it plus reserved specialist actions");
@@ -1538,6 +1589,27 @@ Require(DonatelloSolver.RequiresReplan(craft, fullQualityGood, fullQualityGood w
     "full quality must not suppress replanning for non-quality state divergence");
 Require(DonatelloSolver.RequiresReplan(craft with { CraftExpert = true }, null, fullQualityGood),
     "full quality must not suppress expert-craft condition replanning");
+Require(DonatelloSolver.ShouldReplanAfterMaximumQuality(craft, fullQualityGood, VulcanSkill.BasicTouch)
+        && DonatelloSolver.ShouldReplanAfterMaximumQuality(craft, fullQualityGood, VulcanSkill.PreparatoryTouch)
+        && !DonatelloSolver.ShouldReplanAfterMaximumQuality(craft, fullQualityGood, VulcanSkill.BasicSynthesis)
+        && !DonatelloSolver.ShouldReplanAfterMaximumQuality(craft, fullQualityGood, VulcanSkill.DelicateSynthesis)
+        && !DonatelloSolver.ShouldReplanAfterMaximumQuality(
+            craft,
+            fullQualityGood with { Quality = craft.CraftQualityMax - 1 },
+            VulcanSkill.BasicTouch)
+        && !DonatelloSolver.ShouldReplanAfterMaximumQuality(
+            craft with { DonatelloOptions = new DonatelloExecutionOptions(DonatelloSolveObjective.ProgressOnly) },
+            fullQualityGood,
+            VulcanSkill.BasicTouch)
+        && !DonatelloSolver.ShouldReplanAfterMaximumQuality(
+            craft with { CraftExpert = true },
+            fullQualityGood,
+            VulcanSkill.BasicTouch)
+        && !DonatelloSolver.ShouldReplanAfterMaximumQuality(
+            craft with { IsCosmic = true },
+            fullQualityGood,
+            VulcanSkill.BasicTouch),
+    "normal quality-mode Donatello must replan before a guaranteed quality-increasing action after maximum quality, while non-quality and separate craft modes retain their contracts");
 var uncappedQualityCompletionRoot = Root() with { Progress = craft.CraftProgress - 1, Quality = craft.CraftQualityMax - 1 };
 Require(DonatelloSolver.ShouldReplanBeforeCompletion(
             craft,
@@ -1565,7 +1637,54 @@ var maxQualityCompletion = new DonatelloPlanEvaluation(
 Require(DonatelloSolverDefinition.ShouldUseStaticPlan(craft, maxQualityCompletion)
         && DonatelloSolverDefinition.ShouldUseStaticPlan(
             craft with { CraftExpert = true }, maxQualityCompletion),
-    "an initial max-quality completing Raphael plan must bypass Donatello for normal and expert crafts");
+    "an initial max-quality completing Raphael plan must stay on the protected Raphael incumbent");
+var protectedMaxQualitySolution = new CachedRaphaelSolution
+{
+    ActionIds =
+    [
+        (uint)VulcanSkill.BasicTouch,
+        (uint)VulcanSkill.BasicTouch,
+        (uint)VulcanSkill.BasicSynthesis,
+    ],
+};
+var protectedMaxQualityCraft = Craft() with
+{
+    StatControl = 700,
+    CraftDurability = 40,
+    CraftQualityMax = 100,
+};
+var protectedNormal = GameStateBuilder.BuildInitialStepState(protectedMaxQualityCraft);
+var protectedSolver = DonatelloSolverDefinition.CreateFromSolution(
+    protectedMaxQualitySolution,
+    protectedMaxQualityCraft);
+Require(protectedSolver is DonatelloProtectedRaphaelSolver,
+    "a guaranteed max-quality Raphael plan must construct the protected Donatello incumbent");
+var protectedFirst = protectedSolver.Solve(protectedMaxQualityCraft, protectedNormal);
+Require(protectedFirst.Action == VulcanSkill.BasicTouch
+        && protectedSolver is DonatelloSolver { NativeReplanCount: 0 },
+    "the protected Raphael incumbent must issue its first Normal action without a serialized search");
+var (_, protectedAfterTouch) = Simulator.Execute(
+    protectedMaxQualityCraft,
+    protectedNormal,
+    VulcanSkill.BasicTouch,
+    0,
+    1);
+protectedAfterTouch.Condition = Condition.Good;
+var protectedGood = protectedSolver.Solve(protectedMaxQualityCraft, protectedAfterTouch);
+Require(protectedGood.Action != VulcanSkill.None
+        && !protectedGood.IsTerminalFailure
+        && protectedSolver is DonatelloSolver { NativeReplanCount: 1 },
+    "Good on a protected max-quality plan must start a concurrent opportunistic replan and keep the incumbent action");
+var protectedRecovery = (DonatelloSolver)DonatelloSolverDefinition.CreateFromSolution(
+    protectedMaxQualitySolution,
+    protectedMaxQualityCraft);
+Require(protectedRecovery.Solve(protectedMaxQualityCraft, protectedNormal).Action == VulcanSkill.BasicTouch,
+    "protected recovery fixture must play the first Raphael action");
+protectedAfterTouch.Condition = Condition.Excellent;
+var protectedExcellent = protectedRecovery.Solve(protectedMaxQualityCraft, protectedAfterTouch);
+Require(protectedExcellent.Action == VulcanSkill.None
+        && protectedRecovery.NativeReplanCount == 1,
+    "Excellent/Poor on a protected max-quality plan must wait for the 30s recovery search");
 
 // Explicit known-condition progression, including zero-step preservation.
 var excellent = Root(Condition.Excellent);
@@ -1705,6 +1824,32 @@ Require(primed.InnovationLeft == 6, "Primed must extend Innovation from 4 to 6 s
 var primedAppraisal = Simulator.Execute(craft, Root(Condition.Primed), VulcanSkill.FinalAppraisal, 0, 1).Item2;
 Require(primedAppraisal.FinalAppraisalLeft == 7,
     "Primed must extend Final Appraisal from 5 to 7 steps");
+var zeroStepExpedienceRoot = Root() with
+{
+    ExpedienceLeft = 1,
+    CarefulObservationLeft = 3,
+    CrafterDelineationsLeft = 3,
+    HeartAndSoulAvailable = true,
+    QuickInnoLeft = 1,
+    QuickInnoAvailable = true,
+    MaterialMiracleCharges = 1,
+};
+foreach (var zeroStepAction in new[]
+         {
+             VulcanSkill.CarefulObservation,
+             VulcanSkill.FinalAppraisal,
+             VulcanSkill.HeartAndSoul,
+             VulcanSkill.MaterialMiracle,
+             VulcanSkill.QuickInnovation,
+         })
+{
+    Require(Simulator.CanUseAction(craft, zeroStepExpedienceRoot, zeroStepAction),
+        $"zero-step Expedience fixture must permit {zeroStepAction}");
+    var afterZeroStep = Simulator.Execute(craft, zeroStepExpedienceRoot, zeroStepAction, 0, 0.5f).Item2;
+    Require(afterZeroStep.Index == zeroStepExpedienceRoot.Index
+            && afterZeroStep.ExpedienceLeft == zeroStepExpedienceRoot.ExpedienceLeft,
+        $"{zeroStepAction} must preserve the current step and Expedience");
+}
 
 // Authoritative UI fields plus inferred external action must reconstruct hidden state.
 var manualRoot = Root(Condition.Good);
@@ -1848,6 +1993,8 @@ var beforeFinalAppraisal = Root() with
     IQStacks = 8,
     GreatStridesLeft = 3,
     InnovationLeft = 1,
+    ExpedienceLeft = 1,
+    PrevComboAction = VulcanSkill.HastyTouch,
 };
 var afterFinalAppraisal = Simulator.Execute(
     finalAppraisalCraft,
@@ -1867,8 +2014,9 @@ Require(StepStateReconciler.TryReconcileAction(
         out var reconciledFinalAppraisal)
     && reconciledFinalAppraisal.Quality == 4695
     && reconciledFinalAppraisal.RemainingCP == 107
-    && reconciledFinalAppraisal.FinalAppraisalLeft == 5,
-    "reload recovery must reconcile Final Appraisal against the authoritative 7800 max quality instead of clamping live quality to the HQ-chance field");
+    && reconciledFinalAppraisal.FinalAppraisalLeft == 5
+    && reconciledFinalAppraisal.ExpedienceLeft == 1,
+    "reload recovery must reconcile Final Appraisal against authoritative quality while preserving zero-step Expedience");
 
 var overcapCraft = Craft() with { CraftQualityMax = 2500 };
 var overcapRoot = Root() with

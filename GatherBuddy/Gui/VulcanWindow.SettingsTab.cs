@@ -49,7 +49,7 @@ public partial class VulcanWindow
             var coordinator = GatherBuddy.RaphaelSolveCoordinator;
             var raphaelConfig = GatherBuddy.Config.RaphaelSolverConfig;
 
-            var currentMode = raphaelConfig.SolverMode;
+            var currentMode = CraftingContextResolver.ResolveGlobalSolverMode(raphaelConfig.SolverMode);
             var modeNames = new[] { "Pure Raphael", "Standard Solver", "Progress Only", "Donatello" };
             var safeModeIndex = Math.Clamp((int)currentMode, 0, modeNames.Length - 1);
             ImGui.SetNextItemWidth(VulcanUiScaling.Scaled(150f));
@@ -121,6 +121,20 @@ public partial class VulcanWindow
             if (ImGui.IsItemHovered())
                 ImGui.SetTooltip("Delay in milliseconds between each crafting action (0 = instant, max 1000ms)");
 
+            var autoTakeOverManualSynthesis = GatherBuddy.Config.VulcanAutoTakeOverManualSynthesis;
+            if (ImGui.Checkbox("Automatically take over manually started synthesis", ref autoTakeOverManualSynthesis))
+            {
+                GatherBuddy.Config.VulcanAutoTakeOverManualSynthesis = autoTakeOverManualSynthesis;
+                GatherBuddy.Config.Save();
+            }
+            if (ImGui.IsItemHovered())
+            {
+                ImGui.SetTooltip(
+                    "When you start Synthesis or Trial Synthesis from the game UI, Vulcan automatically uses the active recipe and current crafter class.\n"
+                    + "The exact recipe's solver, macro, specialist, and Donatello overrides apply. Live stats and the actual starting quality are authoritative.\n"
+                    + "Disable this if another plugin owns manually started crafts.");
+            }
+
             var ctxMenuEntries = GatherBuddy.Config.VulcanContextMenuEntries;
             if (ImGui.Checkbox("Context Menu Entries (Vs in context menus)", ref ctxMenuEntries))
             {
@@ -159,7 +173,7 @@ public partial class VulcanWindow
             ImGui.Separator();
             ImGui.Spacing();
 
-            ImGui.Text("Raphael / Donatello Solver");
+            ImGui.Text("Raphael / Donatello / Gabriel Solver");
             ImGui.Separator();
             ImGui.Spacing();
 
@@ -292,6 +306,24 @@ public partial class VulcanWindow
                 ImGui.TextColored(ImGuiColors.DalamudRed, $"  Benchmark failed: {_donatelloBenchmarkError}");
             }
 
+            ImGui.Text("  Continuous improvement reset window (seconds): ");
+            ImGui.SameLine();
+            var improvementQuietSeconds = Math.Clamp(
+                raphaelConfig.DonatelloImprovementQuietSeconds,
+                Vulcan.DonatelloSolver.MinimumImprovementQuietPeriodSeconds,
+                Vulcan.DonatelloSolver.MaximumImprovementQuietPeriodSeconds);
+            ImGui.SetNextItemWidth(VulcanUiScaling.Scaled(100f));
+            if (ImGui.InputInt("###DonatelloImprovementQuietSeconds", ref improvementQuietSeconds, 1, 5))
+            {
+                raphaelConfig.DonatelloImprovementQuietSeconds = Math.Clamp(
+                    improvementQuietSeconds,
+                    Vulcan.DonatelloSolver.MinimumImprovementQuietPeriodSeconds,
+                    Vulcan.DonatelloSolver.MaximumImprovementQuietPeriodSeconds);
+                GatherBuddy.Config.Save();
+            }
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip("Used by 'Maximize quality at cost of time'. Donatello stops a continuous search after this many seconds without a strict improvement; every strict improvement resets the timer. Individual recipes can override it.");
+
             ImGui.Text("  Solver cache memory (MiB): ");
             ImGui.SameLine();
             var cacheMemoryMiB = Math.Clamp(raphaelConfig.DonatelloCacheMemoryMiB, 64, 1024);
@@ -319,6 +351,31 @@ public partial class VulcanWindow
                 coordinator.Clear();
                 Vulcan.DonatelloNative.ClearCache();
             }
+
+            ImGui.Spacing();
+            ImGui.Separator();
+            ImGui.Spacing();
+            ImGui.Text("  Gabriel");
+
+            ImGui.Text("  Worker threads: ");
+            ImGui.SameLine();
+            var maximumGabrielWorkerThreads = Vulcan.DonatelloNative.ResolveGabrielWorkerThreads(int.MaxValue);
+            var gabrielWorkerThreads = Math.Clamp(
+                raphaelConfig.GabrielWorkerThreads,
+                1,
+                maximumGabrielWorkerThreads);
+            ImGui.SetNextItemWidth(VulcanUiScaling.Scaled(100f));
+            if (ImGui.InputInt("###GabrielWorkerThreads", ref gabrielWorkerThreads, 1, 4))
+            {
+                raphaelConfig.GabrielWorkerThreads = Math.Clamp(
+                    gabrielWorkerThreads,
+                    1,
+                    maximumGabrielWorkerThreads);
+                GatherBuddy.Config.Save();
+            }
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip($"Logical CPU threads used by Gabriel for live recommendations and validation estimates (1-{maximumGabrielWorkerThreads}). Applies to the next Gabriel craft or estimate.");
+
             ImGui.EndGroup();
         }
     }

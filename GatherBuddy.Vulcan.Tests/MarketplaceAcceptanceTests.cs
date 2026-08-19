@@ -49,6 +49,23 @@ public static class MarketplaceAcceptanceTests
                 && parsedListing.IsSellingAsSet == null,
             "Universalis listing IDs, tax, mannequin state, and unknown set-sale metadata must be preserved");
 
+        const string worldScopedFixture = """
+        {
+          "itemID": 45968,
+          "worldID": 80,
+          "listings": [
+            {
+              "listingID": "1",
+              "pricePerUnit": 891,
+              "quantity": 21
+            }
+          ]
+        }
+        """;
+        var worldScopedListing = UniversalisService.ParseMarketResponse(worldScopedFixture)[0].Listings[0];
+        require(worldScopedListing.WorldId == 80,
+            "world-scoped Universalis responses must propagate item-level world ID to listings");
+
         var now = DateTime.UtcNow;
         var fetches = 0;
         var gate = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -271,6 +288,9 @@ public static class MarketplaceAcceptanceTests
                 && list.Entries.Count == 1
                 && list.Entries[0].TargetQuantity == 5,
             "marketplace list additions must merge inventory targets");
+        manager.Clear();
+        require(list.Entries.Count == 0 && manager.StatusText.Contains("Cleared", StringComparison.Ordinal),
+            "marketplace list must support clearing all targets");
         var managed = manager.CreateManagedList();
         require(manager.AddItem(managed, 42, "Test Item", 1, 1)
                 && !config.MarketplaceBuyLists.Contains(managed),

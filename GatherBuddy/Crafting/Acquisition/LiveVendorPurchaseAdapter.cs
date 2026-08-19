@@ -384,10 +384,17 @@ public sealed class LiveVendorPurchaseAdapter
             return false;
         }
 
-        location = VendorNpcLocationCache.TryGetFirstLocation(vendor.NpcId)!;
+        var locations = VendorNpcLocationCache.GetLocations(vendor.NpcId);
+        location = transaction.VendorTerritoryId == 0
+            ? VendorNpcLocationCache.SelectPreferredLocation(
+                locations,
+                (uint)global::GatherBuddy.Dalamud.ClientState.TerritoryType)!
+            : locations.FirstOrDefault(candidate => candidate.TerritoryId == transaction.VendorTerritoryId)!;
         if (location == null)
         {
-            failure = $"No route to vendor {vendor.Name} is available.";
+            failure = transaction.VendorTerritoryId == 0
+                ? $"No route to vendor {vendor.Name} is available."
+                : $"The planned route to vendor {vendor.Name} in territory {transaction.VendorTerritoryId} is no longer available.";
             return false;
         }
         return true;

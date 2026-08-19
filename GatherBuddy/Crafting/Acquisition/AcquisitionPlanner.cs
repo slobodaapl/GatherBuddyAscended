@@ -274,6 +274,8 @@ public static class AcquisitionPlanner
 
         var sourceChoices = new List<SourceChoice>(vendors.Count + markets.Count);
         var requiredQuantity = dependency.RequiredQuantity;
+        var requiredHq = Math.Clamp(dependency.RequiredHqQuantity, 0, requiredQuantity);
+        var requiredNq = Math.Clamp(dependency.RequiredNqQuantity, 0, requiredQuantity);
         var hasSpecialCurrencyVendor = false;
 
         foreach (var offer in vendors)
@@ -348,12 +350,26 @@ public static class AcquisitionPlanner
             return new List<Candidate>();
         }
 
+        if (CanDiscardMarketChoices(sourceChoices, input, settings, requiredQuantity, requiredHq, requiredNq))
+            sourceChoices = sourceChoices
+                .Where(choice => choice.Kind != AcquisitionSourceKind.Market)
+                .ToList();
+
         var results = new List<Candidate>();
         var current = new List<ChosenSource>();
         var states = 0;
         var searchLimitExceeded = false;
-        var requiredHq = Math.Clamp(dependency.RequiredHqQuantity, 0, requiredQuantity);
-        var requiredNq = Math.Clamp(dependency.RequiredNqQuantity, 0, requiredQuantity);
+        var remainingQuantity = new long[sourceChoices.Count + 1];
+        var remainingHq = new long[sourceChoices.Count + 1];
+        var remainingNq = new long[sourceChoices.Count + 1];
+        for (var i = sourceChoices.Count - 1; i >= 0; i--)
+        {
+            var choice = sourceChoices[i];
+            var capacity = checked((long)choice.ReceiveQuantity * choice.MaxUses);
+            remainingQuantity[i] = checked(remainingQuantity[i + 1] + capacity);
+            remainingHq[i] = checked(remainingHq[i + 1] + (choice.IsHq ? capacity : 0));
+            remainingNq[i] = checked(remainingNq[i + 1] + (choice.IsHq ? 0 : capacity));
+        }
 
         void Visit(int index, int acquired, int hq, int nq)
         {
@@ -369,11 +385,10 @@ public static class AcquisitionPlanner
                 return;
             }
 
-            if (index >= sourceChoices.Count)
-                return;
-
-            Visit(index + 1, acquired, hq, nq);
-            if (searchLimitExceeded)
+            if (index >= sourceChoices.Count
+                || (long)acquired + remainingQuantity[index] < requiredQuantity
+                || (long)hq + remainingHq[index] < requiredHq
+                || (long)nq + remainingNq[index] < requiredNq)
                 return;
 
             var choice = sourceChoices[index];
@@ -393,6 +408,8 @@ public static class AcquisitionPlanner
                 if (searchLimitExceeded)
                     return;
             }
+
+            Visit(index + 1, acquired, hq, nq);
         }
 
         Visit(0, 0, 0, 0);
@@ -428,6 +445,74 @@ public static class AcquisitionPlanner
         }
 
         return unique;
+    }
+
+    private static bool CanDiscardMarketChoices(
+        IReadOnlyList<SourceChoice> sourceChoices,
+        AcquisitionPlanningInput input,
+        AcquisitionPlanningSettings settings,
+        int requiredQuantity,
+        int requiredHq,
+        int requiredNq)
+    {
+        var markets = sourceChoices
+            .Where(choice => choice.Kind == AcquisitionSourceKind.Market)
+            .ToArray();
+        if (markets.Length == 0
+            || settings.PreferHQ
+            || settings.PreferMarketForSpecialCurrency
+                && sourceChoices.Any(choice => choice.Kind == AcquisitionSourceKind.Vendor
+                    && choice.IsSpecialCurrencySource))
+            return false;
+
+        var minGilPerUnit = sourceChoices
+            .Where(choice => choice.ReceiveQuantity > 0)
+            .Select(choice => choice.GilCost / choice.ReceiveQuantity)
+            .DefaultIfEmpty(long.MaxValue)
+            .Min();
+        if (minGilPerUnit == long.MaxValue)
+            return false;
+
+        foreach (var vendor in sourceChoices.Where(choice => choice.Kind == AcquisitionSourceKind.Vendor))
+        {
+            var uses = DivideRoundUp(requiredQuantity, vendor.ReceiveQuantity);
+            if (uses <= 0 || uses > vendor.MaxUses)
+                continue;
+
+            var acquired = checked(vendor.ReceiveQuantity * uses);
+            var hq = vendor.IsHq ? acquired : 0;
+            var nq = vendor.IsHq ? 0 : acquired;
+            if (hq < requiredHq || nq < requiredNq)
+                continue;
+
+            var affordable = true;
+            foreach (var cost in vendor.Costs)
+            {
+                if (!TryGetBalance(input, cost.CurrencyId, out var balance)
+                    || checked(cost.Amount * (long)uses) > balance)
+                {
+                    affordable = false;
+                    break;
+                }
+            }
+            if (!affordable)
+                continue;
+
+            var vendorGil = checked(vendor.GilCost * uses);
+            if (settings.PreferVendors)
+                return true;
+
+            var marketCanTieOrBeatVendor = markets.Any(market =>
+            {
+                var remaining = Math.Max(0, requiredQuantity - market.ReceiveQuantity);
+                var lowerBound = checked(market.GilCost + checked((long)remaining * minGilPerUnit));
+                return lowerBound <= vendorGil;
+            });
+            if (!marketCanTieOrBeatVendor)
+                return true;
+        }
+
+        return false;
     }
 
     private static IReadOnlyList<AcquisitionCurrencyCost>? NormalizeCosts(
@@ -636,6 +721,7 @@ public static class AcquisitionPlanner
         string SourceId,
         string SourceName,
         string Location,
+        uint VendorTerritoryId,
         uint WorldId,
         string WorldName,
         int ReceiveQuantity,
@@ -666,6 +752,7 @@ public static class AcquisitionPlanner
                 offer.OfferId,
                 offer.VendorName,
                 offer.Location,
+                offer.VendorTerritoryId,
                 0,
                 string.Empty,
                 targetReceiveQuantity,
@@ -690,6 +777,7 @@ public static class AcquisitionPlanner
                 listing.ListingId.ToString(),
                 "Marketboard",
                 string.Empty,
+                0,
                 listing.WorldId,
                 listing.WorldName,
                 listing.Quantity,
@@ -774,6 +862,7 @@ public static class AcquisitionPlanner
                     SourceId = choice.SourceId,
                     SourceName = choice.SourceName,
                     Location = choice.Location,
+                    VendorTerritoryId = choice.VendorTerritoryId,
                     WorldId = choice.WorldId,
                     WorldName = choice.WorldName,
                     Quantity = checked(choice.PrimaryReceiveQuantity * units),
@@ -884,6 +973,7 @@ public static class AcquisitionPlanner
         {
             if (existing.SourceKind != incoming.SourceKind
                 || !string.Equals(existing.SourceId, incoming.SourceId, StringComparison.Ordinal)
+                || existing.VendorTerritoryId != incoming.VendorTerritoryId
                 || existing.WorldId != incoming.WorldId
                 || existing.IsHq != incoming.IsHq)
             {
@@ -1041,6 +1131,7 @@ public static class AcquisitionPlanner
                 SourceId = existing.SourceId,
                 SourceName = existing.SourceName,
                 Location = existing.Location,
+                VendorTerritoryId = existing.VendorTerritoryId,
                 WorldId = existing.WorldId,
                 WorldName = existing.WorldName,
                 Quantity = checked(existing.Quantity + primaryOutputQuantity * additionalUnits),
@@ -1120,7 +1211,7 @@ public static class AcquisitionPlanner
             }
         }
 
-        private static void InsertPareto(List<CandidatePlan> frontier, CandidatePlan candidate)
+        private void InsertPareto(List<CandidatePlan> frontier, CandidatePlan candidate)
         {
             for (var i = frontier.Count - 1; i >= 0; i--)
             {
@@ -1134,7 +1225,7 @@ public static class AcquisitionPlanner
             frontier.Add(candidate);
         }
 
-        private static bool Dominates(CandidatePlan left, CandidatePlan right)
+        private bool Dominates(CandidatePlan left, CandidatePlan right)
         {
             if ((left.HasCoProductTransactions || right.HasCoProductTransactions)
                 && !string.Equals(left.TransactionStateSignature, right.TransactionStateSignature, StringComparison.Ordinal))
@@ -1145,6 +1236,7 @@ public static class AcquisitionPlanner
                 || left.MarketTransactionCount > right.MarketTransactionCount
                 || left.Transactions.Count > right.Transactions.Count
                 || left.Overbuy > right.Overbuy
+                || VendorRoutesRequiringTravel(left) > VendorRoutesRequiringTravel(right)
                 || !left.MarketWorldIds.IsSubsetOf(right.MarketWorldIds))
                 return false;
 
@@ -1158,6 +1250,7 @@ public static class AcquisitionPlanner
                 || left.MarketTransactionCount < right.MarketTransactionCount
                 || left.Transactions.Count < right.Transactions.Count
                 || left.Overbuy < right.Overbuy
+                || VendorRoutesRequiringTravel(left) < VendorRoutesRequiringTravel(right)
                 || left.MarketWorldIds.Count < right.MarketWorldIds.Count
                 || left.CurrencyCosts.Keys.Concat(right.CurrencyCosts.Keys).Distinct().Any(currencyId =>
                     left.CurrencyCosts.GetValueOrDefault(currencyId) < right.CurrencyCosts.GetValueOrDefault(currencyId))
@@ -1207,6 +1300,10 @@ public static class AcquisitionPlanner
                 return left.Transactions.Count.CompareTo(right.Transactions.Count);
             if (left.Overbuy != right.Overbuy)
                 return left.Overbuy.CompareTo(right.Overbuy);
+            var leftVendorTravel = VendorRoutesRequiringTravel(left);
+            var rightVendorTravel = VendorRoutesRequiringTravel(right);
+            if (leftVendorTravel != rightVendorTravel)
+                return leftVendorTravel.CompareTo(rightVendorTravel);
             return string.CompareOrdinal(left.Signature, right.Signature);
         }
 
@@ -1222,7 +1319,18 @@ public static class AcquisitionPlanner
                 return left.Overbuy.CompareTo(right.Overbuy);
             if (left.NonHqQuantity != right.NonHqQuantity)
                 return left.NonHqQuantity.CompareTo(right.NonHqQuantity);
+            var leftVendorTravel = VendorRoutesRequiringTravel(left);
+            var rightVendorTravel = VendorRoutesRequiringTravel(right);
+            if (leftVendorTravel != rightVendorTravel)
+                return leftVendorTravel.CompareTo(rightVendorTravel);
             return string.CompareOrdinal(left.Signature, right.Signature);
         }
+
+        private int VendorRoutesRequiringTravel(CandidatePlan plan)
+            => plan.Transactions.Count(transaction =>
+                transaction.SourceKind == AcquisitionSourceKind.Vendor
+                && (_input.CurrentTerritoryId == 0
+                    || transaction.VendorTerritoryId == 0
+                    || transaction.VendorTerritoryId != _input.CurrentTerritoryId));
     }
 }

@@ -149,6 +149,7 @@ public sealed class AcquisitionVendorOffer
     public string OfferId { get; init; } = string.Empty;
     public string VendorName { get; init; } = string.Empty;
     public string Location { get; init; } = string.Empty;
+    public uint VendorTerritoryId { get; init; }
     public int ReceiveQuantity { get; init; }
     public IReadOnlyList<AcquisitionVendorOutput> Outputs { get; init; }
         = Array.Empty<AcquisitionVendorOutput>();
@@ -202,6 +203,7 @@ public sealed class AcquisitionPlanningInput
         = new Dictionary<uint, long>();
     public long? GilBalance { get; init; }
     public uint CurrentWorldId { get; init; }
+    public uint CurrentTerritoryId { get; init; }
 }
 
 public enum AcquisitionSourceKind
@@ -224,6 +226,7 @@ public sealed class AcquisitionTransaction
     public string SourceId { get; init; } = string.Empty;
     public string SourceName { get; init; } = string.Empty;
     public string Location { get; init; } = string.Empty;
+    public uint VendorTerritoryId { get; init; }
     public uint WorldId { get; init; }
     public string WorldName { get; init; } = string.Empty;
     public int Quantity { get; init; }

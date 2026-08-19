@@ -970,12 +970,15 @@ public partial class VulcanWindow
 
         ImGui.Spacing();
         var buyListManager  = GatherBuddy.VendorBuyListManager;
+        var unifiedBuyListManager = GatherBuddy.MarketplaceBuyListManager;
 
         var purchaseManager = GatherBuddy.VendorPurchaseManager;
-        if (ImGui.Button("Open Vendor Buy List"))
-            buyListManager.OpenWindow();
+        if (ImGui.Button("Open Buy List") && unifiedBuyListManager != null)
+            GatherBuddy.MarketplaceBuyListWindow?.Open();
         ImGui.SameLine();
-        ImGui.TextColored(ImGuiColors.DalamudYellow, $"{buyListManager.ActiveListName}: {buyListManager.Entries.Count} item(s)");
+        ImGui.TextColored(ImGuiColors.DalamudYellow, unifiedBuyListManager?.ActiveList is { } activeBuyList
+            ? $"{activeBuyList.Name}: {activeBuyList.Entries.Count} item(s)"
+            : "Buy list unavailable");
         ImGui.Spacing();
 
         if (!string.IsNullOrWhiteSpace(buyListManager.StatusText))
@@ -1162,11 +1165,37 @@ public partial class VulcanWindow
 
     private void DrawVendorAddToListPopup(VendorShopEntry entry, VendorNpc vendor, uint targetQuantity)
     {
+        var marketplaceManager = GatherBuddy.MarketplaceBuyListManager;
+        if (marketplaceManager != null)
+        {
+            if (ImGui.BeginMenu("Add to Buy List", marketplaceManager.Lists.Count > 0))
+            {
+                foreach (var list in marketplaceManager.Lists.OrderByDescending(list => list.CreatedAt))
+                {
+                    if (ImGui.Selectable(list.Name)
+                     && marketplaceManager.AddItem(list.Id, entry.ItemId, entry.ItemName, (uint)entry.IconId, checked((int)targetQuantity)))
+                    {
+                        marketplaceManager.SelectList(list.Id);
+                        GatherBuddy.MarketplaceBuyListWindow?.Open();
+                    }
+                }
+                ImGui.EndMenu();
+            }
+
+            if (ImGui.Selectable("Create New Buy List"))
+            {
+                var list = marketplaceManager.CreateList("Buy List");
+                marketplaceManager.AddItem(list.Id, entry.ItemId, entry.ItemName, (uint)entry.IconId, checked((int)targetQuantity));
+                GatherBuddy.MarketplaceBuyListWindow?.Open();
+            }
+            ImGui.Separator();
+        }
+
         var buyListManager = GatherBuddy.VendorBuyListManager;
         if (buyListManager == null)
             return;
 
-        if (ImGui.Selectable("Create New List..."))
+        if (ImGui.Selectable("Create Vendor-only List..."))
         {
             var vendorBuyListWindow = GatherBuddy.VendorBuyListWindow;
             if (vendorBuyListWindow == null)
@@ -1175,7 +1204,7 @@ public partial class VulcanWindow
                 GatherBuddy.Log.Debug($"[VulcanWindow] Unable to create a new vendor buy list for {entry.ItemName} with target {targetQuantity:N0}.");
         }
 
-        if (!ImGui.BeginMenu("Add to Existing List", buyListManager.Lists.Count > 0))
+        if (!ImGui.BeginMenu("Add to Vendor-only List", buyListManager.Lists.Count > 0))
             return;
 
         foreach (var list in buyListManager.Lists.OrderByDescending(list => list.CreatedAt))
@@ -1215,11 +1244,12 @@ public partial class VulcanWindow
                 VendorBuyListButtonColor, availability.Reason, true);
             return;
         }
-        var buyListManager = GatherBuddy.VendorBuyListManager;
-        if (buyListManager == null)
+        var marketplaceManager = GatherBuddy.MarketplaceBuyListManager;
+        var vendorManager = GatherBuddy.VendorBuyListManager;
+        if (marketplaceManager == null && vendorManager == null)
         {
             DrawVendorIconButton($"vendor_add_disabled_{row.IdSuffix}", FontAwesomeIcon.Plus,
-                VendorBuyListButtonColor, "Vendor buy list manager unavailable", true);
+                VendorBuyListButtonColor, "Buy list manager unavailable", true);
             return;
         }
 
@@ -1228,8 +1258,9 @@ public partial class VulcanWindow
         if (DrawVendorIconButton($"vendor_add_{row.IdSuffix}", FontAwesomeIcon.Plus,
                 VendorBuyListButtonColor,
                 "Add to active list - right-click for more options")
-         && !buyListManager.TryAddTarget(row.Entry, selectedNpc.Npc, targetQuantity, openWindow: false, announce: false))
-            GatherBuddy.Log.Debug($@"[VulcanWindow] Unable to add {row.Entry.ItemName} to active vendor list '{buyListManager.ActiveListName}' with target {targetQuantity:N0}.");
+         && marketplaceManager?.ActiveList is { } active
+         && !marketplaceManager.AddItem(active.Id, row.Entry.ItemId, row.Entry.ItemName, (uint)row.Entry.IconId, checked((int)targetQuantity)))
+            GatherBuddy.Log.Debug($@"[VulcanWindow] Unable to add {row.Entry.ItemName} to active buy list '{active.Name}' with target {targetQuantity:N0}.");
 
         if (ImGui.BeginPopupContextItem(contextMenuId))
         {

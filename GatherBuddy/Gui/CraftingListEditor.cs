@@ -43,6 +43,7 @@ public class CraftingListEditor
         public Dictionary<uint, int> DisplayPrecraftMaterials { get; init; } = [];
         public Dictionary<uint, IngredientQualityDemand> DisplayIngredientDemands { get; init; } = [];
         public Dictionary<uint, IngredientQualityDemand> DisplayCraftMaterialDemands { get; init; } = [];
+        public CraftingMaterialFinalRoots DisplayCraftMaterialFinalRoots { get; init; } = new([]);
     }
     private CraftingListDefinition _list;
     private int _searchQuantity = 1;
@@ -87,7 +88,8 @@ public class CraftingListEditor
     private bool _pendingMaterialsRefreshFromInventory;
     private AcquisitionPlanningResult? _acquisitionPlanningResult;
     private MarketplaceBuyListDefinition? _managedMarketplaceProjection;
-    private IReadOnlyDictionary<uint, string> _marketplacePurchaseReasons = new Dictionary<uint, string>();
+    private IReadOnlyDictionary<uint, MarketplacePurchaseReason> _marketplacePurchaseReasons
+        = new Dictionary<uint, MarketplacePurchaseReason>();
     private DateTime _lastAcquisitionRefresh = DateTime.MinValue;
     private bool _acquisitionEstimateDirty = true;
     private bool _acquisitionEstimateLoading;
@@ -96,6 +98,12 @@ public class CraftingListEditor
     private const double InventoryRefreshIntervalSeconds = 0.5;
     private const double RetainerSnapshotRetryIntervalSeconds = 1.0;
     private const double InventoryChangeDebounceSeconds = 0.2;
+
+    internal readonly record struct MarketplacePurchaseReason(
+        string Text,
+        long CurrencyAmount = 0,
+        uint CurrencyIconId = 0,
+        string CurrencyTooltip = "");
     
     private RecipeCraftSettingsPopup _craftSettingsPopup = new();
     private CraftingListConsumablesPopup _consumablesPopup = new();
@@ -270,7 +278,7 @@ public class CraftingListEditor
             _editingDescription = _list.Description;
         _acquisitionPlanningResult = null;
         _managedMarketplaceProjection = null;
-        _marketplacePurchaseReasons = new Dictionary<uint, string>();
+        _marketplacePurchaseReasons = new Dictionary<uint, MarketplacePurchaseReason>();
         _acquisitionStatus = string.Empty;
     }
 
@@ -933,7 +941,7 @@ public class CraftingListEditor
         {
             _acquisitionPlanningResult = null;
             _managedMarketplaceProjection = null;
-            _marketplacePurchaseReasons = new Dictionary<uint, string>();
+            _marketplacePurchaseReasons = new Dictionary<uint, MarketplacePurchaseReason>();
             _acquisitionStatus = string.Empty;
             _acquisitionEstimateLoading = false;
             return;
@@ -955,7 +963,9 @@ public class CraftingListEditor
             _acquisitionEstimateLoading = evaluation.IsLoading;
             _acquisitionStatus = evaluation.Status;
             _acquisitionPlanningResult = evaluation.Planning;
-            _marketplacePurchaseReasons = BuildMarketplacePurchaseReasons(evaluation);
+            _marketplacePurchaseReasons = BuildMarketplacePurchaseReasons(
+                evaluation,
+                _list.PreferMarketForSpecialCurrency);
             _managedMarketplaceProjection = evaluation.Planning == null
                 ? null
                 : GatherBuddy.MarketplaceBuyListManager?.CreateManagedList(
@@ -976,7 +986,7 @@ public class CraftingListEditor
             _acquisitionStatus = $"Acquisition estimate unavailable: {ex.Message}";
             _acquisitionPlanningResult = null;
             _managedMarketplaceProjection = null;
-            _marketplacePurchaseReasons = new Dictionary<uint, string>();
+            _marketplacePurchaseReasons = new Dictionary<uint, MarketplacePurchaseReason>();
             GatherBuddy.Log.Warning($"[CraftingListEditor] Acquisition estimate failed: {ex.Message}");
         }
     }
@@ -1074,27 +1084,64 @@ public class CraftingListEditor
         foreach (var entry in projection.Entries)
         {
             var reason = _marketplacePurchaseReasons.GetValueOrDefault(entry.ItemId);
-            ImGui.Text(string.IsNullOrWhiteSpace(reason)
-                ? $"{entry.ItemName} ×{entry.TargetQuantity:N0}"
-                : $"{entry.ItemName} ×{entry.TargetQuantity:N0} ({reason})");
+            if (string.IsNullOrWhiteSpace(reason.Text))
+            {
+                ImGui.Text($"{entry.ItemName} ×{entry.TargetQuantity:N0}");
+                continue;
+            }
+
+            if (reason.CurrencyAmount <= 0)
+            {
+                ImGui.Text($"{entry.ItemName} ×{entry.TargetQuantity:N0} ({reason.Text})");
+                continue;
+            }
+
+            ImGui.Text($"{entry.ItemName} ×{entry.TargetQuantity:N0} ({reason.Text} ({reason.CurrencyAmount:N0}");
+            ImGui.SameLine(0, VulcanUiScaling.Scaled(3f));
+            if (reason.CurrencyIconId != 0)
+            {
+                CraftingRowIcons.DrawIconsRightAligned(new[]
+                {
+                    new CraftingRowIcons.RowIcon(reason.CurrencyIconId, reason.CurrencyTooltip),
+                }, VulcanUiScaling.Scaled(16f), 0f);
+            }
+            else if (!string.IsNullOrWhiteSpace(reason.CurrencyTooltip))
+            {
+                ImGui.Text(reason.CurrencyTooltip);
+            }
+            ImGui.SameLine(0, VulcanUiScaling.Scaled(3f));
+            ImGui.Text("))");
         }
     }
 
-    private static IReadOnlyDictionary<uint, string> BuildMarketplacePurchaseReasons(
-        CraftingAcquisitionService.Evaluation evaluation)
+    internal static IReadOnlyDictionary<uint, MarketplacePurchaseReason> BuildMarketplacePurchaseReasons(
+        CraftingAcquisitionService.Evaluation evaluation,
+        bool preferMarketForSpecialCurrency)
     {
-        var marketItemIds = evaluation.Planning?.SelectedPlan?.Transactions
+        var marketTransactions = evaluation.Planning?.SelectedPlan?.Transactions
             .Where(transaction => transaction.SourceKind == AcquisitionSourceKind.Market)
+            .ToArray() ?? [];
+        if (marketTransactions.Length == 0)
+            return new Dictionary<uint, MarketplacePurchaseReason>();
+
+        var marketItemIds = marketTransactions
             .Select(transaction => transaction.ItemId)
             .Distinct()
-            .ToArray() ?? [];
-        if (marketItemIds.Length == 0)
-            return new Dictionary<uint, string>();
+            .ToArray();
+
+        var specialCurrencyMarketItemIds = evaluation.Planning?.SelectedPlan?.Transactions
+            .Where(transaction => transaction.SourceKind == AcquisitionSourceKind.Market
+                && transaction.IsSpecialCurrencyAlternative)
+            .Select(transaction => transaction.ItemId)
+            .ToHashSet() ?? [];
 
         return marketItemIds.ToDictionary(
             itemId => itemId,
             itemId =>
             {
+                if (preferMarketForSpecialCurrency && specialCurrencyMarketItemIds.Contains(itemId))
+                    return new MarketplacePurchaseReason("market selected by special-currency preference");
+
                 var selectedPath = evaluation.Snapshot.Input.Dependencies
                     .FirstOrDefault(dependency => dependency.ItemId == itemId)
                     ?.SelectedPath;
@@ -1103,19 +1150,79 @@ public class CraftingListEditor
                         Kind: AcquisitionPathKind.Gather or AcquisitionPathKind.Fish or AcquisitionPathKind.Reduction,
                         Capability: { Status: not AcquisitionCapabilityStatus.Usable } capability,
                     })
-                    return capability.Reason.Contains("folklore", StringComparison.OrdinalIgnoreCase)
+                    return new MarketplacePurchaseReason(capability.Reason.Contains("folklore", StringComparison.OrdinalIgnoreCase)
                         ? "folklore required"
-                        : capability.Reason;
+                        : capability.Reason);
 
                 var vendorOffers = evaluation.Snapshot.Input.VendorOffers
                     .Where(offer => offer.EffectiveOutputs.Any(output => output.ItemId == itemId && output.Quantity > 0))
                     .ToArray();
                 if (vendorOffers.Length == 0)
-                    return "no vendor source";
+                    return new MarketplacePurchaseReason("no vendor source");
+
+                var targetQuantity = marketTransactions
+                    .Where(transaction => transaction.ItemId == itemId)
+                    .Sum(transaction => (long)Math.Max(0, transaction.Quantity));
+                var insufficientCurrency = FindInsufficientCurrency(
+                    itemId,
+                    Math.Max(1, targetQuantity),
+                    vendorOffers,
+                    evaluation.Snapshot.Input.CurrencyBalances);
+                if (insufficientCurrency.HasValue)
+                    return insufficientCurrency.Value;
+
                 return vendorOffers.Any(offer => offer.IsAvailable)
-                    ? "market selected by estimate"
-                    : "vendor unavailable";
+                    ? new MarketplacePurchaseReason("market selected by estimate")
+                    : new MarketplacePurchaseReason("vendor unavailable");
             });
+    }
+
+    private static MarketplacePurchaseReason? FindInsufficientCurrency(
+        uint itemId,
+        long targetQuantity,
+        IReadOnlyList<AcquisitionVendorOffer> vendorOffers,
+        IReadOnlyDictionary<uint, long> currencyBalances)
+    {
+        MarketplacePurchaseReason? firstInsufficient = null;
+        foreach (var offer in vendorOffers
+                     .Where(offer => offer.IsAvailable)
+                     .OrderBy(offer => offer.OfferId, StringComparer.Ordinal))
+        {
+            var receiveQuantity = offer.EffectiveOutputs
+                .Where(output => output.ItemId == itemId && output.Quantity > 0)
+                .Sum(output => (long)output.Quantity);
+            if (receiveQuantity <= 0)
+                continue;
+
+            var purchaseUnits = (targetQuantity + receiveQuantity - 1) / receiveQuantity;
+            var offerSufficient = true;
+            foreach (var cost in offer.Costs
+                         .Where(cost => cost.IsSpecialCurrency && !cost.IsGil && cost.Amount > 0)
+                         .OrderBy(cost => cost.CurrencyId))
+            {
+                if (!currencyBalances.TryGetValue(cost.CurrencyId, out var available))
+                {
+                    offerSufficient = false;
+                    continue;
+                }
+
+                var required = checked(cost.Amount * purchaseUnits);
+                if (available >= required)
+                    continue;
+
+                offerSufficient = false;
+                firstInsufficient ??= new MarketplacePurchaseReason(
+                    "not enough currency",
+                    required,
+                    cost.IconId,
+                    cost.CurrencyName);
+            }
+
+            if (offerSufficient)
+                return null;
+        }
+
+        return firstInsufficient;
     }
 
     private static uint ResolveGilIconId()
@@ -1578,7 +1685,7 @@ public class CraftingListEditor
                     planningList.Consumables);
             RaphaelAssessment? raphaelAssessment = null;
             if (hasExecutionContext
-             && CraftingContextResolver.UsesRaphaelSolver(executionContext))
+             && CraftingContextResolver.UsesSolverAssessment(executionContext))
             {
                 RaphaelAssessmentService.TryAssessListQueueItem(queueItem.RecipeId, queueItem.IsOriginalRecipe, planningList, out var resolvedAssessment);
                 raphaelAssessment = resolvedAssessment;
@@ -1814,7 +1921,7 @@ public class CraftingListEditor
                     planningList.Consumables);
             RaphaelAssessment? raphaelAssessment = null;
             if (hasExecutionContext
-             && CraftingContextResolver.UsesRaphaelSolver(executionContext)
+             && CraftingContextResolver.UsesSolverAssessment(executionContext)
              && RaphaelAssessmentService.TryAssessListRecipe(item.RecipeId, planningList, effectiveCraftSettings, out var resolvedAssessment))
                 raphaelAssessment = resolvedAssessment;
             rows.Add(new RecipeDisplayRow
@@ -2035,7 +2142,7 @@ public class CraftingListEditor
         };
         ImGui.TextColored(dotColor, "\u25cf");
         if (ImGui.IsItemHovered())
-            ImGui.SetTooltip($"Raphael: {assessment.Summary}\n{assessment.Details}");
+            ImGui.SetTooltip($"{assessment.SolverName}: {assessment.Summary}\n{assessment.Details}");
         ImGui.SameLine();
     }
 
@@ -2080,7 +2187,7 @@ public class CraftingListEditor
     {
         var precraftMaterials = BuildCraftPanelMaterials(plan);
         var displayPlan = BuildDisplayMaterialPlan(planningList);
-        var displayPrecraftMaterials = BuildCraftPanelMaterials(displayPlan, planningList.Recipes);
+        var displayPrecraftMaterials = BuildCraftPanelMaterials(displayPlan);
         return new MaterialCacheSnapshot
         {
             Hash = hash,
@@ -2091,7 +2198,8 @@ public class CraftingListEditor
             DisplayMaterials = new Dictionary<uint, int>(displayPlan.Materials),
             DisplayPrecraftMaterials = displayPrecraftMaterials,
             DisplayIngredientDemands = new Dictionary<uint, IngredientQualityDemand>(displayPlan.IngredientDemands),
-            DisplayCraftMaterialDemands = BuildCraftPanelDemands(displayPlan, displayPrecraftMaterials, planningList.Recipes),
+            DisplayCraftMaterialDemands = BuildCraftPanelDemands(displayPlan, displayPrecraftMaterials),
+            DisplayCraftMaterialFinalRoots = new CraftingMaterialFinalRoots(displayPlan.CraftMaterialRoots.ToArray()),
         };
     }
 
@@ -2120,7 +2228,7 @@ public class CraftingListEditor
         return materialCache;
     }
 
-    private Dictionary<uint, int> BuildCraftPanelMaterials(CraftingListPlan plan, IEnumerable<CraftingListItem>? finalSourceRecipes = null)
+    private Dictionary<uint, int> BuildCraftPanelMaterials(CraftingListPlan plan)
     {
         var itemSheet = Dalamud.GameData.GetExcelSheet<Item>();
         var craftPanelMaterials = new Dictionary<uint, int>();
@@ -2141,58 +2249,18 @@ public class CraftingListEditor
             craftPanelMaterials[itemId] = craftPanelMaterials.GetValueOrDefault(itemId) + quantity;
         }
 
-        foreach (var originalRecipe in finalSourceRecipes ?? plan.OriginalRecipes)
-        {
-            if (originalRecipe.Options.Skipping || originalRecipe.Quantity <= 0)
-                continue;
-            var recipe = RecipeManager.GetRecipe(originalRecipe.RecipeId);
-            if (recipe == null)
-                continue;
-
-            var resultItem = recipe.Value.ItemResult.Value;
-            if (IsEquippableCraftPanelItem(resultItem))
-                continue;
-
-            var resultItemId = resultItem.RowId;
-            var finalItemCount = originalRecipe.Quantity * (int)recipe.Value.AmountResult;
-            if (craftPanelMaterials.TryGetValue(resultItemId, out var existingCount))
-                craftPanelMaterials[resultItemId] = existingCount + finalItemCount;
-            else
-                craftPanelMaterials[resultItemId] = finalItemCount;
-        }
-
         return craftPanelMaterials;
     }
 
     private static bool IsEquippableCraftPanelItem(Item item)
         => item.RowId > 0 && item.EquipSlotCategory.RowId > 0;
 
-    private static Dictionary<uint, IngredientQualityDemand> BuildCraftPanelDemands(CraftingListPlan plan, IReadOnlyDictionary<uint, int> craftPanelMaterials, IEnumerable<CraftingListItem>? finalSourceRecipes = null)
-    {
-        var demands = plan.IngredientDemands
+    private static Dictionary<uint, IngredientQualityDemand> BuildCraftPanelDemands(
+        CraftingListPlan plan,
+        IReadOnlyDictionary<uint, int> craftPanelMaterials)
+        => plan.IngredientDemands
             .Where(kvp => craftPanelMaterials.ContainsKey(kvp.Key))
             .ToDictionary(kvp => kvp.Key, kvp => kvp.Value);
-        foreach (var originalRecipe in finalSourceRecipes ?? plan.OriginalRecipes)
-        {
-            if (originalRecipe.Options.Skipping || originalRecipe.Quantity <= 0)
-                continue;
-            var recipe = RecipeManager.GetRecipe(originalRecipe.RecipeId);
-            if (recipe == null)
-                continue;
-
-            var resultItemId = recipe.Value.ItemResult.RowId;
-            if (!craftPanelMaterials.ContainsKey(resultItemId))
-                continue;
-
-            var finalItemCount = originalRecipe.Quantity * (int)recipe.Value.AmountResult;
-            var finalDemand = IngredientQualityDemand.FromPreferNQ(finalItemCount);
-            demands[resultItemId] = demands.TryGetValue(resultItemId, out var existing)
-                ? existing.Add(finalDemand)
-                : finalDemand;
-        }
-
-        return demands;
-    }
     
     private void TriggerQueueRegeneration()
     {
@@ -2367,6 +2435,13 @@ public class CraftingListEditor
         ProcessPendingInventoryChanges();
         var materialCache = EnsureMaterialCache(ComputeListHash());
         return materialCache.DisplayPrecraftMaterials;
+    }
+
+    internal CraftingMaterialFinalRoots GetDisplayCraftMaterialFinalRoots()
+    {
+        ProcessPendingInventoryChanges();
+        var materialCache = EnsureMaterialCache(ComputeListHash());
+        return materialCache.DisplayCraftMaterialFinalRoots;
     }
 
     internal IReadOnlyDictionary<uint, IngredientQualityDemand> GetCachedIngredientDemands()

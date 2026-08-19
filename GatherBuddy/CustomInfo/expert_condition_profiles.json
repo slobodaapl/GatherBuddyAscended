@@ -1,0 +1,925 @@
+{
+  "schemaVersion": 1,
+  "conditionOrder": [
+    "Normal",
+    "Good",
+    "Excellent",
+    "Poor",
+    "Centered",
+    "Sturdy",
+    "Pliant",
+    "Malleable",
+    "Primed",
+    "GoodOmen",
+    "Robust"
+  ],
+  "sources": {
+    "publicEmpirical": {
+      "description": "Public empirical Expert-condition spreadsheet",
+      "url": "https://docs.google.com/spreadsheets/d/1YJVm9XkE7vLI4BXUeRnRgBSpwvALUeX0p-UxxZu8SPs/gviz/tq?tqx=out:csv&gid=0",
+      "retrieved": "2026-08-17",
+      "sha256": "a57c0d7efae795efe0e8107682ea8bc6ec9811de6c4a886f90e81c9d791ce52f"
+    },
+    "gameRecipe": {
+      "description": "FFXIV data-mining Recipe.csv used for canonical RLT joins",
+      "url": "https://raw.githubusercontent.com/xivapi/ffxiv-datamining/master/csv/en/Recipe.csv",
+      "retrieved": "2026-08-17",
+      "sha256": "ca25e38e1fed24ae4b1d1befeb50998715dc72c7d70d62026f549aa401661c27"
+    },
+    "gameRecipeLevelTable": {
+      "description": "FFXIV data-mining RecipeLevelTable.csv used for canonical RLT joins",
+      "url": "https://raw.githubusercontent.com/xivapi/ffxiv-datamining/master/csv/en/RecipeLevelTable.csv",
+      "retrieved": "2026-08-17",
+      "sha256": "6c74e0a19b80376f4879d744c2c4cdfbcac9dc4bf7812050cac4c6fb93460612"
+    },
+    "localRlt776": {
+      "description": "784 eligible local RLT 776 Trial Synthesis draws; accepted working vector 2026-08-16",
+      "url": "EXPERT_CONDITION_PROFILES.md#rlt-776--locally-inferred-profile",
+      "retrieved": "2026-08-16",
+      "sha256": ""
+    }
+  },
+  "vectors": [
+    {
+      "id": "v01",
+      "basisPoints": [
+        4600,
+        1200,
+        0,
+        0,
+        1500,
+        1500,
+        1200,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "v02",
+      "basisPoints": [
+        3700,
+        1200,
+        0,
+        0,
+        0,
+        1500,
+        1200,
+        1200,
+        1200,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "v03",
+      "basisPoints": [
+        2200,
+        1200,
+        0,
+        0,
+        1500,
+        1500,
+        1200,
+        1200,
+        1200,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "v04",
+      "basisPoints": [
+        4000,
+        1200,
+        0,
+        0,
+        1200,
+        1200,
+        0,
+        1200,
+        1200,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "v05",
+      "basisPoints": [
+        2500,
+        1200,
+        0,
+        0,
+        1500,
+        1200,
+        1200,
+        1200,
+        1200,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "v06",
+      "basisPoints": [
+        3200,
+        400,
+        0,
+        0,
+        0,
+        1500,
+        1000,
+        1200,
+        1500,
+        1200,
+        0
+      ]
+    },
+    {
+      "id": "v07",
+      "basisPoints": [
+        4200,
+        400,
+        0,
+        0,
+        1500,
+        1500,
+        1200,
+        0,
+        0,
+        1200,
+        0
+      ]
+    },
+    {
+      "id": "v08",
+      "basisPoints": [
+        2800,
+        400,
+        0,
+        0,
+        1200,
+        1200,
+        1000,
+        1000,
+        1200,
+        1200,
+        0
+      ]
+    },
+    {
+      "id": "v09",
+      "basisPoints": [
+        4800,
+        1200,
+        0,
+        0,
+        4000,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "v10",
+      "basisPoints": [
+        4800,
+        1200,
+        0,
+        0,
+        0,
+        0,
+        4000,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "v11",
+      "basisPoints": [
+        4800,
+        1200,
+        0,
+        0,
+        0,
+        4000,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "v12",
+      "basisPoints": [
+        6800,
+        200,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        3000,
+        0
+      ]
+    },
+    {
+      "id": "v13",
+      "basisPoints": [
+        4800,
+        1200,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        4000,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "v14",
+      "basisPoints": [
+        4800,
+        1200,
+        0,
+        0,
+        0,
+        0,
+        0,
+        4000,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "v15",
+      "basisPoints": [
+        4500,
+        1200,
+        0,
+        0,
+        1300,
+        0,
+        1000,
+        0,
+        1200,
+        0,
+        800
+      ]
+    },
+    {
+      "id": "v16",
+      "basisPoints": [
+        3000,
+        1200,
+        0,
+        0,
+        1300,
+        1000,
+        1000,
+        1000,
+        1500,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "v17",
+      "basisPoints": [
+        2500,
+        1700,
+        0,
+        0,
+        1200,
+        0,
+        1100,
+        1500,
+        1000,
+        0,
+        1000
+      ]
+    },
+    {
+      "id": "v18",
+      "basisPoints": [
+        3000,
+        1200,
+        0,
+        0,
+        1900,
+        1200,
+        1500,
+        1200,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "v19",
+      "basisPoints": [
+        2200,
+        1200,
+        0,
+        0,
+        1200,
+        1200,
+        1000,
+        1000,
+        1200,
+        1000,
+        0
+      ]
+    },
+    {
+      "id": "v20",
+      "basisPoints": [
+        3200,
+        1200,
+        0,
+        0,
+        1500,
+        0,
+        1000,
+        1200,
+        1400,
+        0,
+        500
+      ]
+    },
+    {
+      "id": "v21",
+      "basisPoints": [
+        3200,
+        1200,
+        0,
+        0,
+        1500,
+        1000,
+        0,
+        1200,
+        1400,
+        0,
+        500
+      ]
+    },
+    {
+      "id": "v22",
+      "basisPoints": [
+        2000,
+        1200,
+        0,
+        0,
+        1500,
+        800,
+        1500,
+        1000,
+        1000,
+        0,
+        1000
+      ]
+    },
+    {
+      "id": "v23",
+      "basisPoints": [
+        5100,
+        1200,
+        0,
+        0,
+        800,
+        300,
+        700,
+        500,
+        500,
+        0,
+        900
+      ]
+    },
+    {
+      "id": "v24",
+      "basisPoints": [
+        2800,
+        1200,
+        0,
+        0,
+        0,
+        1500,
+        1000,
+        1500,
+        1000,
+        1000,
+        0
+      ]
+    },
+    {
+      "id": "v25",
+      "basisPoints": [
+        5000,
+        2500,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        2500,
+        0
+      ]
+    },
+    {
+      "id": "v26",
+      "basisPoints": [
+        2000,
+        1000,
+        0,
+        0,
+        1500,
+        1000,
+        1500,
+        1000,
+        1000,
+        0,
+        1000
+      ]
+    }
+  ],
+  "profiles": [
+    {
+      "recipeLevelTableId": 481,
+      "conditionsFlag": 115,
+      "vectorId": "v01",
+      "evidence": "ProvisionalPublic",
+      "sourceId": "publicEmpirical",
+      "sourceRows": [
+        "Grade 2 Artisanal"
+      ]
+    },
+    {
+      "recipeLevelTableId": 511,
+      "conditionsFlag": 115,
+      "vectorId": "v01",
+      "evidence": "ProvisionalPublic",
+      "sourceId": "publicEmpirical",
+      "sourceRows": [
+        "Grade 3 Artisanal"
+      ]
+    },
+    {
+      "recipeLevelTableId": 512,
+      "conditionsFlag": 115,
+      "vectorId": "v01",
+      "evidence": "ProvisionalPublic",
+      "sourceId": "publicEmpirical",
+      "sourceRows": [
+        "Oddly Delicate V"
+      ]
+    },
+    {
+      "recipeLevelTableId": 513,
+      "conditionsFlag": 483,
+      "vectorId": "v02",
+      "evidence": "ProvisionalPublic",
+      "sourceId": "publicEmpirical",
+      "sourceRows": [
+        "Grade 4 Artisanal"
+      ]
+    },
+    {
+      "recipeLevelTableId": 514,
+      "conditionsFlag": 115,
+      "vectorId": "v01",
+      "evidence": "ProvisionalPublic",
+      "sourceId": "publicEmpirical",
+      "sourceRows": [
+        "Resplendent A"
+      ]
+    },
+    {
+      "recipeLevelTableId": 515,
+      "conditionsFlag": 483,
+      "vectorId": "v02",
+      "evidence": "ProvisionalPublic",
+      "sourceId": "publicEmpirical",
+      "sourceRows": [
+        "Resplendent B"
+      ]
+    },
+    {
+      "recipeLevelTableId": 516,
+      "conditionsFlag": 499,
+      "vectorId": "v03",
+      "evidence": "ProvisionalPublic",
+      "sourceId": "publicEmpirical",
+      "sourceRows": [
+        "Resplendent C"
+      ]
+    },
+    {
+      "recipeLevelTableId": 611,
+      "conditionsFlag": 435,
+      "vectorId": "v04",
+      "evidence": "ProvisionalPublic",
+      "sourceId": "publicEmpirical",
+      "sourceRows": [
+        "Water Otter Fountain Comp."
+      ]
+    },
+    {
+      "recipeLevelTableId": 621,
+      "conditionsFlag": 499,
+      "vectorId": "v05",
+      "evidence": "ProvisionalPublic",
+      "sourceId": "publicEmpirical",
+      "sourceRows": [
+        "Smaller Otter Fountain Comp."
+      ]
+    },
+    {
+      "recipeLevelTableId": 641,
+      "conditionsFlag": 995,
+      "vectorId": "v06",
+      "evidence": "ProvisionalPublic",
+      "sourceId": "publicEmpirical",
+      "sourceRows": [
+        "Uncharted Course"
+      ]
+    },
+    {
+      "recipeLevelTableId": 642,
+      "conditionsFlag": 627,
+      "vectorId": "v07",
+      "evidence": "ProvisionalPublic",
+      "sourceId": "publicEmpirical",
+      "sourceRows": [
+        "Connoisseur's V"
+      ]
+    },
+    {
+      "recipeLevelTableId": 643,
+      "conditionsFlag": 995,
+      "vectorId": "v06",
+      "evidence": "ProvisionalPublic",
+      "sourceId": "publicEmpirical",
+      "sourceRows": [
+        "Connoisseur's VI"
+      ]
+    },
+    {
+      "recipeLevelTableId": 644,
+      "conditionsFlag": 1011,
+      "vectorId": "v08",
+      "evidence": "ProvisionalPublic",
+      "sourceId": "publicEmpirical",
+      "sourceRows": [
+        "Aetherial Arbor"
+      ]
+    },
+    {
+      "recipeLevelTableId": 702,
+      "conditionsFlag": 115,
+      "vectorId": "v01",
+      "evidence": "ProvisionalPublic",
+      "sourceId": "publicEmpirical",
+      "sourceRows": [
+        "Phaenna A (80 dura)",
+        "Moon A (80 dura)"
+      ]
+    },
+    {
+      "recipeLevelTableId": 703,
+      "conditionsFlag": 115,
+      "vectorId": "v01",
+      "evidence": "ProvisionalPublic",
+      "sourceId": "publicEmpirical",
+      "sourceRows": [
+        "Phaenna A (Miracle)",
+        "Moon A (60 dura)"
+      ]
+    },
+    {
+      "recipeLevelTableId": 704,
+      "conditionsFlag": 19,
+      "vectorId": "v09",
+      "evidence": "ProvisionalPublic",
+      "sourceId": "publicEmpirical",
+      "sourceRows": [
+        "Phaenna A (70 dura, 1/3)",
+        "Moon A (70 dura, 1/3)"
+      ]
+    },
+    {
+      "recipeLevelTableId": 705,
+      "conditionsFlag": 67,
+      "vectorId": "v10",
+      "evidence": "ProvisionalPublic",
+      "sourceId": "publicEmpirical",
+      "sourceRows": [
+        "Phaenna A (70 dura, 2/3)",
+        "Moon A (70 dura, 2/3)"
+      ]
+    },
+    {
+      "recipeLevelTableId": 706,
+      "conditionsFlag": 35,
+      "vectorId": "v11",
+      "evidence": "ProvisionalPublic",
+      "sourceId": "publicEmpirical",
+      "sourceRows": [
+        "Phaenna A (70 dura, 3/3)",
+        "Moon A (70 dura, 3/3)"
+      ]
+    },
+    {
+      "recipeLevelTableId": 722,
+      "conditionsFlag": 627,
+      "vectorId": "v07",
+      "evidence": "ProvisionalPublic",
+      "sourceId": "publicEmpirical",
+      "sourceRows": [
+        "Phaenna EX A III",
+        "Moon EX A (80 dura)"
+      ]
+    },
+    {
+      "recipeLevelTableId": 723,
+      "conditionsFlag": 627,
+      "vectorId": "v07",
+      "evidence": "ProvisionalPublic",
+      "sourceId": "publicEmpirical",
+      "sourceRows": [
+        "Phaenna EX Timed II",
+        "Moon EX A (70 dura)"
+      ]
+    },
+    {
+      "recipeLevelTableId": 724,
+      "conditionsFlag": 515,
+      "vectorId": "v12",
+      "evidence": "ProvisionalPublic",
+      "sourceId": "publicEmpirical",
+      "sourceRows": [
+        "Phaenna EX A (55 dura, 1/3)",
+        "Moon EX Weather (1/3)"
+      ]
+    },
+    {
+      "recipeLevelTableId": 725,
+      "conditionsFlag": 259,
+      "vectorId": "v13",
+      "evidence": "ProvisionalPublic",
+      "sourceId": "publicEmpirical",
+      "sourceRows": [
+        "Phaenna EX A (55 dura, 2/3)",
+        "Moon EX Weather (2/3)"
+      ]
+    },
+    {
+      "recipeLevelTableId": 726,
+      "conditionsFlag": 131,
+      "vectorId": "v14",
+      "evidence": "ProvisionalPublic",
+      "sourceId": "publicEmpirical",
+      "sourceRows": [
+        "Phaenna EX A (55 dura, 3/3)",
+        "Moon EX Weather (3/3)"
+      ]
+    },
+    {
+      "recipeLevelTableId": 727,
+      "conditionsFlag": 1363,
+      "vectorId": "v15",
+      "evidence": "ProvisionalPublic",
+      "sourceId": "publicEmpirical",
+      "sourceRows": [
+        "Auxesia EX A (Miracle)",
+        "Oizys EX A (Miracle)"
+      ]
+    },
+    {
+      "recipeLevelTableId": 728,
+      "conditionsFlag": 499,
+      "vectorId": "v16",
+      "evidence": "ProvisionalPublic",
+      "sourceId": "publicEmpirical",
+      "sourceRows": [
+        "Auxesia EX A (Steady Hand)",
+        "Oizys EX A (Steady Hand)"
+      ]
+    },
+    {
+      "recipeLevelTableId": 729,
+      "conditionsFlag": 1491,
+      "vectorId": "v17",
+      "evidence": "ProvisionalPublic",
+      "sourceId": "publicEmpirical",
+      "sourceRows": [
+        "Oizys EX A (no action)"
+      ]
+    },
+    {
+      "recipeLevelTableId": 742,
+      "conditionsFlag": 995,
+      "vectorId": "v06",
+      "evidence": "ProvisionalPublic",
+      "sourceId": "publicEmpirical",
+      "sourceRows": [
+        "Phaenna EX+ Timed (Pre)",
+        "Moon EX+ Weather (Mira.) Pre",
+        "Moon EX+ Weather (none) Pre"
+      ]
+    },
+    {
+      "recipeLevelTableId": 743,
+      "conditionsFlag": 995,
+      "vectorId": "v06",
+      "evidence": "ProvisionalPublic",
+      "sourceId": "publicEmpirical",
+      "sourceRows": [
+        "Moon EX+ Weather (Mira.) Main"
+      ]
+    },
+    {
+      "recipeLevelTableId": 744,
+      "conditionsFlag": 995,
+      "vectorId": "v06",
+      "evidence": "ProvisionalPublic",
+      "sourceId": "publicEmpirical",
+      "sourceRows": [
+        "Moon EX+ Weather (none) Main"
+      ]
+    },
+    {
+      "recipeLevelTableId": 746,
+      "conditionsFlag": 243,
+      "vectorId": "v18",
+      "evidence": "ProvisionalPublic",
+      "sourceId": "publicEmpirical",
+      "sourceRows": [
+        "Moon EX+ I Pre",
+        "Moon EX+ I Main"
+      ]
+    },
+    {
+      "recipeLevelTableId": 747,
+      "conditionsFlag": 435,
+      "vectorId": "v04",
+      "evidence": "ProvisionalPublic",
+      "sourceId": "publicEmpirical",
+      "sourceRows": [
+        "Moon EX+ II Pre",
+        "Moon EX+ II Main"
+      ]
+    },
+    {
+      "recipeLevelTableId": 748,
+      "conditionsFlag": 1011,
+      "vectorId": "v19",
+      "evidence": "ProvisionalPublic",
+      "sourceId": "publicEmpirical",
+      "sourceRows": [
+        "Moon EX+ III Pre",
+        "Moon EX+ III Main"
+      ]
+    },
+    {
+      "recipeLevelTableId": 753,
+      "conditionsFlag": 243,
+      "vectorId": "v18",
+      "evidence": "ProvisionalPublic",
+      "sourceId": "publicEmpirical",
+      "sourceRows": [
+        "Phaenna EX+ I Pre",
+        "Phaenna EX+ I Main"
+      ]
+    },
+    {
+      "recipeLevelTableId": 754,
+      "conditionsFlag": 435,
+      "vectorId": "v04",
+      "evidence": "ProvisionalPublic",
+      "sourceId": "publicEmpirical",
+      "sourceRows": [
+        "Phaenna EX+ II Pre",
+        "Phaenna EX+ II Main"
+      ]
+    },
+    {
+      "recipeLevelTableId": 755,
+      "conditionsFlag": 1011,
+      "vectorId": "v19",
+      "evidence": "ProvisionalPublic",
+      "sourceId": "publicEmpirical",
+      "sourceRows": [
+        "Phaenna EX+ III Pre",
+        "Phaenna EX+ III Main"
+      ]
+    },
+    {
+      "recipeLevelTableId": 756,
+      "conditionsFlag": 1491,
+      "vectorId": "v20",
+      "evidence": "ProvisionalPublic",
+      "sourceId": "publicEmpirical",
+      "sourceRows": [
+        "Oizys EX+ Timed (Main)"
+      ]
+    },
+    {
+      "recipeLevelTableId": 757,
+      "conditionsFlag": 1459,
+      "vectorId": "v21",
+      "evidence": "ProvisionalPublic",
+      "sourceId": "publicEmpirical",
+      "sourceRows": [
+        "Oizys EX+ I Pre",
+        "Oizys EX+ I Main"
+      ]
+    },
+    {
+      "recipeLevelTableId": 758,
+      "conditionsFlag": 1011,
+      "vectorId": "v19",
+      "evidence": "ProvisionalPublic",
+      "sourceId": "publicEmpirical",
+      "sourceRows": [
+        "Oizys EX+ II Pre",
+        "Oizys EX+ II Main"
+      ]
+    },
+    {
+      "recipeLevelTableId": 759,
+      "conditionsFlag": 1523,
+      "vectorId": "v22",
+      "evidence": "ProvisionalPublic",
+      "sourceId": "publicEmpirical",
+      "sourceRows": [
+        "Oizys EX+ III Pre",
+        "Oizys EX+ III Main"
+      ]
+    },
+    {
+      "recipeLevelTableId": 772,
+      "conditionsFlag": 1491,
+      "vectorId": "v20",
+      "evidence": "ProvisionalPublic",
+      "sourceId": "publicEmpirical",
+      "sourceRows": [
+        "Auxesia EX+ Weather"
+      ]
+    },
+    {
+      "recipeLevelTableId": 773,
+      "conditionsFlag": 1523,
+      "vectorId": "v23",
+      "evidence": "ProvisionalPublic",
+      "sourceId": "publicEmpirical",
+      "sourceRows": [
+        "Auxesia Mastery I (Miracle)"
+      ]
+    },
+    {
+      "recipeLevelTableId": 774,
+      "conditionsFlag": 995,
+      "vectorId": "v24",
+      "evidence": "ProvisionalPublic",
+      "sourceId": "publicEmpirical",
+      "sourceRows": [
+        "Auxesia Mastery II (Steady Hand)"
+      ]
+    },
+    {
+      "recipeLevelTableId": 775,
+      "conditionsFlag": 515,
+      "vectorId": "v25",
+      "evidence": "ProvisionalPublic",
+      "sourceId": "publicEmpirical",
+      "sourceRows": [
+        "Auxesia Mastery III (Miracle)"
+      ]
+    },
+    {
+      "recipeLevelTableId": 776,
+      "conditionsFlag": 1523,
+      "vectorId": "v26",
+      "evidence": "EmpiricallyInferred",
+      "sourceId": "localRlt776",
+      "sourceRows": [
+        "Local RLT 776 sampler"
+      ]
+    }
+  ]
+}

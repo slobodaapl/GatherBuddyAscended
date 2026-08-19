@@ -16,6 +16,7 @@ public enum CraftingStatsSource
 public enum CraftingSimulationIntent
 {
     Execution,
+    TrialExecution,
     ValidatorPreview,
 }
 
@@ -58,7 +59,8 @@ public static class CraftingContextResolver
             SolverOverrideMode.RaphaelSolver => VulcanSolverMode.PureRaphael,
             SolverOverrideMode.ProgressOnlySolver => VulcanSolverMode.ProgressOnly,
             SolverOverrideMode.DonatelloSolver => VulcanSolverMode.Donatello,
-            _ => GatherBuddy.Config.RaphaelSolverConfig.SolverMode,
+            SolverOverrideMode.GabrielSolver => VulcanSolverMode.Gabriel,
+            _ => ResolveGlobalSolverMode(GatherBuddy.Config.RaphaelSolverConfig.SolverMode),
         };
         var selectedMacroId = forceProgressOnlyUnlockCraft ? null : item.CraftSettings?.SelectedMacroId;
         return new(
@@ -81,13 +83,22 @@ public static class CraftingContextResolver
             SpecialistActionOverrideMode.Disallow => false,
             _ => options?.AllowSpecialistActions,
         };
-        if (settings?.MaximizeQualityAtCostOfTime != true && specialistOverride == options?.AllowSpecialistActions)
+        var improvementQuietPeriodMillis = settings?.DonatelloImprovementQuietSecondsOverride is int seconds
+            ? Math.Clamp(
+                seconds,
+                DonatelloSolver.MinimumImprovementQuietPeriodSeconds,
+                DonatelloSolver.MaximumImprovementQuietPeriodSeconds) * 1000
+            : options?.ImprovementQuietPeriodMillis;
+        if (settings?.MaximizeQualityAtCostOfTime != true
+            && specialistOverride == options?.AllowSpecialistActions
+            && improvementQuietPeriodMillis == options?.ImprovementQuietPeriodMillis)
             return options;
 
         return (options ?? new DonatelloExecutionOptions()) with
         {
             MaximizeQualityAtCostOfTime = settings?.MaximizeQualityAtCostOfTime == true,
             AllowSpecialistActions = specialistOverride,
+            ImprovementQuietPeriodMillis = improvementQuietPeriodMillis,
         };
     }
 
@@ -103,6 +114,11 @@ public static class CraftingContextResolver
         => craft.DonatelloOptions?.AllowSpecialistActions
             ?? GatherBuddy.Config.RaphaelSolverConfig.RaphaelAllowSpecialistActions;
 
+    internal static VulcanSolverMode ResolveGlobalSolverMode(VulcanSolverMode configuredMode)
+        => configuredMode == VulcanSolverMode.Gabriel
+            ? VulcanSolverMode.Donatello
+            : configuredMode;
+
     public static bool UsesSelectedMacro(CraftingExecutionContext executionContext)
         => !string.IsNullOrEmpty(executionContext.SelectedMacroId)
             && CraftingGameInterop.UserMacroLibrary.GetMacroByStringId(executionContext.SelectedMacroId) != null;
@@ -110,6 +126,11 @@ public static class CraftingContextResolver
     public static bool UsesRaphaelSolver(CraftingExecutionContext executionContext)
         => !executionContext.UseQuickSynthesis
             && executionContext.EffectiveSolverMode is VulcanSolverMode.PureRaphael or VulcanSolverMode.Donatello
+            && !UsesSelectedMacro(executionContext);
+
+    public static bool UsesSolverAssessment(CraftingExecutionContext executionContext)
+        => !executionContext.UseQuickSynthesis
+            && executionContext.EffectiveSolverMode is VulcanSolverMode.PureRaphael or VulcanSolverMode.Donatello or VulcanSolverMode.Gabriel
             && !UsesSelectedMacro(executionContext);
 
     public static bool TryResolveListExecutionContext(
@@ -225,12 +246,17 @@ public static class CraftingContextResolver
         if (stats == null)
             return false;
 
-        var initialQuality = executionContext.QualityPolicy.CalculateGuaranteedInitialQuality(recipe);
+        var initialQuality = ResolveInitialQuality(
+            intent,
+            executionContext.QualityPolicy.CalculateGuaranteedInitialQuality(recipe));
         var craft = GameStateBuilder.BuildCraftState(CraftingStateBuilder.BuildRecipeInfo(recipe, stats.Level), stats) with
         {
             InitialQuality = initialQuality,
             DonatelloOptions = executionContext.DonatelloOptions,
         };
+        if (executionContext.EffectiveSolverMode == VulcanSolverMode.Gabriel
+         && GabrielPolicyCatalog.TryPrepare(craft, out var preparedGabrielCraft, out _, out _))
+            craft = preparedGabrielCraft;
         var validationContext = intent == CraftingSimulationIntent.ValidatorPreview
             ? BuildValidatorPreviewContext(executionContext.ConsumableSettings)
             : null;
@@ -238,6 +264,13 @@ public static class CraftingContextResolver
         context = new(executionContext, stats, craft, request);
         return true;
     }
+
+    internal static int ResolveInitialQuality(
+        CraftingSimulationIntent intent,
+        int guaranteedIngredientQuality)
+        => intent == CraftingSimulationIntent.TrialExecution
+            ? 0
+            : guaranteedIngredientQuality;
 
     public static bool HasRecipeCraftedBefore(Recipe recipe)
     {

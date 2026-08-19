@@ -1,7 +1,6 @@
 using Dalamud.Game.ClientState.Objects.Types;
 using Dalamud.Utility;
 using ElliLib.Extensions;
-using FFXIVClientStructs.FFXIV.Client.Game.UI;
 using GatherBuddy.AutoGather.Extensions;
 using GatherBuddy.AutoGather.Helpers;
 using GatherBuddy.Classes;
@@ -116,8 +115,11 @@ namespace GatherBuddy.AutoGather.Lists
                 .FirstOrDefault(x => IsAvailable(x.Time, _lastUpdateTime, _lastEndTime) && NeedsGathering(x));
         }
 
-        public bool TryGetCachedTarget(IGatherable item, uint completionItemId, out GatherTarget target)
+        public bool TryGetCurrentTarget(IGatherable item, uint completionItemId, out GatherTarget target)
         {
+            if (Dalamud.ClientState.IsLoggedIn && IsUpdateNeeded())
+                DoUpdate();
+
             target = _gatherableItems.FirstOrDefault(x =>
                 x.Item == item
              && x.CompletionItemId == completionItemId
@@ -669,24 +671,27 @@ namespace GatherBuddy.AutoGather.Lists
         }
 
         /// <summary>
-        /// Stores teleportation costs in the dictionary.
+        /// Copies Dalamud's managed teleportation-cost snapshot into the dictionary.
         /// </summary>
-        private unsafe void UpdateTeleportationCosts()
+        private void UpdateTeleportationCosts()
         {
-            _teleportationCosts.Clear();
-
-            var telepo = Telepo.Instance();
-            if (telepo == null)
+            var aetherytes = Dalamud.Aetherytes;
+            var count = aetherytes.Length;
+            if (count <= 0)
                 return;
 
-            telepo->UpdateAetheryteList();
-            _teleportationCosts.EnsureCapacity(telepo->TeleportList.Count);
-
-            for (var i = 0; i < telepo->TeleportList.Count; i++)
+            var costs = new Dictionary<uint, int>(count);
+            for (var i = 0; i < count; i++)
             {
-                var entry = telepo->TeleportList[i];
-                _teleportationCosts[entry.AetheryteId] = (int)entry.GilCost;
+                var entry = aetherytes[i];
+                if (entry == null)
+                    continue;
+                costs[entry.AetheryteId] = (int)entry.GilCost;
             }
+
+            _teleportationCosts.Clear();
+            foreach (var (aetheryteId, cost) in costs)
+                _teleportationCosts[aetheryteId] = cost;
         }
 
         /// <summary>

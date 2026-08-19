@@ -11,6 +11,7 @@ using GatherBuddy.AutoGather.Lists;
 using GatherBuddy.AutoGather.Collectables;
 using GatherBuddy.Crafting.Acquisition;
 using GatherBuddy.Helpers;
+using GatherBuddy.Interfaces;
 using Lumina.Excel.Sheets;
 using GatherBuddy.Plugin;
 using GatherBuddy.Vulcan.Vendors;
@@ -179,30 +180,7 @@ public static class CraftingGatherBridge
 
         try
         {
-            var gatherList = new AutoGatherList()
-            {
-                Name = listName,
-                Enabled = false
-            };
-
-            foreach (var (itemId, quantity) in materials)
-            {
-                var gatherQuantity = GetCraftingGatherTargetQuantity(
-                    itemId,
-                    quantity,
-                    quantityIsDeficit: false,
-                    out var gatherItemId,
-                    out var completionItemId);
-                if (gatherQuantity <= 0)
-                    continue;
-
-                if (GatherBuddy.GameData.Gatherables.TryGetValue(gatherItemId, out var gatherable))
-                    gatherList.Add(gatherable, (uint)gatherQuantity, completionItemId);
-                else if (GatherBuddy.GameData.Fishes.TryGetValue(gatherItemId, out var fish))
-                    gatherList.Add(fish, (uint)gatherQuantity, completionItemId);
-                else
-                    GatherBuddy.Log.Debug($"[CraftingGatherBridge] Item {gatherItemId} not found in gatherables or fish, skipping");
-            }
+            var gatherList = BuildPersistentGatherList(listName, materials);
 
             if (gatherList.Items.Count > 0)
             {
@@ -221,6 +199,62 @@ public static class CraftingGatherBridge
         }
     }
 
+    internal static AutoGatherList BuildPersistentGatherList(
+        string listName,
+        IReadOnlyDictionary<uint, int> materials)
+    {
+        var gatherList = new AutoGatherList
+        {
+            Name = listName,
+            Enabled = false,
+        };
+
+        foreach (var (itemId, quantity) in materials)
+        {
+            var gatherQuantity = GetCraftingGatherTargetQuantity(
+                itemId,
+                quantity,
+                quantityIsDeficit: false,
+                out _,
+                out _);
+            if (gatherQuantity <= 0)
+                continue;
+
+            if (!TryResolvePersistentGatherItem(itemId, out var gatherable, out var completionItemId))
+            {
+                GatherBuddy.Log.Debug($"[CraftingGatherBridge] Item {itemId} has no supported gather target, skipping");
+                continue;
+            }
+
+            if (!gatherList.Add(gatherable, (uint)gatherQuantity, completionItemId))
+                GatherBuddy.Log.Debug($"[CraftingGatherBridge] Gather target {gatherable.ItemId} is duplicated in '{listName}', skipping item {itemId}");
+        }
+
+        return gatherList;
+    }
+
+    internal static bool TryResolvePersistentGatherItem(
+        uint itemId,
+        out IGatherable gatherable,
+        out uint completionItemId)
+    {
+        ResolveCraftingGatherItemIds(itemId, out var gatherItemId, out completionItemId, out _);
+        if (GatherBuddy.GameData.Gatherables.TryGetValue(gatherItemId, out var normalGatherable))
+        {
+            gatherable = normalGatherable;
+            return true;
+        }
+        if (GatherBuddy.GameData.Fishes.TryGetValue(gatherItemId, out var fish))
+        {
+            gatherable = fish;
+            return true;
+        }
+
+        gatherable = null!;
+        completionItemId = 0;
+        return false;
+    }
+
     private static int GetCraftingGatherTargetQuantity(
         uint itemId,
         int quantity,
@@ -228,27 +262,21 @@ public static class CraftingGatherBridge
         out uint gatherItemId,
         out uint completionItemId)
     {
-        gatherItemId = itemId;
-        completionItemId = 0;
         if (quantity <= 0)
-            return 0;
-
-        if (!AutoGather.Helpers.Diadem.ApprovedToRawItemIds.TryGetValue(itemId, out var rawItemId))
         {
-            var reductionPath = AcquisitionPlanningInputBuilder.ResolvePath(itemId, null);
-            if (reductionPath is
-                {
-                    Kind: AcquisitionPathKind.Reduction,
-                    SourceItemId: not 0,
-                    Capability.Status: AcquisitionCapabilityStatus.Usable,
-                })
-            {
-                gatherItemId = reductionPath.SourceItemId;
-                completionItemId = itemId;
+            gatherItemId = itemId;
+            completionItemId = 0;
+            return 0;
+        }
+
+        ResolveCraftingGatherItemIds(itemId, out gatherItemId, out completionItemId, out var isApprovedItem);
+
+        if (!isApprovedItem)
+        {
+            if (completionItemId != 0)
                 return quantityIsDeficit
                     ? checked(GetInventoryCount(itemId) + quantity)
                     : quantity;
-            }
 
             return quantity;
         }
@@ -256,11 +284,38 @@ public static class CraftingGatherBridge
         if (approvedDeficit <= 0)
             return 0;
 
-        gatherItemId = rawItemId;
         var batchSize = AutoGather.Helpers.Diadem.ApprovedInspectionBatchSizes.TryGetValue(itemId, out var configuredBatchSize) && configuredBatchSize > 0
             ? (int)configuredBatchSize
             : 1;
         return RoundUpToBatchSize(approvedDeficit, batchSize);
+    }
+
+    private static void ResolveCraftingGatherItemIds(
+        uint itemId,
+        out uint gatherItemId,
+        out uint completionItemId,
+        out bool isApprovedItem)
+    {
+        gatherItemId = itemId;
+        completionItemId = 0;
+        isApprovedItem = AutoGather.Helpers.Diadem.ApprovedToRawItemIds.TryGetValue(itemId, out var rawItemId);
+        if (isApprovedItem)
+        {
+            gatherItemId = rawItemId;
+            return;
+        }
+
+        var reductionPath = AcquisitionPlanningInputBuilder.ResolvePath(itemId, null);
+        if (reductionPath is
+            {
+                Kind: AcquisitionPathKind.Reduction,
+                SourceItemId: not 0,
+                Capability.Status: AcquisitionCapabilityStatus.Usable,
+            })
+        {
+            gatherItemId = reductionPath.SourceItemId;
+            completionItemId = itemId;
+        }
     }
     
     public static void Update()

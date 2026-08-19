@@ -322,7 +322,7 @@ public class GatherWindow : Window
                 ILocation loc;
                 TimeInterval time;
                 if (g.Any(x => x.AutoGather)
-                 && GatherBuddy.AutoGather.TryGetCachedGatherTarget(g.Key.Item, g.Key.CompletionItemId, out var target))
+                 && GatherBuddy.AutoGather.TryGetCurrentGatherTarget(g.Key.Item, g.Key.CompletionItemId, out var target))
                 {
                     loc = target.Location;
                     time = target.Time;

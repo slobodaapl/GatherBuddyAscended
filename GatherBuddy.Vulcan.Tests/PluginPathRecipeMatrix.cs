@@ -8,10 +8,6 @@ namespace GatherBuddy.Vulcan.Tests;
 internal static class PluginPathRecipeMatrix
 {
     private static readonly int[] BracketLevels = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100];
-    private static readonly IReadOnlyDictionary<int, Condition> ScriptedMatrixConditions =
-        Enumerable.Range(1, 100).ToDictionary(
-            actionNumber => actionNumber,
-            actionNumber => actionNumber == 1 ? Condition.Good : Condition.Normal);
 
     public static async Task Run(string corpusPath, Action<bool, string> require, bool expertsOnly = false)
     {
@@ -111,10 +107,8 @@ internal static class PluginPathRecipeMatrix
             hardDeadlineMillis: baselineDeadlineMillis,
             bypassSolutionCache: true);
         require(raphael.Actions.Count > 0,
-            $"{testCase.Name}: pure Raphael must return a non-empty incumbent");
-        var raphaelFinal = ExecuteMacro(craft, root, raphael.Actions, testCase, require);
-        require(raphaelFinal.Progress >= craft.CraftProgress,
-            $"{testCase.Name}: pure Raphael incumbent must complete in the scripted game");
+            $"{testCase.Name}: Raphael incumbent generation must return a plan");
+        var raphaelFinal = ExecuteMacro(craft, root, raphael.Actions, require);
 
         var solution = new CachedRaphaelSolution
         {
@@ -128,8 +122,7 @@ internal static class PluginPathRecipeMatrix
             craft,
             root,
             actionSeed: 0xA11CEu,
-            conditionSeed: 0xC0FFEEu,
-            forcedConditions: ScriptedMatrixConditions);
+            conditionSeed: 0xC0FFEEu);
         StepState? pluginFinal = null;
         var current = root;
         try
@@ -168,8 +161,16 @@ internal static class PluginPathRecipeMatrix
 
         require(pluginFinal != null,
             $"{testCase.Name}: plugin path must complete within 100 actions");
-        require(pluginFinal!.Quality >= raphaelFinal.Quality,
-            $"{testCase.Name}: plugin quality regression: Raphael={raphaelFinal.Quality}, plugin={pluginFinal.Quality}");
+        if (raphaelFinal.Progress >= craft.CraftProgress)
+        {
+            require(pluginFinal!.Quality >= raphaelFinal.Quality,
+                $"{testCase.Name}: plugin quality regression: Raphael={raphaelFinal.Quality}, plugin={pluginFinal.Quality}");
+        }
+        else
+        {
+            require(pluginFinal!.Progress >= craft.CraftProgress,
+                $"{testCase.Name}: plugin must still complete when the Raphael tape dies under live conditions");
+        }
         var nativeReplans = definition.CreatedSolver is DonatelloSolver donatello
             ? donatello.NativeReplanCount
             : 0;
@@ -180,27 +181,25 @@ internal static class PluginPathRecipeMatrix
         CraftState craft,
         StepState root,
         IReadOnlyList<VulcanSkill> actions,
-        MatrixCase testCase,
         Action<bool, string> require)
     {
         var game = new PluginPathSimulationAcceptanceTests.SeededGame(
             craft,
             root,
             actionSeed: 0xA11CEu,
-            conditionSeed: 0xC0FFEEu,
-            forcedConditions: ScriptedMatrixConditions);
+            conditionSeed: 0xC0FFEEu);
         foreach (var action in actions)
         {
+            if (!Simulator.CanUseAction(craft, game.State, action))
+                return game.State;
             var actual = game.Execute(action, require);
-            if (actual.Progress >= craft.CraftProgress)
+            if (actual.Progress >= craft.CraftProgress || actual.Durability <= 0)
                 return actual;
-            require(actual.Durability > 0,
-                $"{testCase.Name}: pure Raphael incumbent exhausted durability before completion");
         }
         return game.State;
     }
 
-    private static CraftState BuildCraft(MatrixCase testCase)
+    internal static CraftState BuildCraft(MatrixCase testCase)
     {
         var stats = testCase.CrafterStats
             ?? throw new InvalidOperationException($"{testCase.Name}: missing crafter stats");
@@ -264,7 +263,7 @@ internal static class PluginPathRecipeMatrix
         public List<MatrixCase> Cases { get; set; } = [];
     }
 
-    private sealed class MatrixCase
+    internal sealed class MatrixCase
     {
         public string Name { get; set; } = string.Empty;
         public int? JobLevel { get; set; }
@@ -276,7 +275,7 @@ internal static class PluginPathRecipeMatrix
         public NativeSettings BaselineSettings { get; set; } = new();
     }
 
-    private sealed class CrafterStats
+    internal sealed class CrafterStats
     {
         [JsonPropertyName("craftsmanship")]
         public int Craftsmanship { get; set; }
@@ -290,7 +289,7 @@ internal static class PluginPathRecipeMatrix
         public bool Manipulation { get; set; }
     }
 
-    private sealed class RecipeLevel
+    internal sealed class RecipeLevel
     {
         [JsonPropertyName("job_level")]
         public int JobLevel { get; set; }
@@ -304,7 +303,7 @@ internal static class PluginPathRecipeMatrix
         public int QualityMod { get; set; }
     }
 
-    private sealed class NativeSettings
+    internal sealed class NativeSettings
     {
         [JsonPropertyName("max_cp")]
         public int MaxCp { get; set; }

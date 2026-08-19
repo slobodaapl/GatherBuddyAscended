@@ -13,7 +13,9 @@ public sealed record DonatelloExecutionOptions(
     bool MinimizeSteps = false,
     uint MaxStellarSteadyHandUses = 0,
     bool MaximizeQualityAtCostOfTime = false,
-    bool? AllowSpecialistActions = null);
+    bool? AllowSpecialistActions = null,
+    int? ReplanDeadlineMillis = null,
+    int? ImprovementQuietPeriodMillis = null);
 
 public record class CraftState
     {
@@ -26,6 +28,7 @@ public record class CraftState
         public bool Specialist;
         public int CrafterDelineations;
         public bool SplendorCosmic;
+        public int GabrielWorkerThreads = DonatelloNative.DefaultGabrielWorkerThreads;
 
         // recipe stats
         public bool CraftHQ;
@@ -33,6 +36,7 @@ public record class CraftState
         public bool CraftExpert;
         public bool IshgardExpert;
         public byte CraftStars;
+        public ushort RecipeLevelTableId;
         public int CraftLevel; // Recipe.RecipeLevelTable.ClassJobLevel
         public int CraftDurability; // Recipe.RecipeLevelTable.Durability * Recipe.DurabilityFactor / 100
         public int CraftProgress; // Recipe.RecipeLevelTable.Difficulty * Recipe.DifficultyFactor / 100
@@ -47,6 +51,7 @@ public record class CraftState
         public int CraftRequiredQuality;
         public int CraftRecommendedCraftsmanship;
         public float[] CraftConditionProbabilities = { };
+        public bool CraftConditionProfileCataloged;
         public byte CollectableMetadataKey;
         public bool IsCosmic;
         public ConditionFlags ConditionFlags;

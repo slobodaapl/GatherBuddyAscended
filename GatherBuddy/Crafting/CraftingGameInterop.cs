@@ -13,7 +13,7 @@ using System.Linq;
 
 namespace GatherBuddy.Crafting;
 
-public static class CraftingGameInterop
+public static partial class CraftingGameInterop
 {
     public enum CraftPreparationFailureReason
     {
@@ -85,9 +85,11 @@ public static class CraftingGameInterop
     private static DateTime _taskManagerIdleSince = DateTime.MinValue;
     private static DateTime _nextActionAllowedAt = DateTime.MinValue;
     private static StepState? _actionDelayState;
+    private static readonly List<VulcanSkill> _executedActions = [];
     private static CraftPreparationFailure? _lastPreparationFailure = null;
     private static bool _automationFaultReported;
     private static bool _automationPaused;
+    private static bool _currentCraftIsTrial;
     private static readonly TimeSpan ReconciliationGracePeriod = TimeSpan.FromMilliseconds(500);
 
 
@@ -96,15 +98,30 @@ public static class CraftingGameInterop
     public static event Action<Recipe?, uint>? CraftStarted;
     public static event Action<Recipe?, bool>? CraftFinished;
     public static event Action<Recipe?>? CraftAdvanced;
+    public static event Action<VulcanSkill>? CraftActionExecuted;
     public static event Action<int, int>? QuickSynthProgress;
     public static event Action<string>? AutomationFaulted;
 
     public static CraftState CurrentState => _currentState;
+    internal static bool HasOwnedCraft => _currentRecipeId.HasValue && _currentState != CraftState.IdleNormal;
     internal static bool AutomationPaused => _automationPaused;
 
     internal static void SetAutomationPaused(bool paused)
         => _automationPaused = paused;
     public static Recipe? CurrentRecipe => _currentRecipe;
+
+    public static string? GetTrialSynthesisStartBlockReason()
+    {
+        if (GatherBuddy.Config.ExpertConditionSamplingEnabled)
+            return "Disable the expert condition sampler before starting an autosolved Trial Synthesis.";
+        if (CraftingGatherBridge.HasActiveQueue)
+            return "Stop the active crafting queue before starting an autosolved Trial Synthesis.";
+        if (_currentState is not (CraftState.IdleNormal or CraftState.IdleBetween)
+            || Dalamud.Conditions[ConditionFlag.Crafting]
+            || Dalamud.Conditions[ConditionFlag.ExecutingCraftingAction])
+            return "Another craft is already active.";
+        return null;
+    }
 
     public static bool TryResumeLiveCraft()
     {
@@ -158,7 +175,7 @@ public static class CraftingGameInterop
         }
         if (activeRecipeId.Value != recipe.RowId)
         {
-            failureReason = $"active synthesis recipe {activeRecipeId.Value} does not match queued recipe {recipe.RowId}";
+            failureReason = $"active synthesis recipe {activeRecipeId.Value} does not match requested recipe {recipe.RowId}";
             return false;
         }
         if (!CraftingContextResolver.TryBuildSimulationContext(
@@ -226,18 +243,7 @@ public static class CraftingGameInterop
             executionContext.EffectiveSolverMode,
             !executionContext.ForceProgressOnlyUnlockCraft);
 
-        var conservativePrior = GameStateBuilder.BuildInitialStepState(craft) with
-        {
-            CarefulObservationLeft = 0,
-            HeartAndSoulAvailable = false,
-            QuickInnoLeft = 0,
-            QuickInnoAvailable = false,
-            TrainedPerfectionAvailable = false,
-            PrevComboAction = VulcanSkill.None,
-            PrevActionFailed = false,
-            StellarSteadyHandsUsed = ConservativeRecoveredStellarSteadyHandsUsed(
-                executionContext.DonatelloOptions),
-        };
+        var conservativePrior = BuildConservativeRecoveryPrior(craft, executionContext.DonatelloOptions);
         var liveStep = SynthesisReader.ReadCurrentStepState(craft, conservativePrior);
         if (liveStep == null)
         {
@@ -249,7 +255,9 @@ public static class CraftingGameInterop
             if (!CraftingProcessor.TryAdoptLiveCraft(
                     craft,
                     liveStep,
-                    executionContext.EffectiveSolverMode == VulcanSolverMode.Donatello,
+                    executionContext.EffectiveSolverMode is VulcanSolverMode.Donatello or VulcanSolverMode.Gabriel
+                        ? executionContext.EffectiveSolverMode
+                        : null,
                     out failureReason))
                 return false;
         }
@@ -262,9 +270,11 @@ public static class CraftingGameInterop
 
         _currentRecipe = recipe;
         _currentRecipeId = recipe.RowId;
+        _currentCraftIsTrial = false;
         _vulcanCraftState = craft;
         _vulcanStepState = liveStep;
         _vulcanPredictionPendingObservation = false;
+        _executedActions.Clear();
         ResetReconciliationTracking();
         _automationFaultReported = false;
         BeginActionDelay(liveStep, restart: true);
@@ -283,7 +293,9 @@ public static class CraftingGameInterop
 
     public static void Initialize()
     {
+        ResetManualSynthesisTakeoverTracking();
         _currentState = CraftState.IdleNormal;
+        _currentCraftIsTrial = false;
         _actionExecutor = new CraftingActionExecutor();
         _userMacroLibrary = new Vulcan.UserMacroLibrary();
         _userMacroLibrary.LoadFromConfig();
@@ -291,7 +303,10 @@ public static class CraftingGameInterop
         // Register UserMacro solver first (highest priority)
         CraftingProcessor.RegisterSolver(new Vulcan.UserMacroSolverDefinition(_userMacroLibrary));
         
-        var solverMode = GatherBuddy.Config.RaphaelSolverConfig.SolverMode;
+        var configuredSolverMode = GatherBuddy.Config.RaphaelSolverConfig.SolverMode;
+        var solverMode = CraftingContextResolver.ResolveGlobalSolverMode(configuredSolverMode);
+        if (configuredSolverMode != solverMode)
+            GatherBuddy.Log.Warning("[CraftingGameInterop] Gabriel is per-item only; using Donatello for the invalid global selection");
         _currentSolverMode = solverMode;
         switch (solverMode)
         {
@@ -318,7 +333,10 @@ public static class CraftingGameInterop
             CraftingProcessor.RegisterSolver(new Vulcan.UserMacroSolverDefinition(_userMacroLibrary));
         }
         
-        var solverMode = GatherBuddy.Config.RaphaelSolverConfig.SolverMode;
+        var configuredSolverMode = GatherBuddy.Config.RaphaelSolverConfig.SolverMode;
+        var solverMode = CraftingContextResolver.ResolveGlobalSolverMode(configuredSolverMode);
+        if (configuredSolverMode != solverMode)
+            GatherBuddy.Log.Warning("[CraftingGameInterop] Gabriel is per-item only; using Donatello for the invalid global selection");
         _currentSolverMode = solverMode;
         switch (solverMode)
         {
@@ -360,27 +378,34 @@ public static class CraftingGameInterop
             case VulcanSolverMode.Donatello:
                 CraftingProcessor.RegisterSolver(new Vulcan.DonatelloSolverDefinition(GatherBuddy.RaphaelSolveCoordinator));
                 break;
+            case VulcanSolverMode.Gabriel:
+                CraftingProcessor.RegisterSolver(new Vulcan.GabrielSolverDefinition());
+                break;
         }
     }
 
     public static void Dispose()
     {
+        ResetManualSynthesisTakeoverTracking();
         _currentRecipe = null;
         _currentRecipeId = null;
         _currentState = CraftState.IdleNormal;
         _vulcanCraftState = null;
         _vulcanStepState = null;
         _vulcanPredictionPendingObservation = false;
+        _executedActions.Clear();
         ResetReconciliationTracking();
         _currentQualityPolicy = null;
         _currentSelectedMacroId = null;
         _currentDonatelloOptions = null;
         _lastPreparationFailure = null;
         _automationFaultReported = false;
+        _currentCraftIsTrial = false;
         StateChanged = null;
         CraftStarted = null;
         CraftFinished = null;
         CraftAdvanced = null;
+        CraftActionExecuted = null;
         QuickSynthProgress = null;
         AutomationFaulted = null;
         CraftingProcessor.Dispose();
@@ -433,6 +458,7 @@ public static class CraftingGameInterop
 
         _currentRecipe = recipe;
         _currentRecipeId = recipe.RowId;
+        _currentCraftIsTrial = false;
         _currentState = CraftState.PreparingCraft;
         _taskManagerIdleSince = DateTime.MinValue;
         _lastPreparationFailure = null;
@@ -459,6 +485,91 @@ public static class CraftingGameInterop
         }
         
         GatherBuddy.Log.Information($"[Crafting] Starting craft of {recipe.ItemResult.Value.Name.ExtractText()} (qty: {quantity}, QuickSynth={useQuickSynthesis})");
+    }
+
+    public static bool StartTrialSynthesis(Recipe recipe)
+    {
+        if (recipe.RowId == 0)
+            return false;
+        if (GetTrialSynthesisStartBlockReason() is { } blockReason)
+        {
+            GatherBuddy.Log.Warning($"[Crafting] Trial Synthesis not started: {blockReason}");
+            return false;
+        }
+
+        var tm = GatherBuddy.AutoGather?.TaskManager;
+        if (tm == null)
+        {
+            GatherBuddy.Log.Error("[Crafting] Trial Synthesis not started: TaskManager unavailable");
+            return false;
+        }
+
+        _currentRecipe = recipe;
+        _currentRecipeId = recipe.RowId;
+        _currentCraftIsTrial = true;
+        _currentState = CraftState.PreparingCraft;
+        _taskManagerIdleSince = DateTime.MinValue;
+        _lastPreparationFailure = null;
+        ResetIngredientSelectionState();
+
+        tm.Enqueue(() => OpenRecipe(recipe.RowId), 3000, "OpenTrialRecipe");
+        tm.Enqueue(() => WaitForRecipeOpen(), 3000, true, "WaitForTrialRecipeOpen");
+        tm.DelayNext(1500);
+        tm.Enqueue(() => RequestTrialSynthesis(recipe.RowId), 3000, "RequestTrialSynthesis");
+        tm.Enqueue(() => ConfirmTrialSynthesis(recipe.RowId), 3000, "ConfirmTrialSynthesis");
+        tm.Enqueue(() => WaitForTrialSynthesisStart(recipe.RowId), 5000, true, "WaitForTrialSynthesisStart");
+
+        GatherBuddy.Log.Information(
+            $"[Crafting] Starting autosolved Trial Synthesis of {recipe.ItemResult.Value.Name.ExtractText()}");
+        return true;
+    }
+
+    private static bool RequestTrialSynthesis(uint recipeId)
+    {
+        try
+        {
+            if (!TrialSynthesisUi.TryRequestStart(recipeId))
+                return false;
+            GatherBuddy.Log.Information($"[Crafting] Requested Trial Synthesis for recipe {recipeId}");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            GatherBuddy.Log.Error($"[Crafting] Failed to request Trial Synthesis: {ex.Message}");
+            return false;
+        }
+    }
+
+    private static bool ConfirmTrialSynthesis(uint recipeId)
+    {
+        try
+        {
+            if (TrialSynthesisUi.IsActive(recipeId))
+                return true;
+            if (!TrialSynthesisUi.TryConfirmStart(recipeId))
+                return false;
+            GatherBuddy.Log.Information("[Crafting] Confirmed Trial Synthesis");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            GatherBuddy.Log.Error($"[Crafting] Failed to confirm Trial Synthesis: {ex.Message}");
+            return false;
+        }
+    }
+
+    private static bool WaitForTrialSynthesisStart(uint recipeId)
+    {
+        try
+        {
+            return TrialSynthesisUi.IsActive(recipeId)
+                && SynthesisReader.IsSynthesisWindowOpen();
+        }
+        catch (Exception ex)
+        {
+            GatherBuddy.Log.Error($"[Crafting] Failed while waiting for Trial Synthesis: {ex.Message}");
+            return false;
+        }
     }
 
     private static unsafe bool OpenRecipe(uint recipeId)
@@ -1221,6 +1332,15 @@ public static class CraftingGameInterop
                 return;
             }
 
+            if (ShouldRejectCarefulObservation(recommendation.Action, _executedActions))
+            {
+                const string reason = "Careful Observation was refused during an active crafting combo";
+                _automationFaultReported = true;
+                GatherBuddy.Log.Error($"[Crafting] {reason}. History=[{string.Join(",", _executedActions)}]");
+                AutomationFaulted?.Invoke(reason);
+                return;
+            }
+
             var canExecute = _actionExecutor.CanExecuteAction(recommendation.Action, craft, step);
             if (!canExecute)
             {
@@ -1234,6 +1354,9 @@ public static class CraftingGameInterop
                 GatherBuddy.Log.Debug($"[Crafting] Solver recommendation {recommendation.Action} failed to execute after passing pre-check");
                 return;
             }
+
+            if (CraftingProcessor.ActiveSolver is DonatelloSolver issued)
+                issued.NotifyOpportunisticActionIssued();
 
             GatherBuddy.Log.Debug(
                 $"[CraftingTrace] Issued recipe={craft.RecipeId} solver={_currentSolverMode} action={recommendation.Action}({(uint)recommendation.Action}) "
@@ -1262,6 +1385,12 @@ public static class CraftingGameInterop
 
     internal static bool RecommendationStateStillCurrent(StepState solved, StepState live)
         => StepStateReconciler.ObservableEquivalent(solved, live);
+
+    internal static bool ShouldRejectCarefulObservation(
+        VulcanSkill action,
+        IReadOnlyList<VulcanSkill> executedActions)
+        => action == VulcanSkill.CarefulObservation
+            && CraftingActionHistory.ActiveCombo(executedActions) != VulcanSkill.None;
 
     private static void CheckGatherToCraftTransition()
     {
@@ -1297,6 +1426,9 @@ public static class CraftingGameInterop
             AutomationFaulted?.Invoke(solverFault);
         }
         CheckGatherToCraftTransition();
+
+        if (TryAutoTakeOverManualSynthesis())
+            return;
         
         if (_currentState != CraftState.IdleNormal)
             GatherBuddy.Log.Verbose($"[Crafting] Update: state={_currentState}, Crafting={Dalamud.Conditions[ConditionFlag.Crafting]}, ExecutingAction={Dalamud.Conditions[ConditionFlag.ExecutingCraftingAction]}");
@@ -1484,7 +1616,9 @@ public static class CraftingGameInterop
         if (Dalamud.Conditions[ConditionFlag.Crafting])
         {
             _taskManagerIdleSince = DateTime.MinValue;
-            return CraftState.IdleBetween;
+            return SynthesisReader.IsSynthesisWindowOpen()
+                ? CraftState.WaitStart
+                : CraftState.IdleBetween;
         }
 
         var tm = GatherBuddy.AutoGather?.TaskManager;
@@ -1652,8 +1786,11 @@ public static class CraftingGameInterop
             return CraftState.WaitStart;
         }
         _vulcanCraftState.DonatelloOptions = _currentDonatelloOptions;
+        if (_currentSolverMode == VulcanSolverMode.Gabriel
+         && GabrielPolicyCatalog.TryPrepare(_vulcanCraftState, out var preparedGabrielCraft, out _, out _))
+            _vulcanCraftState = preparedGabrielCraft;
         var qualityPolicy = GetActiveQualityPolicy();
-        if (qualityPolicy != null)
+        if (!_currentCraftIsTrial && qualityPolicy != null)
         {
             var iq = qualityPolicy.CalculateGuaranteedInitialQuality(actualRecipe);
             if (iq > 0)
@@ -1675,6 +1812,7 @@ public static class CraftingGameInterop
             return CraftState.WaitStart;
 
         _currentRecipe = recipe;
+        _executedActions.Clear();
         CraftStarted?.Invoke(recipe, _currentRecipeId.Value);
         _vulcanStepState = observedInitialStep;
         _vulcanPredictionPendingObservation = false;
@@ -1697,12 +1835,29 @@ public static class CraftingGameInterop
                 hasGuaranteedMaximumQualityRaphaelPlan,
                 _vulcanCraftState,
                 _vulcanStepState);
-            if (!_vulcanSolverStartDeferredForMaterialMiracle)
-                CraftingProcessor.OnCraftStarted(_vulcanCraftState, _vulcanStepState, _currentRecipeId.Value, false);
-            var recommendation = ResolveExecutionRecommendation(
+            if (_vulcanSolverStartDeferredForMaterialMiracle)
+            {
+                GatherBuddy.Log.Information(CraftingProcessorSession.FormatCraftStartLogLine(
+                    _vulcanCraftState,
+                    _vulcanStepState,
+                    _currentRecipeId.Value,
+                    _currentCraftIsTrial,
+                    "Donatello (Material Miracle bootstrap pending)"));
+            }
+            else
+            {
+                CraftingProcessor.OnCraftStarted(
+                    _vulcanCraftState,
+                    _vulcanStepState,
+                    _currentRecipeId.Value,
+                    _currentCraftIsTrial,
+                    _currentSolverMode == VulcanSolverMode.Gabriel
+                        ? typeof(GabrielSolverDefinition)
+                        : null);
+            }
+            var recommendation = RecommendationForExecution(
                 _vulcanCraftState,
                 _vulcanStepState,
-                CraftingProcessor.NextRecommendation,
                 _vulcanSolverStartDeferredForMaterialMiracle);
             GatherBuddy.Log.Debug($"[Crafting] OnCraftStarted recommendation: {recommendation.Action}");
             if (recommendation.Action != VulcanSkill.None && _nextActionAllowedAt == DateTime.MinValue)
@@ -1748,10 +1903,9 @@ public static class CraftingGameInterop
                 || StepStateReconciler.ObservableEquivalent(_vulcanStepState, delayedActual))
             {
                 var cachedRecommendation = _vulcanCraftState != null && _vulcanStepState != null
-                    ? ResolveExecutionRecommendation(
+                    ? RecommendationForExecution(
                         _vulcanCraftState,
                         _vulcanStepState,
-                        CraftingProcessor.NextRecommendation,
                         _vulcanSolverStartDeferredForMaterialMiracle)
                     : CraftingProcessor.NextRecommendation;
                 if (cachedRecommendation.Action != VulcanSkill.None && _vulcanCraftState != null && _vulcanStepState != null)
@@ -1791,6 +1945,7 @@ public static class CraftingGameInterop
                 if (actualState.Durability <= 0)
                 {
                     LogVerboseObservedAction(pendingAction, actualState, "durability-depleted");
+                    RecordConfirmedAction(pendingAction);
                     GatherBuddy.Log.Debug($"[Crafting] Durability depleted, finishing craft");
                     return Finish(cancelled: false);
                 }
@@ -1798,6 +1953,7 @@ public static class CraftingGameInterop
                 if (actualState.Progress >= _vulcanCraftState.CraftProgress)
                 {
                     LogVerboseObservedAction(pendingAction, actualState, "complete");
+                    RecordConfirmedAction(pendingAction);
                     GatherBuddy.Log.Debug($"[Crafting] Progress complete, transitioning to WaitFinish");
                     return CraftState.WaitFinish;
                 }
@@ -1838,6 +1994,9 @@ public static class CraftingGameInterop
                     return CraftState.InProgress;
                 }
                 LogVerboseObservedAction(pendingAction, actualState, "advanced");
+                RecordConfirmedAction(pendingAction != VulcanSkill.None
+                    ? pendingAction
+                    : inferredExternalAction);
                 _vulcanPredictionPendingObservation = false;
                 ResetReconciliationTracking();
                 _vulcanStepState = actualState;
@@ -1866,7 +2025,9 @@ public static class CraftingGameInterop
                 if (!CraftingProcessor.TryAdoptLiveCraft(
                         _vulcanCraftState,
                         _vulcanStepState,
-                        _currentSolverMode == VulcanSolverMode.Donatello,
+                        _currentSolverMode is VulcanSolverMode.Donatello or VulcanSolverMode.Gabriel
+                            ? _currentSolverMode
+                            : null,
                         out var liveSolverFailure))
                 {
                     var reason = $"Could not start Donatello after Material Miracle: {liveSolverFailure}";
@@ -1883,7 +2044,9 @@ public static class CraftingGameInterop
                 if (!CraftingProcessor.TryAdoptLiveCraft(
                         _vulcanCraftState,
                         _vulcanStepState,
-                        _currentSolverMode == VulcanSolverMode.Donatello,
+                        _currentSolverMode is VulcanSolverMode.Donatello or VulcanSolverMode.Gabriel
+                            ? _currentSolverMode
+                            : null,
                         out var liveSolverFailure))
                 {
                     var reason = $"Could not replan after an external crafting action: {liveSolverFailure}";
@@ -1897,16 +2060,23 @@ public static class CraftingGameInterop
             {
                 CraftingProcessor.OnCraftAdvanced(_vulcanCraftState, _vulcanStepState, _currentRecipeId);
             }
-            var recommendation = ResolveExecutionRecommendation(
+            var recommendation = RecommendationForExecution(
                 _vulcanCraftState,
                 _vulcanStepState,
-                CraftingProcessor.NextRecommendation,
                 _vulcanSolverStartDeferredForMaterialMiracle);
             if (recommendation.Action != VulcanSkill.None && _nextActionAllowedAt == DateTime.MinValue)
                 ExecuteSolverRecommendation(_vulcanCraftState, _vulcanStepState, recommendation);
         }
 
         return CraftState.InProgress;
+    }
+
+    private static void RecordConfirmedAction(VulcanSkill action)
+    {
+        if (action == VulcanSkill.None)
+            return;
+        _executedActions.Add(action);
+        CraftActionExecuted?.Invoke(action);
     }
 
     internal static Solver.Recommendation ResolveExecutionRecommendation(
@@ -1918,6 +2088,25 @@ public static class CraftingGameInterop
             && Vulcan.Simulator.CanUseAction(craft, step, VulcanSkill.MaterialMiracle)
             ? new(VulcanSkill.MaterialMiracle, "ICE automatic Material Miracle")
             : solverRecommendation;
+
+    private static Solver.Recommendation RecommendationForExecution(
+        Vulcan.CraftState craft,
+        Vulcan.StepState step,
+        bool materialMiracleBootstrapPending)
+    {
+        CraftingProcessor.Update();
+        var solverRecommendation = CraftingProcessor.NextRecommendation;
+        if (CraftingProcessor.ActiveSolver is DonatelloSolver donatello
+            && solverRecommendation.Action != VulcanSkill.None
+            && donatello.TryApplyCompletedOpportunisticReplan(step, out var refreshed)
+            && refreshed.Action != VulcanSkill.None)
+            solverRecommendation = refreshed;
+        return ResolveExecutionRecommendation(
+            craft,
+            step,
+            solverRecommendation,
+            materialMiracleBootstrapPending);
+    }
 
     private static void LogVerboseObservedAction(
         VulcanSkill action,
@@ -2006,6 +2195,8 @@ public static class CraftingGameInterop
         _currentSelectedMacroId = null;
         _currentDonatelloOptions = null;
         _currentQualityPolicy = null;
+        _currentCraftIsTrial = false;
+        ResetManualSynthesisTakeoverTracking();
 
         _currentRecipe = null;
         _currentRecipeId = null;

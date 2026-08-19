@@ -5,6 +5,8 @@ using System.Text.Json;
 using GatherBuddy.AutoGather;
 using GatherBuddy.Crafting;
 using GatherBuddy.Crafting.Acquisition;
+using GatherBuddy.Gui;
+using GatherBuddy.Vulcan.Vendors;
 using LuminaSupplemental.Excel.Model;
 using GatheringType = global::GatherBuddy.Enums.GatheringType;
 
@@ -28,14 +30,19 @@ public static class AcquisitionAcceptanceTests
         UnknownPathKindIsExplicitlyUnknown(require);
         UnknownBalancesAndWorldsBlockSafely(require);
         NonzeroGilIdsAreCanonicalized(require);
+        GrandCompanyVendorUsesAuthoritativeSealBalance(require);
+        EquivalentVendorOfferPrefersCurrentTerritory(require);
         InvalidVendorCurrencyVectorsAreRejected(require);
         MarketStacksRemainAtomic(require);
         GlobalBudgetReservesCurrencyAcrossItems(require);
         CurrencyVectorsAreRequiredTogether(require);
+        SpecialCurrencyMarketReasonUsesPreferenceMetadata(require);
+        InsufficientCurrencyMarketReasonIncludesCostAndIcon(require);
         PreferenceRelaxationStaysWithinHardBudget(require);
         SameSourceDifferentItemVendorTransactionsRemainDistinct(require);
         CoProductVendorTransactionIsSharedAcrossDependencies(require);
         ParetoFrontierAvoidsCartesianGlobalExplosion(require);
+        FeasibleVendorSurvivesImpossibleMarketplaceBranch(require);
         ExactSearchReportsItsDeterministicLimit(require);
         AcquisitionSettingsRoundTrip(require);
     }
@@ -48,6 +55,7 @@ public static class AcquisitionAcceptanceTests
             new ItemSupplement(900u, 902u, ItemSupplementSource.Reduction),
             new ItemSupplement(900u, 901u, ItemSupplementSource.Reduction),
             new ItemSupplement(900u, 903u, ItemSupplementSource.Desynth),
+            new ItemSupplement(910u, 911u, ItemSupplementSource.Reduction),
         ]);
         require(index.TryGetValue(900u, out var sources) && sources.SequenceEqual([901u, 902u]),
             "reduction source indexing must retain every distinct reduction candidate and exclude other transforms");
@@ -61,6 +69,84 @@ public static class AcquisitionAcceptanceTests
             "Levinchrome Quartz must validate as a source for the selected Aethersand output");
         require(!AetherialReductionSourceResolver.IsSourceForOutput(46246u, 46250u),
             "an unrelated gatherable must not validate as the source for a selected reduction output");
+
+        var usableReduction = new AcquisitionPath
+        {
+            Kind = AcquisitionPathKind.Reduction,
+            SourceItemId = 46247u,
+            JobId = 16u,
+            Capability = AcquisitionCapability.UsablePath(AcquisitionPathKind.Reduction),
+        };
+        require(AetherialReductionSourceResolver.TryCreatePresentation(
+                    46246u,
+                    21,
+                    _ => usableReduction,
+                    out var presentation)
+                && presentation.SourceItemId == 46247u
+                && presentation.OutputItemId == 46246u
+                && presentation.OutputNeeded == 21
+                && presentation.SourceClassJobId == 16u
+                && presentation.SourceQuantityUnknown,
+            "eligible reduction presentation must resolve demanded output to source while preserving exact output demand and unknown source quantity");
+
+        var syntheticPaths = new Dictionary<uint, AcquisitionPath>
+        {
+            [900u] = new()
+            {
+                Kind = AcquisitionPathKind.Reduction,
+                SourceItemId = 902u,
+                JobId = 16u,
+                Capability = AcquisitionCapability.UsablePath(AcquisitionPathKind.Reduction),
+            },
+            [910u] = new()
+            {
+                Kind = AcquisitionPathKind.Reduction,
+                SourceItemId = 911u,
+                JobId = 17u,
+                Capability = AcquisitionCapability.UsablePath(AcquisitionPathKind.Reduction),
+            },
+        };
+        require(AetherialReductionSourceResolver.TryCreatePresentation(
+                    900u,
+                    7,
+                    index,
+                    outputItemId => syntheticPaths.GetValueOrDefault(outputItemId),
+                    out var minerPresentation)
+                && minerPresentation.SourceItemId == 902u
+                && minerPresentation.SourceClassJobId == 16u,
+            "reduction presentation must discover a selected miner source from generic supplemental relations");
+        require(AetherialReductionSourceResolver.TryCreatePresentation(
+                    910u,
+                    5,
+                    index,
+                    outputItemId => syntheticPaths.GetValueOrDefault(outputItemId),
+                    out var botanistPresentation)
+                && botanistPresentation.SourceItemId == 911u
+                && botanistPresentation.SourceClassJobId == 17u,
+            "reduction presentation must preserve the gathering job resolved for a different output and source");
+        require(!AetherialReductionSourceResolver.TryCreatePresentation(
+                    46247u,
+                    21,
+                    _ => usableReduction,
+                    out _),
+            "reduction presentation must not infer output demand by resolving forward from a source item");
+        var unknownReduction = new AcquisitionPath
+        {
+            Kind = AcquisitionPathKind.Reduction,
+            SourceItemId = 46247u,
+            JobId = 16u,
+            Capability = new AcquisitionCapability
+            {
+                Status = AcquisitionCapabilityStatus.Unknown,
+                PathKind = AcquisitionPathKind.Reduction,
+            },
+        };
+        require(!AetherialReductionSourceResolver.TryCreatePresentation(
+                    46246u,
+                    21,
+                    _ => unknownReduction,
+                    out _),
+            "unknown reduction eligibility must retain the ordinary material source presentation");
     }
 
     private static void ManualGatherAssistSettingDefaultsOn(Action<bool, string> require)
@@ -277,6 +363,113 @@ public static class AcquisitionAcceptanceTests
         require(result.Status == AcquisitionPlanStatus.Ready
             && result.SelectedPlan?.Transactions.SingleOrDefault()?.SourceKind == AcquisitionSourceKind.Market,
             "an unavailable vendor route must not block a valid market-board fallback");
+    }
+
+    private static void GrandCompanyVendorUsesAuthoritativeSealBalance(Action<bool, string> require)
+    {
+        const uint potash = 5501;
+        const uint maelstromSeals = 20;
+        var vendor = new AcquisitionVendorOffer
+        {
+            ItemId = potash,
+            OfferId = "maelstrom-quartermaster-potash",
+            ReceiveQuantity = 1,
+            Costs = new[]
+            {
+                new AcquisitionCurrencyCost
+                {
+                    CurrencyId = maelstromSeals,
+                    CurrencyName = "Storm Seals",
+                    Amount = 200,
+                    IsSpecialCurrency = true,
+                    Group = VendorCurrencyGroup.GrandCompanySeals,
+                },
+            },
+        };
+
+        var affordable = AcquisitionPlanner.Plan(
+            new AcquisitionPlanningInput
+            {
+                Dependencies = new[] { Blocked(potash, 1, "Potash") },
+                VendorOffers = new[] { vendor },
+                MarketListings = new[] { Listing(potash, 5501, 1, price: 400) },
+                CurrencyBalances = new Dictionary<uint, long> { [maelstromSeals] = 200 },
+                GilBalance = 10_000,
+            },
+            new AcquisitionPlanningSettings
+            {
+                AutoPurchaseBlockedDependencies = true,
+                PreferMarketForSpecialCurrency = false,
+                PreferVendors = true,
+            });
+        require(affordable.SelectedPlan?.Transactions.SingleOrDefault()?.SourceKind == AcquisitionSourceKind.Vendor,
+            "an eligible current-GC quartermaster offer must beat the market when its seal wallet covers the cost");
+
+        var insufficient = AcquisitionPlanner.Plan(
+            new AcquisitionPlanningInput
+            {
+                Dependencies = new[] { Blocked(potash, 1, "Potash") },
+                VendorOffers = new[] { vendor },
+                MarketListings = new[] { Listing(potash, 5501, 1, price: 400) },
+                CurrencyBalances = new Dictionary<uint, long> { [maelstromSeals] = 199 },
+                GilBalance = 10_000,
+            },
+            new AcquisitionPlanningSettings
+            {
+                AutoPurchaseBlockedDependencies = true,
+                PreferMarketForSpecialCurrency = false,
+                PreferVendors = true,
+            });
+        require(insufficient.SelectedPlan?.Transactions.SingleOrDefault()?.SourceKind == AcquisitionSourceKind.Market,
+            "an ineligible quartermaster offer must fall back to the market when the seal wallet is short");
+    }
+
+    private static void EquivalentVendorOfferPrefersCurrentTerritory(Action<bool, string> require)
+    {
+        const uint itemId = 5502;
+        const uint purpleScrips = 33913;
+        AcquisitionVendorOffer Offer(string id, uint territoryId)
+            => new()
+            {
+                ItemId = itemId,
+                OfferId = id,
+                VendorName = "Scrip Exchange",
+                VendorTerritoryId = territoryId,
+                ReceiveQuantity = 1,
+                Costs = new[]
+                {
+                    new AcquisitionCurrencyCost
+                    {
+                        CurrencyId = purpleScrips,
+                        CurrencyName = "Purple Crafters' Scrip",
+                        Amount = 100,
+                        IsSpecialCurrency = true,
+                        Group = VendorCurrencyGroup.Other,
+                    },
+                },
+            };
+
+        var result = AcquisitionPlanner.Plan(
+            new AcquisitionPlanningInput
+            {
+                Dependencies = new[] { Blocked(itemId, 1, "Scrip material") },
+                VendorOffers = new[]
+                {
+                    Offer("a-remote-ul-dah", 130),
+                    Offer("z-local-tuliyollal", 1185),
+                },
+                CurrencyBalances = new Dictionary<uint, long> { [purpleScrips] = 100 },
+                CurrentTerritoryId = 1185,
+            },
+            new AcquisitionPlanningSettings
+            {
+                AutoPurchaseBlockedDependencies = true,
+                PreferMarketForSpecialCurrency = false,
+                PreferVendors = true,
+            });
+
+        require(result.SelectedPlan?.Transactions.SingleOrDefault()?.VendorTerritoryId == 1185,
+            "equivalent vendor offers must prefer the current-territory route over lexical source ordering");
     }
 
     private static void SelectedRecipeIdentitySurvivesFallback(Action<bool, string> require)
@@ -686,15 +879,110 @@ public static class AcquisitionAcceptanceTests
             "hard Gil cap must select the special-currency fallback instead of exceeding budget");
     }
 
+    private static void SpecialCurrencyMarketReasonUsesPreferenceMetadata(Action<bool, string> require)
+    {
+        var input = new AcquisitionPlanningInput
+        {
+            Dependencies = new[] { Blocked(701, 1) },
+            VendorOffers = new[]
+            {
+                new AcquisitionVendorOffer
+                {
+                    ItemId = 701,
+                    OfferId = "special-token-offer",
+                    ReceiveQuantity = 1,
+                    Costs = new[] { Currency(9004, 1, true) },
+                },
+            },
+            MarketListings = new[] { Listing(701, 7001, 1, price: 100) },
+            CurrencyBalances = new Dictionary<uint, long> { [9004] = 1 },
+            GilBalance = 1_000,
+        };
+        var planning = AcquisitionPlanner.Plan(
+            input,
+            new AcquisitionPlanningSettings
+            {
+                AutoPurchaseBlockedDependencies = true,
+                PreferMarketForSpecialCurrency = true,
+            });
+        var reasons = CraftingListEditor.BuildMarketplacePurchaseReasons(
+            new CraftingAcquisitionService.Evaluation
+            {
+                Snapshot = new AcquisitionPlanningInputBuilder.BuildResult { Input = input },
+                Planning = planning,
+            },
+            preferMarketForSpecialCurrency: true);
+
+        require(reasons.TryGetValue(701u, out var reason)
+                && reason.Text == "market selected by special-currency preference",
+            "special-currency market purchases must identify the preference that selected them");
+    }
+
+    private static void InsufficientCurrencyMarketReasonIncludesCostAndIcon(Action<bool, string> require)
+    {
+        const uint currencyId = 9005;
+        const uint currencyIconId = 12345;
+        var input = new AcquisitionPlanningInput
+        {
+            Dependencies = new[] { Blocked(702, 2) },
+            VendorOffers = new[]
+            {
+                new AcquisitionVendorOffer
+                {
+                    ItemId = 702,
+                    OfferId = "purple-scrip-offer",
+                    ReceiveQuantity = 1,
+                    Costs = new[]
+                    {
+                        new AcquisitionCurrencyCost
+                        {
+                            CurrencyId = currencyId,
+                            IconId = currencyIconId,
+                            CurrencyName = "Purple Scrip",
+                            Amount = 500,
+                            IsSpecialCurrency = true,
+                        },
+                    },
+                },
+            },
+            MarketListings = new[] { Listing(702, 7002, 2, price: 100) },
+            CurrencyBalances = new Dictionary<uint, long> { [currencyId] = 302 },
+            GilBalance = 1_000,
+        };
+        var planning = AcquisitionPlanner.Plan(
+            input,
+            new AcquisitionPlanningSettings
+            {
+                AutoPurchaseBlockedDependencies = true,
+                PreferMarketForSpecialCurrency = false,
+            });
+        require(planning.SelectedPlan?.Transactions.SingleOrDefault()?.SourceKind == AcquisitionSourceKind.Market,
+            "insufficient special currency must select the market fallback");
+        var reasons = CraftingListEditor.BuildMarketplacePurchaseReasons(
+            new CraftingAcquisitionService.Evaluation
+            {
+                Snapshot = new AcquisitionPlanningInputBuilder.BuildResult { Input = input },
+                Planning = planning,
+            },
+            preferMarketForSpecialCurrency: false);
+
+        require(reasons.TryGetValue(702u, out var reason)
+                && reason.Text == "not enough currency"
+                && reason.CurrencyAmount == 1_000
+                && reason.CurrencyIconId == currencyIconId
+                && reason.CurrencyTooltip == "Purple Scrip",
+            "market fallback must identify the total missing special-currency cost and its icon");
+    }
+
     private static void ExactSearchReportsItsDeterministicLimit(Action<bool, string> require)
     {
-        var listings = Enumerable.Range(0, 18)
+        var listings = Enumerable.Range(0, 20)
             .Select(index => Listing(800, 8000 + index, 1, price: index + 1))
             .ToArray();
         var result = AcquisitionPlanner.Plan(
             new AcquisitionPlanningInput
             {
-                Dependencies = new[] { Blocked(800, 1000) },
+                Dependencies = new[] { Blocked(800, 10) },
                 MarketListings = listings,
                 GilBalance = 1_000_000,
             },
@@ -702,6 +990,31 @@ public static class AcquisitionAcceptanceTests
 
         require(result.Status == AcquisitionPlanStatus.DeterministicLimitExceeded,
             "bounded exact search must fail explicitly instead of returning a partial greedy plan");
+    }
+
+    private static void FeasibleVendorSurvivesImpossibleMarketplaceBranch(Action<bool, string> require)
+    {
+        var result = AcquisitionPlanner.Plan(
+            new AcquisitionPlanningInput
+            {
+                Dependencies = new[] { Blocked(801, 24) },
+                VendorOffers = new[] { Vendor(801, "cheap-gil-vendor", 4) },
+                MarketListings = Enumerable.Range(0, 20)
+                    .Select(index => Listing(801, 8010 + index, 1, price: 100 + index))
+                    .ToArray(),
+                GilBalance = 1_000,
+            },
+            Enabled());
+
+        require(result.IsSuccess,
+            $"a feasible cheap vendor must survive an impossible marketplace-only branch without hitting the per-item search limit (status={result.Status}, blockers={string.Join(" | ", result.Blockers.Select(blocker => blocker.Reason))})");
+        var selectedPlan = result.SelectedPlan;
+        require(selectedPlan != null,
+            "a successful acquisition plan must include its selected plan");
+        require(selectedPlan!.Transactions.SingleOrDefault()?.SourceKind == AcquisitionSourceKind.Vendor,
+            "the feasible cheap vendor must be selected over an incomplete marketplace-only branch");
+        require(selectedPlan.Estimate.TotalGil == 96,
+            "the feasible cheap vendor must cost 4 Gil per required item");
     }
 
     private static void ParetoFrontierAvoidsCartesianGlobalExplosion(Action<bool, string> require)

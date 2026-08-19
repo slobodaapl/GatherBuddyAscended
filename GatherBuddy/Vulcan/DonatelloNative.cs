@@ -13,7 +13,7 @@ namespace GatherBuddy.Vulcan;
 internal static partial class DonatelloNative
 {
     private const string LibraryName = "donatello_ffi.dll";
-    internal const uint AbiVersion = 10;
+    internal const uint AbiVersion = 12;
     private static readonly SemaphoreSlim NativeSolveGate = new(1, 1);
     private static readonly JsonSerializerOptions RequestSerializerOptions = new()
     {
@@ -255,6 +255,9 @@ internal static partial class DonatelloNative
             IncumbentActionIds = incumbent?.Select(action => (uint)action).ToArray() ?? [],
             SoftDeadlineMillis = Math.Max(0, softDeadlineMillis),
             HardDeadlineMillis = Math.Max(0, hardDeadlineMillis),
+            ResetSoftDeadlineOnImprovement = softDeadlineMillis > 0
+                && solveMode != SolveMode.CompleteFastest
+                && DonatelloSolver.UsesImprovementQuiescence(craft),
             BypassSolutionCache = bypassSolutionCache,
             Root = new
             {

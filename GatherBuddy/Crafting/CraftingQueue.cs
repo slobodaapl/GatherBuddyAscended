@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using System.Linq;
+using GatherBuddy.Vulcan;
 using Lumina.Excel.Sheets;
 using Newtonsoft.Json;
 
@@ -93,11 +94,32 @@ public class CraftingListItem
     public bool IsOriginalRecipe { get; set; } = false;
     public RecipeCraftSettings? CraftSettings { get; set; }
     [JsonIgnore] public CraftingQualityPolicy? QualityPolicy { get; set; }
+    [JsonIgnore] public List<VulcanSkill> ExecutedActions { get; } = [];
 
     public CraftingListItem(uint recipeId, int quantity)
     {
         RecipeId = recipeId;
         Quantity = quantity;
+    }
+}
+
+internal static class CraftingActionHistory
+{
+    internal static VulcanSkill ActiveCombo(IReadOnlyList<VulcanSkill> actions)
+    {
+        var combo = VulcanSkill.None;
+        foreach (var action in actions)
+        {
+            combo = action switch
+            {
+                VulcanSkill.MaterialMiracle => combo,
+                VulcanSkill.BasicTouch => VulcanSkill.BasicTouch,
+                VulcanSkill.StandardTouch when combo == VulcanSkill.BasicTouch => VulcanSkill.StandardTouch,
+                VulcanSkill.Observe => VulcanSkill.StandardTouch,
+                _ => VulcanSkill.None,
+            };
+        }
+        return combo;
     }
 }
 

@@ -368,6 +368,7 @@ public static class CraftingStateBuilder
 
         return new GameStateBuilder.RecipeInfo(
             RecipeId: recipe.RowId,
+            RecipeLevelTableId: (ushort)nativeLevelTable.RowId,
             Level: lt.ClassJobLevel,
             Difficulty: difficulty,
             QualityMax: qualityMax,

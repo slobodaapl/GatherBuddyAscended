@@ -38,11 +38,13 @@
     <None Remove="CustomInfo\IlvConvertTable.csv" />
     <None Remove="CustomInfo\mob_drop_overrides.json" />
     <None Remove="CustomInfo\world_locations.json" />
+    <None Remove="CustomInfo\expert_condition_profiles.json" />
   </ItemGroup>
 
   <ItemGroup>
     <EmbeddedResource Include="CustomInfo\world_locations.json" />
     <EmbeddedResource Include="CustomInfo\mob_drop_overrides.json" />
+    <EmbeddedResource Include="CustomInfo\expert_condition_profiles.json" />
     <None Remove="CustomInfo\node_offsets.json" />
     <EmbeddedResource Include="CustomInfo\node_offsets.json" />
     <None Remove="CustomInfo\honk-sound.wav" />

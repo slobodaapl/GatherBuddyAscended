@@ -24,7 +24,7 @@ public static class Simulator
             var qualityIncrease = success ? CalculateQuality(craft, step, action) : 0;
             next.Quality = ClampQuality(craft, step.Quality + qualityIncrease);
             next.IQStacks = step.IQStacks;
-            if (action == VulcanSkill.CarefulObservation)
+            if (SkipUpdates(action))
             {
                 next.ExpedienceLeft = step.ExpedienceLeft;
             }
@@ -71,8 +71,10 @@ public static class Simulator
                 : action;
             next.ComboAction = action switch
             {
-                VulcanSkill.MaterialMiracle or VulcanSkill.CarefulObservation => step.ComboAction,
-                VulcanSkill.BasicTouch or VulcanSkill.StandardTouch or VulcanSkill.Observe => action,
+                VulcanSkill.MaterialMiracle => step.ComboAction,
+                VulcanSkill.BasicTouch => VulcanSkill.BasicTouch,
+                VulcanSkill.StandardTouch when step.ComboAction == VulcanSkill.BasicTouch => VulcanSkill.StandardTouch,
+                VulcanSkill.Observe => VulcanSkill.StandardTouch,
                 _ => VulcanSkill.None,
             };
             next.TrainedPerfectionActive = action == VulcanSkill.TrainedPerfection || (step.TrainedPerfectionActive && !HasDurabilityCost(action));

@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using GatherBuddy.Crafting;
 
 namespace GatherBuddy.Vulcan;
 
@@ -8,6 +9,7 @@ public static class GameStateBuilder
 
     public record RecipeInfo(
         uint RecipeId,
+        ushort RecipeLevelTableId,
         int Level,
         int Difficulty,
         int QualityMax,
@@ -44,12 +46,16 @@ public static class GameStateBuilder
             Specialist = playerStats.Specialist,
             CrafterDelineations = playerStats.Specialist ? playerStats.CrafterDelineations : 0,
             SplendorCosmic = playerStats.SplendorCosmic,
+            GabrielWorkerThreads = DonatelloNative.ResolveGabrielWorkerThreads(
+                global::GatherBuddy.GatherBuddy.Config?.RaphaelSolverConfig.GabrielWorkerThreads
+                ?? DonatelloNative.DefaultGabrielWorkerThreads),
 
             ItemId = recipe.RecipeId,
             RecipeId = recipe.RecipeId,
 
             CraftExpert = recipe.IsExpert && (ushort)recipe.ConditionFlags != 15,
             CraftStars = recipe.Stars,
+            RecipeLevelTableId = recipe.RecipeLevelTableId,
             CraftHQ = recipe.CanHQ,
             CraftCollectible = recipe.IsCollectible,
             CraftLevel = recipe.Level,
@@ -80,7 +86,10 @@ public static class GameStateBuilder
             CraftConditionProbabilities = GetConditionProbabilities(
                 recipe.ConditionFlags,
                 playerStats.Level,
-                recipe.IsExpert && (ushort)recipe.ConditionFlags != 15),
+                recipe.IsExpert && (ushort)recipe.ConditionFlags != 15,
+                recipe.RecipeLevelTableId),
+            CraftConditionProfileCataloged = recipe.IsExpert
+                && ExpertConditionProfileCatalog.TryGet(recipe.RecipeLevelTableId, out _),
             CollectableMetadataKey = recipe.CollectableMetadataKey,
             IsCosmic = recipe.IsCosmic
         };
@@ -182,13 +191,20 @@ public static class GameStateBuilder
         uint StellarSteadyHandsUsed
     );
 
-    internal static float[] GetConditionProbabilities(ConditionFlags flags, int statLevel, bool craftExpert)
+    internal static float[] GetConditionProbabilities(
+        ConditionFlags flags,
+        int statLevel,
+        bool craftExpert,
+        ushort recipeLevelTableId = 0)
     {
         if ((flags & ConditionFlags.Normal) == 0)
             return new[] { 1f };
 
         if (!craftExpert)
             return CraftState.NormalCraftConditionProbabilities(statLevel);
+
+        if (ExpertConditionProfileCatalog.TryGet(recipeLevelTableId, out var profile))
+            return profile.ToSimulatorProbabilities();
 
         var probs = new float[11];
         probs[0] = 1f;

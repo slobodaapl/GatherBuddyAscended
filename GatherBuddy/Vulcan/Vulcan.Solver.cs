@@ -27,6 +27,11 @@ public abstract class Solver
     public abstract Recommendation Solve(CraftState craft, StepState step);
 }
 
+internal interface IDonatelloRaphaelIncumbent
+{
+    IReadOnlyList<VulcanSkill> RemainingActions { get; }
+}
+
 public interface ICraftValidator
 {
     public bool Validate(CraftState craft);

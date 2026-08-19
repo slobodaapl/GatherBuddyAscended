@@ -523,6 +523,75 @@ public partial class AutoGatherListsManager
         }
     }
 
+    public (int Added, int Merged, int Skipped) MergeItems(
+        AutoGatherList destination,
+        AutoGatherList source)
+    {
+        var added = 0;
+        var merged = 0;
+        var skipped = 0;
+        var changed = false;
+
+        foreach (var item in source.Items)
+        {
+            var quantity = source.Quantities[item];
+            var completionItemId = source.CompletionItemIds.GetValueOrDefault(item);
+            if (!ValidateReductionSelection(item, completionItemId, false))
+            {
+                skipped++;
+                continue;
+            }
+
+            if (destination.Quantities.TryGetValue(item, out var existingQuantity))
+            {
+                if (destination.CompletionItemIds.GetValueOrDefault(item) != completionItemId)
+                {
+                    skipped++;
+                    GatherBuddy.Log.Warning(
+                        $"[Auto-Gather] Cannot merge {item.Name[GatherBuddy.Language]} into '{destination.Name}': the existing entry has a different completion item.");
+                    continue;
+                }
+
+                var mergedQuantity = (uint)Math.Min(uint.MaxValue, (ulong)existingQuantity + quantity);
+                if (destination.SetQuantity(item, mergedQuantity))
+                {
+                    merged++;
+                    changed = true;
+                }
+                else
+                {
+                    skipped++;
+                }
+                continue;
+            }
+
+            if (!destination.Add(item, quantity, completionItemId))
+            {
+                skipped++;
+                continue;
+            }
+
+            added++;
+            changed = true;
+            if (destination.Enabled
+             && (!ValidateSingleFishBait(item)
+              || !ValidateSingleGatherablePerception(item)
+              || !ValidateReductionSelection(item, completionItemId, true)))
+            {
+                destination.SetEnabled(item, false);
+            }
+        }
+
+        if (changed)
+        {
+            Save();
+            if (destination.Enabled)
+                SetActiveItems();
+        }
+
+        return (added, merged, skipped);
+    }
+
     public void RemoveItem(AutoGatherList list, int idx)
     {
         if (idx < 0 || idx >= list.Items.Count)

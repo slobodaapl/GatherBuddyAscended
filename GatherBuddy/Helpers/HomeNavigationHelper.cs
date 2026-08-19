@@ -71,7 +71,7 @@ public static unsafe class HomeNavigationHelper
             error = "Cannot return to Home World while in a non-cross-world party.";
             return false;
         }
-        if (!Lifestream.Enabled || Lifestream.TPAndChangeWorld == null)
+        if (!Lifestream.Enabled)
         {
             error = "Lifestream is required to return to Home World.";
             return false;
@@ -84,7 +84,19 @@ public static unsafe class HomeNavigationHelper
         if (Lifestream.IsBusy())
             return true;
 
-        Lifestream.TPAndChangeWorld(homeWorld, false, string.Empty, false, null, true, true);
+        if (!Lifestream.TryTpAndChangeWorld(
+                homeWorld,
+                false,
+                string.Empty,
+                false,
+                null,
+                true,
+                true,
+                out var ipcError))
+        {
+            error = $"Could not request Lifestream Home World travel: {ipcError}";
+            return false;
+        }
         return true;
     }
 

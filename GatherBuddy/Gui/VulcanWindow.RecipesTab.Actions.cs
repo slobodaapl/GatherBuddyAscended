@@ -39,7 +39,7 @@ public partial class VulcanWindow
         }
     }
 
-    private static void StartCraftWithRaphael(Recipe recipe)
+    private static void StartCraftWithRaphael(Recipe recipe, bool trialSynthesis = false)
     {
         var requiredJob = (uint)(recipe.CraftType.RowId + 8);
         var currentJob = Dalamud.Objects.LocalPlayer?.ClassJob.RowId ?? 0;
@@ -55,18 +55,24 @@ public partial class VulcanWindow
                 tm.DelayNext(3000);
                 tm.Enqueue(() =>
                 {
-                    StartCraftWithRaphaelAfterJobSwitch(recipe);
+                    StartCraftWithRaphaelAfterJobSwitch(recipe, trialSynthesis);
                     return true;
-                }, "StartCraftAfterJobSwitch");
+                }, trialSynthesis ? "StartTrialSynthesisAfterJobSwitch" : "StartCraftAfterJobSwitch");
             }
             return;
         }
         
-        StartCraftWithRaphaelAfterJobSwitch(recipe);
+        StartCraftWithRaphaelAfterJobSwitch(recipe, trialSynthesis);
     }
     
-    private static void StartCraftWithRaphaelAfterJobSwitch(Recipe recipe)
+    private static void StartCraftWithRaphaelAfterJobSwitch(Recipe recipe, bool trialSynthesis)
     {
+        if (trialSynthesis && CraftingGameInterop.GetTrialSynthesisStartBlockReason() is { } blockReason)
+        {
+            GatherBuddy.Log.Warning($"[VulcanWindow] Trial Synthesis not started: {blockReason}");
+            return;
+        }
+
         var settings = GatherBuddy.RecipeBrowserSettings.Get(recipe.RowId);
         var item = new CraftingListItem(recipe.RowId, 1)
         {
@@ -74,7 +80,6 @@ public partial class VulcanWindow
             CraftSettings = settings?.Clone(),
         };
         var executionContext = CraftingContextResolver.ResolveExecutionContext(item, recipe, null);
-        var qualityPolicy = executionContext.QualityPolicy;
         if (settings != null && settings.HasAnySettings())
         {
             GatherBuddy.Log.Debug($"[VulcanWindow] Applying recipe browser settings for {recipe.RowId}");
@@ -87,12 +92,14 @@ public partial class VulcanWindow
             if (settings.SquadronManualItemId.HasValue)
                 GatherBuddy.Log.Debug($"  Squadron Manual: {settings.SquadronManualItemId.Value}");
             GatherBuddy.Log.Debug($"  Ingredient prefs: {settings.IngredientPreferences.Count} items, UseAllNQ={settings.UseAllNQ}");
-            CraftingGameInterop.SetQualityPolicy(qualityPolicy);
-            
-            var allApplied = ConsumableChecker.ApplyConsumables(settings);
+        }
+
+        if (executionContext.ConsumableSettings is { } consumableSettings)
+        {
+            var allApplied = ConsumableChecker.ApplyConsumables(consumableSettings);
             if (!allApplied)
             {
-                GatherBuddy.Log.Debug($"[VulcanWindow] Consumables applied, waiting 3 seconds before starting craft");
+                GatherBuddy.Log.Debug($"[VulcanWindow] Consumables applied, waiting 3 seconds before starting synthesis");
                 var taskMgr = GatherBuddy.AutoGather?.TaskManager;
                 if (taskMgr != null)
                 {
@@ -100,37 +107,38 @@ public partial class VulcanWindow
                 }
             }
         }
-        else
-        {
-            CraftingGameInterop.SetQualityPolicy(qualityPolicy);
-        }
 
         var selectedMacroId = executionContext.SelectedMacroId;
-        CraftingGameInterop.SetSelectedMacro(selectedMacroId);
-        CraftingGameInterop.SetDonatelloOptions(executionContext.DonatelloOptions);
-        CraftingGameInterop.ReloadSolversForCraft(executionContext.EffectiveSolverMode, !executionContext.ForceProgressOnlyUnlockCraft);
         if (!string.IsNullOrEmpty(selectedMacroId))
             GatherBuddy.Log.Information($"[VulcanWindow] Using macro: {selectedMacroId}");
 
         if (!CraftingContextResolver.UsesRaphaelSolver(executionContext))
         {
-            CraftingGameInterop.StartCraft(recipe, 1);
+            StartPreparedSynthesis(recipe, executionContext, trialSynthesis);
             return;
         }
         var requiredJob = (uint)(recipe.CraftType.RowId + 8);
 
-        if (!CraftingContextResolver.TryBuildSimulationContext(recipe, executionContext, CraftingStatsSource.AlwaysGearsetStats, out var simulationContext))
+        var simulationIntent = trialSynthesis
+            ? CraftingSimulationIntent.TrialExecution
+            : CraftingSimulationIntent.Execution;
+        if (!CraftingContextResolver.TryBuildSimulationContext(
+                recipe,
+                executionContext,
+                CraftingStatsSource.AlwaysGearsetStats,
+                simulationIntent,
+                out var simulationContext))
         {
-            GatherBuddy.Log.Warning($"[VulcanWindow] Could not read gearset stats for job {requiredJob}, crafting without Raphael");
-            CraftingGameInterop.StartCraft(recipe, 1);
+            GatherBuddy.Log.Warning($"[VulcanWindow] Could not read gearset stats for job {requiredJob}, starting without Raphael");
+            StartPreparedSynthesis(recipe, executionContext, trialSynthesis);
             return;
         }
         var request = simulationContext.RaphaelRequest;
 
         if (GatherBuddy.RaphaelSolveCoordinator.TryGetSolution(request, out var solution) && solution != null && !solution.IsFailed)
         {
-            GatherBuddy.Log.Debug($"[VulcanWindow] Raphael solution already cached for recipe {recipe.RowId}, starting craft");
-            CraftingGameInterop.StartCraft(recipe, 1);
+            GatherBuddy.Log.Debug($"[VulcanWindow] Raphael solution already cached for recipe {recipe.RowId}, starting synthesis");
+            StartPreparedSynthesis(recipe, executionContext, trialSynthesis);
             return;
         }
 
@@ -144,13 +152,37 @@ public partial class VulcanWindow
             return;
         }
 
-        tm.Enqueue(() => WaitForRaphaelSolution(request), 60000, "WaitForRaphaelSolution");
+        tm.Enqueue(() => WaitForRaphaelSolution(request), 60000,
+            trialSynthesis ? "WaitForTrialRaphaelSolution" : "WaitForRaphaelSolution");
         tm.Enqueue(() =>
         {
-            GatherBuddy.Log.Information($"[VulcanWindow] Raphael solution ready, starting craft for recipe {recipe.RowId}");
-            CraftingGameInterop.StartCraft(recipe, 1);
+            GatherBuddy.Log.Information($"[VulcanWindow] Raphael solution ready, starting synthesis for recipe {recipe.RowId}");
+            StartPreparedSynthesis(recipe, executionContext, trialSynthesis);
             return true;
-        }, "StartCraftAfterRaphael");
+        }, trialSynthesis ? "StartTrialSynthesisAfterRaphael" : "StartCraftAfterRaphael");
+    }
+
+    private static void StartPreparedSynthesis(
+        Recipe recipe,
+        CraftingExecutionContext executionContext,
+        bool trialSynthesis)
+    {
+        if (trialSynthesis && CraftingGameInterop.GetTrialSynthesisStartBlockReason() is { } blockReason)
+        {
+            GatherBuddy.Log.Warning($"[VulcanWindow] Trial Synthesis not started: {blockReason}");
+            return;
+        }
+
+        CraftingGameInterop.SetQualityPolicy(executionContext.QualityPolicy);
+        CraftingGameInterop.SetSelectedMacro(executionContext.SelectedMacroId);
+        CraftingGameInterop.SetDonatelloOptions(executionContext.DonatelloOptions);
+        CraftingGameInterop.ReloadSolversForCraft(
+            executionContext.EffectiveSolverMode,
+            !executionContext.ForceProgressOnlyUnlockCraft);
+        if (trialSynthesis)
+            CraftingGameInterop.StartTrialSynthesis(recipe);
+        else
+            CraftingGameInterop.StartCraft(recipe, 1);
     }
 
     private static bool WaitForRaphaelSolution(RaphaelSolveRequest request)
@@ -181,6 +213,9 @@ public partial class VulcanWindow
         CraftingGatherBridge.StartQueueCraftAndGather(executionPlan);
     }
 
+    private static void StartBrowserTrialSynthesis(Recipe recipe)
+        => StartCraftWithRaphael(recipe, trialSynthesis: true);
+
     private static void StartBrowserCraft(Recipe recipe, int quantity)
     {
         var settings = GatherBuddy.RecipeBrowserSettings.Get(recipe.RowId);
@@ -204,6 +239,7 @@ public partial class VulcanWindow
                 MacroMode = settings.MacroMode,
                 SolverOverride = settings.SolverOverride,
                 MaximizeQualityAtCostOfTime = settings.MaximizeQualityAtCostOfTime,
+                DonatelloImprovementQuietSecondsOverride = settings.DonatelloImprovementQuietSecondsOverride,
                 SpecialistActionOverride = settings.SpecialistActionOverride,
                 IngredientPreferences = new Dictionary<uint, int>(settings.IngredientPreferences),
             };

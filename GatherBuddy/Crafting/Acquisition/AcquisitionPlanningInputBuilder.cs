@@ -37,6 +37,7 @@ public static unsafe class AcquisitionPlanningInputBuilder
         ArgumentNullException.ThrowIfNull(plan);
 
         var currentWorldId = Dalamud.Objects.LocalPlayer?.CurrentWorld.RowId ?? 0u;
+        var currentTerritoryId = (uint)Dalamud.ClientState.TerritoryType;
         var settings = plan.PlanningSnapshot.GetAcquisitionSettings();
         var boundaryPlan = plan.CreateAcquisitionBoundaryPlan(IsCraftPrecraftUsable);
         var dependencies = BuildDependencies(plan, boundaryPlan);
@@ -52,6 +53,7 @@ public static unsafe class AcquisitionPlanningInputBuilder
                 {
                     Dependencies = dependencies,
                     CurrentWorldId = currentWorldId,
+                    CurrentTerritoryId = currentTerritoryId,
                     GilBalance = ReadGilBalance(),
                     CurrencyBalances = new Dictionary<uint, long>(),
                 },
@@ -69,14 +71,111 @@ public static unsafe class AcquisitionPlanningInputBuilder
                 {
                     Dependencies = dependencies,
                     CurrentWorldId = currentWorldId,
+                    CurrentTerritoryId = currentTerritoryId,
+                },
+                ErrorReason = "Current world is unavailable; automatic acquisition cannot be planned safely.",
+            };
+        }
+
+        return BuildAcquisitionInput(dependencies, settings, currentWorldId, currentTerritoryId);
+    }
+
+    /// <summary>
+    /// Builds a live acquisition snapshot for persisted marketplace targets.
+    /// These targets have no craft/gather path by design; the planner chooses
+    /// among currently available vendor and market sources.
+    /// </summary>
+    public static BuildResult BuildMarketplaceTargets(
+        IReadOnlyList<(uint ItemId, string ItemName, uint IconId, int TargetQuantity)> targets,
+        AcquisitionPlanningSettings settings)
+    {
+        ArgumentNullException.ThrowIfNull(targets);
+        ArgumentNullException.ThrowIfNull(settings);
+
+        var dependencies = new List<AcquisitionDependency>(targets.Count);
+        foreach (var target in targets)
+        {
+            if (target.ItemId == 0 || target.TargetQuantity <= 0)
+                continue;
+
+            var (inventoryNq, inventoryHq) = CraftingInventoryCounter.GetInventorySplitCounts(target.ItemId);
+            var inventory = settings.PreferHQ
+                ? Math.Max(0, inventoryHq)
+                : Math.Max(0, inventoryNq + inventoryHq);
+            var missing = Math.Max(0, target.TargetQuantity - inventory);
+            if (missing == 0)
+                continue;
+
+            dependencies.Add(new AcquisitionDependency
+            {
+                ItemId = target.ItemId,
+                ItemName = string.IsNullOrWhiteSpace(target.ItemName)
+                    ? ResolveItemName(target.ItemId)
+                    : target.ItemName,
+                RequiredQuantity = missing,
+                RequiredHqQuantity = settings.PreferHQ ? missing : 0,
+                RequiredNqQuantity = 0,
+                IsIntermediateDemand = true,
+                SelectedPath = null,
+            });
+        }
+
+        return BuildAcquisitionInput(
+            dependencies,
+            settings,
+            Dalamud.Objects.LocalPlayer?.CurrentWorld.RowId ?? 0u,
+            (uint)Dalamud.ClientState.TerritoryType);
+    }
+
+    private static BuildResult BuildAcquisitionInput(
+        IReadOnlyList<AcquisitionDependency> dependencies,
+        AcquisitionPlanningSettings settings,
+        uint currentWorldId,
+        uint currentTerritoryId)
+    {
+        var requiresAcquisition = dependencies.Any(dependency => dependency.RequiredQuantity > 0);
+        if (!requiresAcquisition)
+        {
+            return new BuildResult
+            {
+                Input = new AcquisitionPlanningInput
+                {
+                    Dependencies = dependencies,
+                    CurrentWorldId = currentWorldId,
+                    CurrentTerritoryId = currentTerritoryId,
+                    GilBalance = ReadGilBalance(),
+                    CurrencyBalances = new Dictionary<uint, long>(),
+                },
+            };
+        }
+
+        if (currentWorldId == 0)
+        {
+            return new BuildResult
+            {
+                Input = new AcquisitionPlanningInput
+                {
+                    Dependencies = dependencies,
+                    CurrentWorldId = currentWorldId,
+                    CurrentTerritoryId = currentTerritoryId,
                 },
                 ErrorReason = "Current world is unavailable; automatic acquisition cannot be planned safely.",
             };
         }
 
         VendorShopResolver.InitializeAsync();
-        var vendorOffers = BuildVendorOffers(dependencies);
+        var vendorOffers = BuildVendorOffers(dependencies, currentTerritoryId);
         var market = BuildMarketListings(dependencies, settings, currentWorldId, out var loadingReason);
+        if (VendorShopResolver.IsInitialized
+            && !VendorShopResolver.TryGetCurrentGrandCompanyId(out _)
+            && dependencies.Any(dependency => VendorShopResolver.GcShopEntries.Any(entry =>
+                entry.ItemId == dependency.ItemId
+                || entry.ReceivedItems.Any(output => output is not null && output.ItemId == dependency.ItemId))))
+        {
+            loadingReason = string.IsNullOrWhiteSpace(loadingReason)
+                ? "Loading current Grand Company state for seal purchases."
+                : loadingReason;
+        }
         if ((!VendorShopResolver.IsInitialized || VendorShopResolver.IsInitializing)
             && string.IsNullOrWhiteSpace(loadingReason))
         {
@@ -100,6 +199,7 @@ public static unsafe class AcquisitionPlanningInputBuilder
             CurrencyBalances = balances,
             GilBalance = gilBalance,
             CurrentWorldId = currentWorldId,
+            CurrentTerritoryId = currentTerritoryId,
         };
 
         return new BuildResult
@@ -480,7 +580,8 @@ public static unsafe class AcquisitionPlanningInputBuilder
             .First();
 
     private static List<AcquisitionVendorOffer> BuildVendorOffers(
-        IReadOnlyList<AcquisitionDependency> dependencies)
+        IReadOnlyList<AcquisitionDependency> dependencies,
+        uint currentTerritoryId)
     {
         if (!VendorShopResolver.IsInitialized || VendorShopResolver.IsInitializing)
             return new List<AcquisitionVendorOffer>();
@@ -497,6 +598,11 @@ public static unsafe class AcquisitionPlanningInputBuilder
 
         foreach (var entry in entries)
         {
+            if (entry.ShopType == VendorShopType.GrandCompanySeals
+                && VendorShopResolver.TryGetCurrentGrandCompanyId(out var currentGrandCompanyId)
+                && !VendorShopResolver.MatchesGrandCompany(entry, currentGrandCompanyId))
+                continue;
+
             foreach (var vendor in entry.Npcs)
             {
                 var offerId = $"{entry.TransactionSignature}:{VendorPreferenceHelper.GetRouteKey(vendor)}";
@@ -541,7 +647,7 @@ public static unsafe class AcquisitionPlanningInputBuilder
                     });
                     continue;
                 }
-                var location = VendorNpcLocationCache.TryGetFirstLocation(vendor.NpcId);
+                var location = VendorNpcLocationCache.TryGetPreferredLocation(vendor.NpcId, currentTerritoryId);
                 if (location == null)
                 {
                     result.Add(new AcquisitionVendorOffer
@@ -589,6 +695,7 @@ public static unsafe class AcquisitionPlanningInputBuilder
                     OfferId = offerId,
                     VendorName = vendor.Name,
                     Location = $"{location.NpcName} ({location.TerritoryId})",
+                    VendorTerritoryId = location.TerritoryId,
                     ReceiveQuantity = checked((int)entry.ReceivedQuantity),
                     Outputs = entry.ReceivedItems
                         .Select(output => new AcquisitionVendorOutput
@@ -628,18 +735,22 @@ public static unsafe class AcquisitionPlanningInputBuilder
         var result = new List<AcquisitionMarketListing>();
         foreach (var dependency in dependencies)
         {
+            if (service.IsKnownUnmarketable(dependency.ItemId))
+                continue;
+
             var cached = service.GetCached(dependency.ItemId, scope);
             var fetchedAt = service.GetFetchTime(dependency.ItemId, scope);
             if (cached == null)
             {
+                if (service.HasError(dependency.ItemId, scope))
+                    continue;
                 service.QueueLookup(dependency.ItemId, dependency.ItemName, ResolveItemIcon(dependency.ItemId), scope);
-                loadingReason = service.HasError(dependency.ItemId, scope)
-                    ? $"Retrying Universalis data for {dependency.ItemName}."
-                    : $"Loading Universalis data for {dependency.ItemName}.";
+                loadingReason = $"Loading Universalis data for {dependency.ItemName}.";
                 continue;
             }
 
-            if (DateTime.UtcNow - fetchedAt > UniversalisCacheTtl)
+            if (DateTime.UtcNow - fetchedAt > UniversalisCacheTtl
+                && !service.HasError(dependency.ItemId, scope))
             {
                 service.QueueLookup(dependency.ItemId, dependency.ItemName, ResolveItemIcon(dependency.ItemId), scope);
                 loadingReason = $"Refreshing Universalis data for {dependency.ItemName}.";

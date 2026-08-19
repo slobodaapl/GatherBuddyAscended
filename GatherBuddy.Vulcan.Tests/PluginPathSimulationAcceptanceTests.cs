@@ -15,12 +15,64 @@ internal static class PluginPathSimulationAcceptanceTests
     public static async Task Run(Action<bool, string> require)
     {
         ValidateNormalConditionDistribution(require);
+        ValidateManualSynthesisTakeoverPluginPath(require);
+        ValidateGabrielCatalog(require);
+        await ValidateGabrielScriptedRecovery(require);
+        ValidateGabrielPluginPathSimulator(require);
+        ValidateZeroStepExpediencePreservation(require);
+        await ValidateImprovementQuiescenceLifecycle(require);
+        await ValidateImprovementQuiescenceSupersession(require);
         await ValidateNormalRerollAndReactiveReplan(require);
+        await ValidateProtectedRaphaelConditionTakeover(require);
         await ValidatePoorPlannerReroll(require);
         ValidateAmbiguousFailedManualActionStops(require);
         await ValidateManualCarefulObservationRecovery(require);
         await ValidateScriptedConditionAndManualActionRecovery(require);
         await ValidateImprovedRivetsMaterialMiracleRecovery(require);
+    }
+
+    private static void ValidateManualSynthesisTakeoverPluginPath(Action<bool, string> require)
+    {
+        var options = CraftingContextResolver.ResolveDonatelloOptions(new RecipeCraftSettings
+        {
+            MaximizeQualityAtCostOfTime = true,
+            DonatelloImprovementQuietSecondsOverride = 9,
+            SpecialistActionOverride = SpecialistActionOverrideMode.Disallow,
+        });
+        var craft = Craft() with
+        {
+            InitialQuality = 123,
+            DonatelloOptions = options,
+        };
+        var observedRoot = GameStateBuilder.BuildInitialStepState(craft, craft.InitialQuality);
+        require(CraftingGameInterop.IsInitialManualSynthesisRoot(craft, observedRoot)
+                && craft.DonatelloOptions is
+                {
+                    MaximizeQualityAtCostOfTime: true,
+                    ImprovementQuietPeriodMillis: 9_000,
+                    AllowSpecialistActions: false,
+                },
+            "manual synthesis takeover must carry the exact recipe's resolved Donatello overrides into the observed initial root");
+
+        var result = CraftingPluginPathSimulator.Run(
+            craft,
+            observedRoot,
+            new SeededRaphaelDefinition(new CachedRaphaelSolution
+            {
+                ActionIds = [(uint)VulcanSkill.BasicSynthesis],
+            }),
+            liveRecoveryMode: null,
+            new PluginPathSimulationScenario(GameSeed: 31));
+        require(result is
+                {
+                    SynthesisCompleted: true,
+                    SolverTerminalFailure: false,
+                    FailureReason: null,
+                    Trace.Count: 1,
+                }
+                && result.Trace[0].ExecutedAction == VulcanSkill.BasicSynthesis
+                && result.Trace[0].State.Quality == 123,
+            "manual takeover must traverse active-solver selection, recommendation, execution, and completion without losing observed starting quality");
     }
 
     internal static async Task RunFiveStarDistribution(
@@ -33,14 +85,14 @@ internal static class PluginPathSimulationAcceptanceTests
         var config = global::GatherBuddy.GatherBuddy.Config.RaphaelSolverConfig;
         var previousCacheMemory = config.DonatelloCacheMemoryMiB;
         config.DonatelloCacheMemoryMiB = 64;
-        var raphaelResults = new List<FiveStarRunResult>(seedCount);
         var donatelloResults = new List<FiveStarRunResult>(seedCount);
+        var gabrielResults = new List<FiveStarRunResult>(seedCount);
         try
         {
             for (var seed = seedStart; seed < seedStart + seedCount; ++seed)
             {
-                raphaelResults.Add(await RunFiveStarSeed(seed, useDonatello: false, require));
-                donatelloResults.Add(await RunFiveStarSeed(seed, useDonatello: true, require));
+                donatelloResults.Add(await RunFiveStarSeed(seed, FiveStarSolver.Donatello, require));
+                gabrielResults.Add(await RunFiveStarSeed(seed, FiveStarSolver.Gabriel, require));
             }
         }
         finally
@@ -50,8 +102,42 @@ internal static class PluginPathSimulationAcceptanceTests
             config.DonatelloCacheMemoryMiB = previousCacheMemory;
         }
 
-        ReportFiveStarResults("Raphael", seedStart, seedCount, raphaelResults);
         ReportFiveStarResults("Donatello", seedStart, seedCount, donatelloResults);
+        ReportFiveStarResults("Gabriel", seedStart, seedCount, gabrielResults);
+    }
+
+    internal static async Task RunGabrielDistribution(
+        int seedStart,
+        int seedCount,
+        Action<bool, string> require)
+    {
+        await Task.Yield();
+        require(seedStart > 0, "Gabriel plugin-path simulation requires a positive starting seed");
+        require(seedCount > 0, "Gabriel plugin-path simulation requires at least one seed");
+        var craft = FiveStarCraft();
+        var estimate = CraftingPluginPathSimulator.EstimateGabriel(
+            craft,
+            GameStateBuilder.BuildInitialStepState(craft),
+            seedCount,
+            (ulong)(uint)seedStart);
+        require(estimate.Samples == seedCount
+                && estimate.Successes <= estimate.SynthesisCompletions
+                && estimate.SynthesisCompletions <= estimate.Samples
+                && estimate.SolverTerminalFailures <= estimate.Samples
+                && estimate.MinFinalQuality >= 0
+                && estimate.MinFinalQuality <= estimate.AverageFinalQuality
+                && estimate.AverageFinalQuality <= estimate.MaxFinalQuality
+                && estimate.MaxFinalQuality <= craft.CraftQualityMax,
+            "Gabriel aggregate must come from internally consistent faithful plugin-path outcomes");
+        Console.WriteLine(
+            $"five-star Gabriel plugin distribution seed={seedStart} samples={estimate.Samples} "
+            + $"successful={estimate.Successes} synthesesCompleted={estimate.SynthesisCompletions} "
+            + $"durabilityFailures={estimate.DurabilityFailures} terminalFailures={estimate.SolverTerminalFailures} "
+            + $"finalQuality={estimate.MinFinalQuality}/{estimate.AverageFinalQuality:F1}/{estimate.MaxFinalQuality} "
+            + $"probability={estimate.Probability:P2} "
+            + $"elapsedMs={estimate.ElapsedMillis}");
+        foreach (var (reason, count) in estimate.TerminalFailureReasons.OrderByDescending(entry => entry.Value))
+            Console.WriteLine($"five-star Gabriel terminalFailure count={count} reason={reason}");
     }
 
     private static void ReportFiveStarResults(
@@ -75,7 +161,7 @@ internal static class PluginPathSimulationAcceptanceTests
 
     private static async Task<FiveStarRunResult> RunFiveStarSeed(
         int seed,
-        bool useDonatello,
+        FiveStarSolver solver,
         Action<bool, string> require)
     {
         var craft = FiveStarCraft();
@@ -85,16 +171,22 @@ internal static class PluginPathSimulationAcceptanceTests
             ActionIds = FiveStarRaphaelSeed.Select(action => (uint)action).ToList(),
         };
         CraftingProcessor.Setup();
-        CraftingProcessor.RegisterSolver(useDonatello
-            ? new SeededDonatelloDefinition(solution)
-            : new SeededRaphaelDefinition(solution));
+        CraftingProcessor.RegisterSolver(solver switch
+        {
+            FiveStarSolver.Donatello => new SeededDonatelloDefinition(solution),
+            FiveStarSolver.Gabriel => new SeededGabrielDefinition((ulong)(uint)seed),
+            _ => throw new ArgumentOutOfRangeException(nameof(solver)),
+        });
         CraftingProcessor.OnCraftStarted(craft, root, craft.RecipeId, isTrial: false);
-        require(useDonatello
-                ? CraftingProcessor.ActiveSolver is DonatelloSolver
-                : CraftingProcessor.ActiveSolver is RaphaelMacroSolver,
-            $"five-star simulation must select the real {(useDonatello ? "Donatello" : "Raphael")} runtime solver");
+        require(solver switch
+            {
+                FiveStarSolver.Donatello => CraftingProcessor.ActiveSolver is DonatelloSolver,
+                FiveStarSolver.Gabriel => CraftingProcessor.ActiveSolver is GabrielSolver,
+                _ => false,
+            },
+            $"five-star simulation must select the real {solver} runtime solver");
         var activeDonatello = CraftingProcessor.ActiveSolver as DonatelloSolver;
-        var solverName = useDonatello ? "Donatello" : "Raphael";
+        var activeGabriel = CraftingProcessor.ActiveSolver as GabrielSolver;
         var game = new SeededGame(
             craft,
             root,
@@ -107,13 +199,12 @@ internal static class PluginPathSimulationAcceptanceTests
             for (var actionNumber = 1; actionNumber <= 100; ++actionNumber)
             {
                 var recommendation = await AwaitRecommendation(
-                    useDonatello ? TimeSpan.FromMinutes(6) : TimeSpan.FromSeconds(10));
+                    solver == FiveStarSolver.Donatello
+                        ? TimeSpan.FromMinutes(6)
+                        : TimeSpan.FromSeconds(30));
                 if (recommendation.IsTerminalFailure || recommendation.Action == VulcanSkill.None)
                 {
                     terminalFailure = true;
-                    Console.WriteLine(
-                        $"five-star solver={solverName} seed={seed} action={actionNumber} terminal={recommendation.IsTerminalFailure} "
-                        + $"comment={recommendation.Comment} state={current}");
                     break;
                 }
 
@@ -121,14 +212,7 @@ internal static class PluginPathSimulationAcceptanceTests
                     $"five-star seed {seed}: plugin recommendation {recommendation.Action} must be legal at {current}");
                 var executed = game.SelectAction(recommendation.Action, out var manual);
                 require(!manual, $"five-star seed {seed}: random distribution run must not inject manual actions");
-                var previousCondition = current.Condition;
                 var actual = game.Execute(executed, require);
-                Console.WriteLine(
-                    $"five-star solver={solverName} seed={seed} action={actionNumber} skill={executed} "
-                    + $"condition={previousCondition}->{actual.Condition} progress={actual.Progress}/{craft.CraftProgress} "
-                    + $"quality={actual.Quality}/{craft.CraftQualityMax} durability={actual.Durability}/{craft.CraftDurability} "
-                    + $"cp={actual.RemainingCP}/{craft.StatCP} source={recommendation.Comment}");
-                Console.Out.Flush();
 
                 if (actual.Progress >= craft.CraftProgress || actual.Durability <= 0)
                 {
@@ -143,11 +227,9 @@ internal static class PluginPathSimulationAcceptanceTests
 
             var completed = SolverUtils.Status(craft, current) == SolverUtils.CraftStatus.Complete;
             var successful = completed && current.Quality >= craft.CraftRequiredQuality;
-            var replans = activeDonatello?.NativeReplanCount ?? 0;
-            Console.WriteLine(
-                $"five-star solver={solverName} seed={seed} result={(successful ? "success" : completed ? "quality-failure" : "failed")} "
-                + $"quality={current.Quality}/{craft.CraftQualityMax} steps={game.Trace.Count} "
-                + $"nativeReplans={replans} terminalFailure={terminalFailure}");
+            var replans = activeDonatello?.NativeReplanCount
+                ?? activeGabriel?.NativeRecommendationCount
+                ?? 0;
             return new(completed, successful, current.Quality, replans, terminalFailure);
         }
         finally
@@ -156,22 +238,22 @@ internal static class PluginPathSimulationAcceptanceTests
         }
     }
 
+    private enum FiveStarSolver
+    {
+        Donatello,
+        Gabriel,
+    }
+
     private static CraftState FiveStarCraft()
     {
-        const ConditionFlags conditions = ConditionFlags.Normal
-            | ConditionFlags.Good
-            | ConditionFlags.Centered
-            | ConditionFlags.Sturdy
-            | ConditionFlags.Pliant
-            | ConditionFlags.Malleable
-            | ConditionFlags.Primed
-            | ConditionFlags.Robust;
+        if (!ExpertConditionProfileCatalog.TryGet(776, out var profile))
+            throw new InvalidOperationException("RLT 776 Expert condition profile is missing");
         return new CraftState
         {
             RecipeId = 38247,
             ItemId = 52642,
-            StatCraftsmanship = 5707,
-            StatControl = 5110,
+            StatCraftsmanship = 5792,
+            StatControl = 5169,
             StatCP = 700,
             StatLevel = 100,
             UnlockedManipulation = true,
@@ -181,6 +263,7 @@ internal static class PluginPathSimulationAcceptanceTests
             CraftHQ = false,
             CraftExpert = true,
             CraftStars = 5,
+            RecipeLevelTableId = 776,
             CraftLevel = 100,
             CraftDurability = 60,
             CraftProgress = 11_250,
@@ -193,9 +276,9 @@ internal static class PluginPathSimulationAcceptanceTests
             CraftProgressModifier = 100,
             CraftQualityDivider = 180,
             CraftQualityModifier = 100,
-            ConditionFlags = conditions,
-            // Index 0 is the Normal fallback. Non-Normal mass totals 0.80, leaving Normal at 0.20.
-            CraftConditionProbabilities = [1f, 0.10f, 0f, 0f, 0.15f, 0.10f, 0.15f, 0.10f, 0.10f, 0f, 0.10f],
+            ConditionFlags = profile.Conditions,
+            CraftConditionProbabilities = profile.ToSimulatorProbabilities(),
+            CraftConditionProfileCataloged = true,
             DonatelloOptions = new DonatelloExecutionOptions(
                 DonatelloSolveObjective.MaximizeQuality,
                 MaximizeQualityAtCostOfTime: true,
@@ -289,6 +372,605 @@ internal static class PluginPathSimulationAcceptanceTests
                 && RollCondition(Condition.GoodOmen, expertProbabilities, 0.5f, craftExpert: true) == Condition.Good
                 && RollCondition(Condition.Robust, expertProbabilities, 0.5f, craftExpert: true) == Condition.Sturdy,
             "seeded expert simulation must preserve Good random transitions and fixed Good Omen/Robust transitions");
+    }
+
+    private static async Task ValidateImprovementQuiescenceLifecycle(Action<bool, string> require)
+    {
+        const int testQuietMillis = 50;
+        var craft = FiveStarCraft() with
+        {
+            DonatelloOptions = new DonatelloExecutionOptions(
+                DonatelloSolveObjective.MaximizeQuality,
+                MinimizeSteps: true,
+                MaximizeQualityAtCostOfTime: true,
+                AllowSpecialistActions: true,
+                ImprovementQuietPeriodMillis: testQuietMillis),
+        };
+        var root = GameStateBuilder.BuildInitialStepState(craft) with { Condition = Condition.Good };
+        var solution = new CachedRaphaelSolution
+        {
+            ActionIds = FiveStarRaphaelSeed.Select(action => (uint)action).ToList(),
+        };
+
+        CraftingProcessor.Setup();
+        try
+        {
+            CraftingProcessor.RegisterSolver(new SeededDonatelloDefinition(solution));
+            CraftingProcessor.OnCraftStarted(craft, root, craft.RecipeId, isTrial: false);
+            var solver = CraftingProcessor.ActiveSolver as DonatelloSolver;
+            require(solver != null,
+                "improvement-quiescence simulation must select the real active Donatello solver");
+
+            var elapsed = Stopwatch.StartNew();
+            while (solver!.NativeReplanCount == 0 && elapsed.Elapsed < TimeSpan.FromSeconds(1))
+                await Task.Delay(1);
+            require(solver.NativeReplanCount == 1,
+                "the improvement-quiescence path must start exactly one native search frontier");
+
+            await Task.Delay(10);
+            CraftingProcessor.Update();
+            require(CraftingProcessor.NextRecommendation.Action == VulcanSkill.None
+                    && !CraftingProcessor.NextRecommendation.IsTerminalFailure,
+                "the plugin must not issue an action while the improvement-quiescence search remains active");
+
+            var recommendation = await AwaitRecommendation(TimeSpan.FromSeconds(10));
+            require(elapsed.ElapsedMilliseconds >= testQuietMillis
+                    && solver.NativeReplanCount == 1,
+                "the plugin must retain one native frontier through the configured quiet window");
+            require(!recommendation.IsTerminalFailure
+                    && recommendation.Action != VulcanSkill.None
+                    && Simulator.CanUseAction(craft, root, recommendation.Action),
+                "the completed improvement-quiescence search must emit a legal recommendation");
+
+            var game = new SeededGame(craft, root, actionSeed: 17, conditionSeed: 19);
+            var actual = game.Execute(recommendation.Action, require);
+            ReconcileRecommended(craft, root, recommendation.Action, actual, require);
+            CraftingProcessor.OnCraftFinished(craft, actual, craft.RecipeId, cancelled: true);
+        }
+        finally
+        {
+            CraftingProcessor.Dispose();
+        }
+    }
+
+    private static async Task ValidateImprovementQuiescenceSupersession(Action<bool, string> require)
+    {
+        var craft = FiveStarCraft() with
+        {
+            DonatelloOptions = new DonatelloExecutionOptions(
+                DonatelloSolveObjective.MaximizeQuality,
+                MinimizeSteps: true,
+                MaximizeQualityAtCostOfTime: true,
+                AllowSpecialistActions: true,
+                ImprovementQuietPeriodMillis: DonatelloSolver.DefaultImprovementQuietPeriodMillis),
+        };
+        var root = GameStateBuilder.BuildInitialStepState(craft) with { Condition = Condition.Good };
+        var solution = new CachedRaphaelSolution
+        {
+            ActionIds = FiveStarRaphaelSeed.Select(action => (uint)action).ToList(),
+        };
+
+        CraftingProcessor.Setup();
+        try
+        {
+            CraftingProcessor.RegisterSolver(new SeededDonatelloDefinition(solution));
+            CraftingProcessor.OnCraftStarted(craft, root, craft.RecipeId, isTrial: false);
+            var solver = CraftingProcessor.ActiveSolver as DonatelloSolver;
+            require(solver != null,
+                "improvement-quiescence supersession must select the real active Donatello solver");
+            var startWait = Stopwatch.StartNew();
+            while (solver!.NativeReplanCount == 0 && startWait.Elapsed < TimeSpan.FromSeconds(1))
+                await Task.Delay(1);
+            require(solver.NativeReplanCount == 1,
+                "improvement-quiescence supersession must begin with one native frontier");
+
+            var game = new SeededGame(craft, root, actionSeed: 23, conditionSeed: 29);
+            var manuallyAdvanced = game.Execute(VulcanSkill.Observe, require);
+            var supersession = Stopwatch.StartNew();
+            CraftingProcessor.OnCraftAdvanced(craft, manuallyAdvanced, craft.RecipeId);
+            while (solver.NativeReplanCount < 2 && supersession.Elapsed < TimeSpan.FromSeconds(1))
+            {
+                CraftingProcessor.Update();
+                await Task.Delay(1);
+            }
+
+            require(solver.NativeReplanCount == 2
+                    && supersession.Elapsed < TimeSpan.FromSeconds(1),
+                "a newer observed root must interrupt the old frontier and promptly start one replacement search");
+            require(CraftingProcessor.NextRecommendation.Action == VulcanSkill.None,
+                "superseding a pending frontier must never expose its stale recommendation");
+        }
+        finally
+        {
+            CraftingProcessor.Dispose();
+        }
+    }
+
+    private static void ValidateGabrielCatalog(Action<bool, string> require)
+    {
+        var profiles = ExpertConditionProfileCatalog.All;
+        require(profiles.Count == 44
+                && profiles.Select(profile => profile.RecipeLevelTableId).Distinct().Count() == 44,
+            "Gabriel's embedded catalog must cover all 44 current Expert RecipeLevelTable rows exactly once");
+        require(profiles.Select(profile => string.Join(",", profile.BaseProbabilityBasisPoints)).Distinct().Count() == 26,
+            "the 44 Expert RecipeLevelTable rows must retain their 26 distinct probability vectors");
+        require(profiles.Count(profile => profile.Evidence == ExpertConditionProfileEvidence.ProvisionalPublic) == 43
+                && profiles.Count(profile => profile.Evidence == ExpertConditionProfileEvidence.EmpiricallyInferred) == 1
+                && profiles.All(profile => !string.IsNullOrWhiteSpace(profile.Provenance)),
+            "every cataloged Expert vector must retain its evidence class and source provenance");
+
+        require(ExpertConditionProfileCatalog.TryGet(759, out var oizysProfile)
+                && oizysProfile.BaseProbabilityBasisPoints.SequenceEqual(
+                    new ushort[] { 2_000, 1_200, 0, 0, 1_500, 800, 1_500, 1_000, 1_000, 0, 1_000 }),
+            "RLT 759 must preserve the public Oizys EX+ III profile");
+        require(ExpertConditionProfileCatalog.TryGet(773, out var auxesiaProfile)
+                && auxesiaProfile.BaseProbabilityBasisPoints.SequenceEqual(
+                    new ushort[] { 5_100, 1_200, 0, 0, 800, 300, 700, 500, 500, 0, 900 }),
+            "RLT 773 must preserve the public Auxesia Mastery I profile");
+        require(ExpertConditionProfileCatalog.TryGet(776, out var profile),
+            "Gabriel requires a machine-readable RLT 776 Expert condition profile");
+        require(profile.BaseProbabilityBasisPoints.Count == 11
+                && profile.BaseProbabilityBasisPoints.Sum(value => value) == 10_000
+                && profile.BaseProbabilityBasisPoints.SequenceEqual(
+                    new ushort[] { 2_000, 1_000, 0, 0, 1_500, 1_000, 1_500, 1_000, 1_000, 0, 1_000 }),
+            "RLT 776 catalog data must preserve the accepted exact basis-point vector");
+        require(profile.Evidence == ExpertConditionProfileEvidence.EmpiricallyInferred
+                && !string.IsNullOrWhiteSpace(profile.Provenance),
+            "cataloged Expert vectors must carry evidence class and provenance");
+        require(oizysProfile.Conditions == auxesiaProfile.Conditions
+                && auxesiaProfile.Conditions == profile.Conditions,
+            "same-flags Expert controls must retain distinct RLT-keyed probability vectors");
+        var oizysRuntimeProbabilities = GameStateBuilder.GetConditionProbabilities(
+            oizysProfile.Conditions,
+            statLevel: 100,
+            craftExpert: true,
+            recipeLevelTableId: 759);
+        require(oizysRuntimeProbabilities.Length == oizysProfile.BaseProbabilityBasisPoints.Count
+                && oizysRuntimeProbabilities
+                    .Select((probability, index) => Math.Abs(
+                        probability - oizysProfile.BaseProbabilityBasisPoints[index] / 10_000f))
+                    .All(delta => delta < 0.000001f),
+            "the plugin game-state builder must supply the exact cataloged non-776 vector to simulation");
+        require(!ExpertConditionProfileCatalog.TryGet(ushort.MaxValue, out _),
+            "unknown RecipeLevelTable rows must not receive a fallback condition vector");
+
+        var craft = FiveStarCraft();
+        require(GabrielPolicyCatalog.TryResolve(craft, out var policy, out _)
+                && policy.Profile == GabrielPolicyProfile.ActorV1,
+            "a cataloged Expert recipe must resolve the Gabriel actor profile");
+        require(GabrielPolicyCatalog.TryResolve(craft with { RecipeLevelTableId = 759 }, out _, out _),
+            "a public catalog profile must make its Expert RecipeLevelTable Gabriel-eligible");
+        require(GabrielAssessmentService.FormatReadySummary(0, 0.037) ==
+                "Estimated 0.00-3.70% chance to reach full quality."
+                && GabrielAssessmentService.FormatReadyDetails(0, 100, 171_109) ==
+                "0/100 full quality completions, 171.1s total time spent",
+            "Gabriel's user-facing estimate must show its interval and keep diagnostics concise");
+        using (var request = System.Text.Json.JsonDocument.Parse(
+                   DonatelloNative.SerializeGabrielRequest(
+                       craft with { GabrielWorkerThreads = 1 },
+                       GameStateBuilder.BuildInitialStepState(craft),
+                       decisions: 0,
+                       seed: 1,
+                       operation: 0,
+                       samples: 0,
+                       policy,
+                       profile)))
+        {
+            var nativeRoot = request.RootElement.GetProperty("root");
+            require(request.RootElement.GetProperty("maxSteps").GetInt32() == 55
+                    && request.RootElement.GetProperty("maxDecisions").GetInt32() == 64
+                    && request.RootElement.GetProperty("workerThreads").GetInt32() == 1
+                    && nativeRoot.GetProperty("carefulObservationCharges").GetInt32() == 3
+                    && nativeRoot.GetProperty("quickInnovationAvailable").GetBoolean()
+                    && nativeRoot.GetProperty("crafterDelineations").GetInt32() == 2
+                    && nativeRoot.GetProperty("heartAndSoulAvailable").GetBoolean(),
+                "Gabriel's horizon, worker count, and faithful live specialist resources must reach the native request");
+        }
+        require(!DonatelloNative.IsValidGabrielRecommendation(VulcanSkill.FinalAppraisal)
+                && !DonatelloNative.IsValidGabrielRecommendation(VulcanSkill.CarefulObservation)
+                && !DonatelloNative.IsValidGabrielRecommendation(VulcanSkill.QuickInnovation)
+                && !DonatelloNative.IsValidGabrielRecommendation(VulcanSkill.StellarSteadyHand)
+                && DonatelloNative.IsValidGabrielRecommendation(VulcanSkill.HeartAndSoul),
+            "the managed Gabriel boundary must reject all forbidden actions without rejecting Heart and Soul");
+        require(DonatelloNative.ResolveGabrielWorkerThreads(0) == 1
+                && DonatelloNative.ResolveGabrielWorkerThreads(int.MaxValue)
+                    == Math.Min(Math.Max(1, Environment.ProcessorCount), 256),
+            "Gabriel worker configuration must remain within the host and native limits");
+        using (var request = System.Text.Json.JsonDocument.Parse(
+                   DonatelloNative.SerializeGabrielRequest(
+                       craft,
+                       GameStateBuilder.BuildInitialStepState(craft) with { Index = 56 },
+                       decisions: 55,
+                       seed: 1,
+                       operation: 0,
+                       samples: 0,
+                       policy,
+                       profile)))
+        {
+            var maxSteps = request.RootElement.GetProperty("maxSteps").GetInt32();
+            var maxDecisions = request.RootElement.GetProperty("maxDecisions").GetInt32();
+            require(maxSteps > 64 && maxDecisions >= maxSteps,
+                "Gabriel's expanded late-craft decision horizon must never be shorter than its step horizon");
+        }
+        using (var request = System.Text.Json.JsonDocument.Parse(
+                   DonatelloNative.SerializeGabrielRequest(
+                       craft,
+                       GameStateBuilder.BuildInitialStepState(craft) with { Index = 300 },
+                       decisions: 300,
+                       seed: 1,
+                       operation: 0,
+                       samples: 0,
+                       policy,
+                       profile)))
+        {
+            require(request.RootElement.GetProperty("maxSteps").GetInt32() == byte.MaxValue
+                    && request.RootElement.GetProperty("maxDecisions").GetInt32() == byte.MaxValue
+                    && request.RootElement.GetProperty("root").GetProperty("step").GetInt32() == byte.MaxValue - 1
+                    && request.RootElement.GetProperty("root").GetProperty("decisions").GetInt32() == byte.MaxValue - 1,
+                "Gabriel's mechanics-scaled horizon must expand beyond the prototype horizon from a later live root");
+        }
+        require(GabrielPolicyCatalog.TryResolve(
+                    craft with { CraftConditionProfileCataloged = false },
+                    out _,
+                    out _),
+            "the machine-readable catalog, not a redundant runtime flag, must establish vector availability");
+        var arbitraryEligibleCraft = craft with
+        {
+            StatCraftsmanship = 3000,
+            StatControl = 2800,
+            StatCP = 420,
+            StatLevel = 80,
+            UnlockedManipulation = false,
+            Specialist = false,
+            CrafterDelineations = 0,
+            SplendorCosmic = false,
+            CraftStars = 1,
+            CraftDurability = 35,
+            CraftProgress = 7500,
+            CraftQualityMax = 21000,
+            CraftRequiredQuality = 0,
+        };
+        require(GabrielPolicyCatalog.TryPrepare(
+                    arbitraryEligibleCraft,
+                    out var prepared,
+                    out _,
+                    out _)
+                && prepared == arbitraryEligibleCraft,
+            "Gabriel eligibility must preserve arbitrary stats, recipe geometry, tool, level, and action resources");
+        require(!GabrielPolicyCatalog.TryResolve(
+                    craft with { RecipeLevelTableId = ushort.MaxValue },
+                    out _,
+                    out var missingReason)
+                && missingReason.Contains("No cataloged Expert condition vector", StringComparison.Ordinal),
+            "Gabriel must refuse only an Expert craft whose condition vector is unavailable");
+        require(!GabrielPolicyCatalog.TryResolve(
+                    craft with { CraftExpert = false },
+                    out _,
+                    out _),
+            "Gabriel must remain Expert-only");
+        using (var processor = new CraftingProcessorSession(emitEvents: false, emitDiagnostics: false))
+        {
+            processor.Setup();
+            processor.RegisterSolver(new GabrielSolverDefinition());
+            processor.OnCraftStarted(
+                arbitraryEligibleCraft,
+                GameStateBuilder.BuildInitialStepState(arbitraryEligibleCraft),
+                arbitraryEligibleCraft.RecipeId,
+                isTrial: false,
+                requiredSolverDefinitionType: typeof(GabrielSolverDefinition));
+            require(processor.IsActive && processor.ActiveSolver is GabrielSolver,
+                "per-item Gabriel must activate for any Expert craft with a cataloged vector");
+        }
+        require(CraftingContextResolver.ResolveGlobalSolverMode(VulcanSolverMode.Gabriel)
+                == VulcanSolverMode.Donatello,
+            "Gabriel must never become a global solver selection");
+        var executionContext = new CraftingExecutionContext(
+            null,
+            new CraftingQualityPolicy(1, CraftingQualityOverrideMode.None, false, []),
+            VulcanSolverMode.Gabriel,
+            ForceProgressOnlyUnlockCraft: false,
+            HasCraftedBefore: true,
+            UseQuickSynthesis: false,
+            SelectedMacroId: null,
+            DonatelloOptions: null);
+        require(!CraftingContextResolver.UsesRaphaelSolver(executionContext)
+                && CraftingContextResolver.UsesSolverAssessment(executionContext),
+            "Gabriel must expose chance assessment without enqueueing or waiting for an unused Raphael incumbent");
+    }
+
+    private static async Task ValidateGabrielScriptedRecovery(Action<bool, string> require)
+    {
+        var craft = FiveStarCraft();
+        var root = GameStateBuilder.BuildInitialStepState(craft) with
+        {
+            CarefulObservationLeft = 0,
+            CrafterDelineationsLeft = 0,
+            HeartAndSoulAvailable = false,
+            QuickInnoLeft = 0,
+            QuickInnoAvailable = false,
+            TrainedPerfectionAvailable = false,
+        };
+        var game = new SeededGame(
+            craft,
+            root,
+            actionSeed: 0xA11CE,
+            conditionSeed: 0xC0FFEE,
+            forcedConditions: new Dictionary<int, Condition>
+            {
+                [1] = Condition.Pliant,
+                [2] = Condition.Centered,
+            },
+            manualActions: new Dictionary<int, VulcanSkill>
+            {
+                [2] = VulcanSkill.BasicSynthesis,
+            });
+
+        CraftingProcessor.Setup();
+        CraftingProcessor.RegisterSolver(new GabrielSolverDefinition());
+        CraftingProcessor.OnCraftStarted(craft, root, craft.RecipeId, isTrial: false);
+        try
+        {
+            require(CraftingProcessor.ActiveSolver is GabrielSolver,
+                "cataloged per-item Gabriel selection must activate the real runtime Gabriel solver");
+            var recommendation = await AwaitRecommendation(TimeSpan.FromSeconds(30));
+            require(recommendation.Action is VulcanSkill.MuscleMemory or VulcanSkill.Reflect
+                    && Simulator.CanUseAction(craft, root, recommendation.Action),
+                "Gabriel's first plugin-path action must be Muscle Memory or Reflect");
+
+            var firstAction = game.SelectAction(recommendation.Action, out var firstManual);
+            require(!firstManual, "the first scripted Gabriel action must remain the plugin recommendation");
+            var actual = game.Execute(firstAction, require);
+            require(actual.Condition == Condition.Pliant,
+                "scripted Gabriel simulation must force the first post-action condition to Pliant");
+            var current = ReconcileRecommended(craft, root, firstAction, actual, require);
+            CraftingProcessor.OnCraftAdvanced(craft, current, craft.RecipeId);
+
+            recommendation = await AwaitRecommendation(TimeSpan.FromSeconds(30));
+            require(recommendation.Action != VulcanSkill.BasicSynthesis
+                    && recommendation.Action != VulcanSkill.HeartAndSoul,
+                "Gabriel must not recommend Heart and Soul on Pliant, and the manual-action fixture must differ from its recommendation");
+            var manualAction = game.SelectAction(recommendation.Action, out var manual);
+            require(manual && manualAction == VulcanSkill.BasicSynthesis,
+                "scripted action ordinal two must replace Gabriel's recommendation with Basic Synthesis");
+            actual = game.Execute(manualAction, require);
+            require(actual.Condition == Condition.Centered,
+                "scripted Gabriel simulation must force the manual action result to Centered");
+            var observed = Observe(current, actual);
+            require(StepStateReconciler.TryReconcileExternalAction(
+                    craft,
+                    current,
+                    observed,
+                    out var reconciled,
+                    out var externalActionObserved,
+                    out var inferredAction)
+                    && externalActionObserved
+                    && inferredAction == VulcanSkill.BasicSynthesis,
+                "manual Basic Synthesis must traverse the real external-action reconciliation boundary");
+            require(CraftingProcessor.TryAdoptLiveCraft(
+                    craft,
+                    reconciled,
+                    VulcanSolverMode.Gabriel,
+                    out var failureReason),
+                $"Gabriel must establish a fresh live policy root after manual intervention: {failureReason}");
+            var recovered = await AwaitRecommendation(TimeSpan.FromSeconds(30));
+            require(CraftingProcessor.ActiveSolver is GabrielSolver { NativeRecommendationCount: >= 1 }
+                    && recovered.Action != VulcanSkill.None
+                    && Simulator.CanUseAction(craft, reconciled, recovered.Action),
+                "Gabriel must issue a legal native recommendation from the reconciled Centered state");
+            require(game.Trace is
+                [
+                    { Manual: false, ResultCondition: Condition.Pliant },
+                    {
+                        Manual: true,
+                        RecommendedAction: not VulcanSkill.BasicSynthesis,
+                        ExecutedAction: VulcanSkill.BasicSynthesis,
+                        ResultCondition: Condition.Centered,
+                    },
+                ],
+                "Gabriel scripted trace must preserve forced conditions and recommended/executed divergence");
+        }
+        finally
+        {
+            CraftingProcessor.Dispose();
+        }
+    }
+
+    private static void ValidateGabrielPluginPathSimulator(Action<bool, string> require)
+    {
+        var craft = FiveStarCraft();
+        var root = GameStateBuilder.BuildInitialStepState(craft) with
+        {
+            TrainedPerfectionAvailable = false,
+            StellarSteadyHandCharges = 3,
+        };
+        require(root.CarefulObservationLeft == 3
+                && root.QuickInnoAvailable
+                && root.CrafterDelineationsLeft == 2
+                && root.StellarSteadyHandCharges == 3,
+            "Gabriel specialist-action exclusion must be exercised with every forbidden action available in live state");
+        var result = CraftingPluginPathSimulator.Run(
+            craft,
+            root,
+            new GabrielSolverDefinition(policySeed: 7),
+            VulcanSolverMode.Gabriel,
+            new PluginPathSimulationScenario(
+                GameSeed: 11,
+                ForcedConditions: new Dictionary<int, Condition>
+                {
+                    [1] = Condition.Pliant,
+                    [2] = Condition.Centered,
+                },
+                ManualActions: new Dictionary<int, VulcanSkill>
+                {
+                    [2] = VulcanSkill.BasicSynthesis,
+                }));
+        require(result.FailureReason == null || result.SolverTerminalFailure,
+            $"faithful plugin-path simulator must not fail its own execution/reconciliation contract: {result.FailureReason}");
+        require(result.Trace.Count >= 2
+                && result.Trace[0] is
+                {
+                    Manual: false,
+                    ExecutedAction: VulcanSkill.MuscleMemory or VulcanSkill.Reflect,
+                    ResultCondition: Condition.Pliant,
+                }
+                && result.Trace[1] is
+                {
+                    Manual: true,
+                    RecommendedAction: not VulcanSkill.HeartAndSoul,
+                    ExecutedAction: VulcanSkill.BasicSynthesis,
+                    ResultCondition: Condition.Centered,
+                },
+            "faithful plugin-path simulation must enforce Gabriel's opener and non-Normal Heart and Soul restriction through manual recovery");
+        require(result.Trace.All(entry =>
+                entry.RecommendedAction is not
+                        (VulcanSkill.FinalAppraisal or VulcanSkill.CarefulObservation or VulcanSkill.QuickInnovation or VulcanSkill.StellarSteadyHand)
+                    && entry.ExecutedAction is not
+                        (VulcanSkill.FinalAppraisal or VulcanSkill.CarefulObservation or VulcanSkill.QuickInnovation or VulcanSkill.StellarSteadyHand)),
+            "faithful Gabriel plugin execution must never recommend or execute a forbidden action");
+
+        var heartAndSoulResult = CraftingPluginPathSimulator.Run(
+            craft,
+            root,
+            new GabrielSolverDefinition(policySeed: 29),
+            VulcanSolverMode.Gabriel,
+            new PluginPathSimulationScenario(
+                GameSeed: 31,
+                ForcedConditions: new Dictionary<int, Condition>
+                {
+                    [1] = Condition.Normal,
+                },
+                ManualActions: new Dictionary<int, VulcanSkill>
+                {
+                    [2] = VulcanSkill.HeartAndSoul,
+                }));
+        var heartAndSoulIndices = heartAndSoulResult.Trace
+            .Select((entry, index) => (entry, index))
+            .Where(pair => pair.entry.ExecutedAction == VulcanSkill.HeartAndSoul)
+            .Select(pair => pair.index)
+            .ToArray();
+        require((heartAndSoulResult.FailureReason == null || heartAndSoulResult.SolverTerminalFailure)
+                && heartAndSoulResult.Trace.Count >= 3
+                && heartAndSoulResult.Trace[0].ExecutedAction is VulcanSkill.MuscleMemory or VulcanSkill.Reflect
+                && heartAndSoulResult.Trace[1] is
+                {
+                    Manual: true,
+                    ExecutedAction: VulcanSkill.HeartAndSoul,
+                    PreviousCondition: Condition.Normal,
+                    ResultCondition: Condition.Normal,
+                }
+                && heartAndSoulIndices.Length > 0
+                && heartAndSoulIndices.All(index =>
+                    index + 1 < heartAndSoulResult.Trace.Count
+                    && heartAndSoulResult.Trace[index].PreviousCondition == Condition.Normal
+                    && heartAndSoulResult.Trace[index + 1].ExecutedAction is
+                        VulcanSkill.TricksOfTrade or VulcanSkill.IntensiveSynthesis or VulcanSkill.PreciseTouch),
+            "faithful plugin-path execution must use Heart and Soul only on Normal and immediately consume it with an associated action");
+
+        var estimate = CraftingPluginPathSimulator.EstimateGabriel(
+            craft,
+            GameStateBuilder.BuildInitialStepState(craft),
+            samples: 5,
+            seed: 13);
+        require(estimate.Samples == 5
+                && estimate.Successes <= estimate.SynthesisCompletions
+                && estimate.SynthesisCompletions <= estimate.Samples,
+            "Gabriel validation estimate must aggregate actual faithful plugin-path outcomes");
+
+        var unrestrictedCraft = craft with
+        {
+            StatCraftsmanship = 3000,
+            StatControl = 2800,
+            StatCP = 420,
+            StatLevel = 80,
+            UnlockedManipulation = false,
+            Specialist = false,
+            CrafterDelineations = 0,
+            SplendorCosmic = false,
+            CraftStars = 1,
+            CraftDurability = 35,
+            CraftProgress = 7500,
+            CraftQualityMax = 21000,
+            CraftRequiredQuality = 0,
+        };
+        var unrestrictedRoot = GameStateBuilder.BuildInitialStepState(unrestrictedCraft) with
+        {
+            Progress = unrestrictedCraft.CraftProgress - 1,
+            Quality = unrestrictedCraft.CraftQualityMax,
+        };
+        var unrestrictedResult = CraftingPluginPathSimulator.Run(
+            unrestrictedCraft,
+            unrestrictedRoot,
+            new GabrielSolverDefinition(policySeed: 17),
+            VulcanSolverMode.Gabriel,
+            new PluginPathSimulationScenario(GameSeed: 19));
+        require(unrestrictedResult is
+                {
+                    SynthesisCompleted: true,
+                    FullQuality: true,
+                    SolverTerminalFailure: false,
+                    FailureReason: null,
+                    Trace.Count: 1,
+                }
+                && unrestrictedResult.Trace[0].ExecutedAction is not
+                    (VulcanSkill.CarefulObservation or VulcanSkill.HeartAndSoul or VulcanSkill.QuickInnovation),
+            "faithful plugin execution must use Gabriel with arbitrary geometry/stats/level and no tool, specialist, delineations, or Manipulation");
+
+        var partialQualityResult = CraftingPluginPathSimulator.Run(
+            unrestrictedCraft,
+            unrestrictedRoot with { Quality = unrestrictedCraft.CraftQualityMax - 1 },
+            new SeededRaphaelDefinition(new CachedRaphaelSolution
+            {
+                ActionIds = [(uint)VulcanSkill.BasicSynthesis],
+            }),
+            liveRecoveryMode: null,
+            new PluginPathSimulationScenario(GameSeed: 23));
+        require(partialQualityResult is
+                {
+                    SynthesisCompleted: true,
+                    FullQuality: false,
+                    SolverTerminalFailure: false,
+                    FailureReason: null,
+                },
+            "a progress completion below maximum quality must not be reported as a full-quality completion");
+    }
+
+    private static void ValidateZeroStepExpediencePreservation(Action<bool, string> require)
+    {
+        var craft = Craft();
+        var root = GameStateBuilder.BuildInitialStepState(craft) with
+        {
+            ExpedienceLeft = 1,
+            PrevComboAction = VulcanSkill.HastyTouch,
+        };
+        var result = CraftingPluginPathSimulator.Run(
+            craft,
+            root,
+            new SeededRaphaelDefinition(new CachedRaphaelSolution
+            {
+                ActionIds =
+                [
+                    (uint)VulcanSkill.FinalAppraisal,
+                    (uint)VulcanSkill.BasicSynthesis,
+                    (uint)VulcanSkill.BasicSynthesis,
+                ],
+            }),
+            liveRecoveryMode: null,
+            new PluginPathSimulationScenario(GameSeed: 37, IsTrial: true));
+        require(result is
+                {
+                    SynthesisCompleted: true,
+                    SolverTerminalFailure: false,
+                    FailureReason: null,
+                    Trace.Count: 3,
+                }
+                && result.Trace[0] is
+                {
+                    ExecutedAction: VulcanSkill.FinalAppraisal,
+                    State.ExpedienceLeft: 1,
+                }
+                && result.Trace[0].State.Index == root.Index
+                && result.Trace[0].State.Condition == root.Condition,
+            "faithful plugin-path execution must preserve Expedience and the craft step across Final Appraisal");
     }
 
     private static async Task ValidateNormalRerollAndReactiveReplan(Action<bool, string> require)
@@ -763,6 +1445,86 @@ internal static class PluginPathSimulationAcceptanceTests
         }
     }
 
+    private static async Task ValidateProtectedRaphaelConditionTakeover(Action<bool, string> require)
+    {
+        var craft = Craft() with
+        {
+            StatControl = 700,
+            CraftDurability = 40,
+            CraftQualityMax = 100,
+        };
+        var solution = new CachedRaphaelSolution
+        {
+            ActionIds =
+            [
+                (uint)VulcanSkill.BasicTouch,
+                (uint)VulcanSkill.BasicTouch,
+                (uint)VulcanSkill.BasicSynthesis,
+            ],
+        };
+
+        foreach (var condition in new[] { Condition.Good, Condition.Excellent, Condition.Poor })
+        {
+            CraftingProcessor.Setup();
+            CraftingProcessor.RegisterSolver(new SeededDonatelloDefinition(solution));
+            try
+            {
+                var root = Root(craft, Condition.Normal);
+                CraftingProcessor.OnCraftStarted(craft, root, craft.RecipeId, isTrial: false);
+                require(CraftingProcessor.ActiveSolver is DonatelloProtectedRaphaelSolver,
+                    "a guaranteed max-quality Donatello plan must start with the protected Raphael incumbent");
+
+                var recommendation = await AwaitRecommendation();
+                require(recommendation.Action == VulcanSkill.BasicTouch,
+                    "the protected Raphael incumbent must issue its first static action");
+                ((DonatelloSolver)CraftingProcessor.ActiveSolver!).NotifyOpportunisticActionIssued();
+                var (_, observed) = Simulator.Execute(craft, root, recommendation.Action, 0, 1);
+                observed.Condition = condition;
+                CraftingProcessor.OnCraftAdvanced(craft, observed, craft.RecipeId);
+
+                require(CraftingProcessor.ActiveSolver is DonatelloProtectedRaphaelSolver,
+                    $"{condition} must keep the protected Raphael incumbent solver");
+                var wait = condition is Condition.Excellent or Condition.Poor
+                    ? TimeSpan.FromSeconds(30)
+                    : TimeSpan.FromSeconds(10);
+                var takeoverRecommendation = await AwaitRecommendation(wait);
+                require(!takeoverRecommendation.IsTerminalFailure
+                        && takeoverRecommendation.Action != VulcanSkill.None
+                        && Simulator.CanUseAction(craft, observed, takeoverRecommendation.Action)
+                        && CraftingProcessor.ActiveSolver is DonatelloSolver { NativeReplanCount: >= 1 },
+                    $"protected Raphael must replan from {condition} without replacing the incumbent solver");
+
+                if (condition == Condition.Good)
+                {
+                    var active = (DonatelloSolver)CraftingProcessor.ActiveSolver!;
+                    require(active.HasPendingOpportunisticReplan,
+                        "Good-condition regression must issue the incumbent while its same-root opportunistic replan is still pending");
+                    var expectedRemaining = active.RemainingActions.ToArray();
+                    require(expectedRemaining.Length > 0,
+                        "Good-condition regression requires an incumbent suffix after the issued action");
+                    active.NotifyOpportunisticActionIssued();
+                    var (_, afterIssuedAction) = Simulator.Execute(
+                        craft,
+                        observed,
+                        takeoverRecommendation.Action,
+                        0,
+                        1);
+                    afterIssuedAction.Condition = Condition.Normal;
+                    require(active.WaitForPendingSolve(TimeSpan.FromSeconds(5)),
+                        "interrupted old-root opportunistic replan must stop before the next observed node");
+                    CraftingProcessor.OnCraftAdvanced(craft, afterIssuedAction, craft.RecipeId);
+                    var nextRecommendation = await AwaitRecommendation();
+                    require(nextRecommendation.Action == expectedRemaining[0],
+                        $"late old-root replan must not rewind the consumed action; expected={expectedRemaining[0]}, actual={nextRecommendation.Action}, comment={nextRecommendation.Comment}");
+                }
+            }
+            finally
+            {
+                CraftingProcessor.Dispose();
+            }
+        }
+    }
+
     private static CraftState Craft()
         => new()
         {
@@ -816,6 +1578,22 @@ internal static class PluginPathSimulationAcceptanceTests
 
         public Solver Create(CraftState craft, int flavor)
             => new RaphaelMacroSolver(solution, craft);
+    }
+
+    private sealed class SeededGabrielDefinition(ulong policySeed) : ISolverDefinition
+    {
+        public IEnumerable<ISolverDefinition.Desc> Flavors(CraftState craft)
+        {
+            if (!GabrielPolicyCatalog.TryResolve(craft, out var policy, out var reason))
+            {
+                yield return new(this, 0, 200, "Seeded Gabriel", reason);
+                yield break;
+            }
+            yield return new(this, (int)policy.Profile, 200, "Seeded Gabriel");
+        }
+
+        public Solver Create(CraftState craft, int flavor)
+            => new GabrielSolver(craft, policySeed);
     }
 
     private static void SetupWithSeededDonatello(params VulcanSkill[] actions)

@@ -14,6 +14,18 @@ public sealed class CraftingListPlan
     public Dictionary<uint, int> Precrafts { get; } = new();
     public Dictionary<uint, IngredientQualityDemand> IngredientDemands { get; } = new();
     public Dictionary<uint, int> RetainerConsumedCraftables { get; } = new();
+    internal List<CraftingMaterialDemandNode> CraftMaterialRoots { get; } = [];
+}
+
+internal sealed class CraftingMaterialDemandNode(uint itemId, IngredientQualityDemand demand)
+{
+    internal uint ItemId { get; } = itemId;
+    internal IngredientQualityDemand Demand { get; private set; } = demand;
+    internal List<CraftingMaterialDemandNode> Children { get; } = [];
+
+    internal void MergeDemand(IngredientQualityDemand demand)
+        => Demand = Demand.Add(demand);
+
 }
 
 /// <summary>
@@ -221,10 +233,17 @@ public static class CraftingListPlanner
             var surplus = craftCount * (int)recipe.AmountResult - remainingItemCount;
             _availability.AddPlanned(resultItemId, surplus);
 
-            PlanIngredients(recipe, craftCount, true);
+            var outputDemand = IngredientQualityDemand.FromPreferNQ(craftCount * (int)recipe.AmountResult);
+            var materialRoot = new CraftingMaterialDemandNode(resultItemId, outputDemand);
+            _plan.CraftMaterialRoots.Add(materialRoot);
+            PlanIngredients(recipe, craftCount, true, materialRoot.Children);
         }
 
-        private void PlanIngredients(Recipe recipe, int craftCount, bool isOriginalRecipe)
+        private void PlanIngredients(
+            Recipe recipe,
+            int craftCount,
+            bool isOriginalRecipe,
+            List<CraftingMaterialDemandNode> materialChildren)
         {
             var qualityPolicy = ResolveQualityPolicy(recipe, isOriginalRecipe);
             foreach (var (itemId, _) in RecipeManager.GetIngredients(recipe))
@@ -239,13 +258,18 @@ public static class CraftingListPlanner
                 }
 
                 AddCount(_plan.Precrafts, itemId, itemDemand.Total);
+                var materialChild = new CraftingMaterialDemandNode(itemId, itemDemand);
+                materialChildren.Add(materialChild);
                 if (_canCraftPrecraft != null && !_canCraftPrecraft(subRecipe.Value))
                     continue;
-                PlanPrecraftDemand(subRecipe.Value, itemDemand);
+                PlanPrecraftDemand(subRecipe.Value, itemDemand, materialChild.Children);
             }
         }
 
-        private void PlanPrecraftDemand(Recipe recipe, IngredientQualityDemand itemDemand)
+        private void PlanPrecraftDemand(
+            Recipe recipe,
+            IngredientQualityDemand itemDemand,
+            List<CraftingMaterialDemandNode> materialChildren)
         {
             var resultItemId = recipe.ItemResult.RowId;
             // Acquired dependencies are consumed even when the list's normal
@@ -278,7 +302,7 @@ public static class CraftingListPlanner
             var outputQuality = CraftingQualityPolicyResolver.ResolvePlannedOutputQuality(recipe, qualityPolicy, remainingDemand);
             _availability.AddPlanned(resultItemId, surplus, outputQuality);
 
-            PlanIngredients(recipe, craftCount, false);
+            PlanIngredients(recipe, craftCount, false, materialChildren);
         }
 
         private Recipe? ResolveSubRecipe(uint itemId)

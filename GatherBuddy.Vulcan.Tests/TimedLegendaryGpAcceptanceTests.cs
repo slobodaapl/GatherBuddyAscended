@@ -34,5 +34,17 @@ public static class TimedLegendaryGpAcceptanceTests
         require(!TimedLegendaryGpPolicy.ShouldWaitForFullGp(
                     current, upcoming, now, currentGp: 1000, maxGp: 1000, gpRegenPerTick: 100),
             "full GP must not trigger a wait");
+
+        require(TimedNodeGpWaitPolicy.CanWaitBeforeGathering(TimeInterval.Always, now),
+            "untimed nodes must retain configured GP waiting");
+        require(TimedNodeGpWaitPolicy.CanWaitBeforeGathering(
+                    new TimeInterval(now.AddMinutes(-1), now.AddSeconds(61)), now),
+            "a timed node outside the gathering reserve may still wait for GP");
+        require(!TimedNodeGpWaitPolicy.CanWaitBeforeGathering(
+                    new TimeInterval(now.AddMinutes(-1), now.AddSeconds(60)), now),
+            "a timed node entering the gathering reserve must stop waiting for GP");
+        require(!TimedNodeGpWaitPolicy.CanWaitBeforeGathering(TimeInterval.Invalid, now)
+             && !TimedNodeGpWaitPolicy.CanWaitBeforeGathering(TimeInterval.Never, now),
+            "unknown or unreachable windows must not permit indefinite GP waiting");
     }
 }

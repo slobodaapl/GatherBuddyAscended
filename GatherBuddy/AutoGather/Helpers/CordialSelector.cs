@@ -15,9 +15,14 @@ internal static class CordialSelector
     private static readonly uint[] WeakestFirst = [WateredCordialItemId, CordialItemId, HiCordialItemId];
 
     internal static uint Select(ConfigPreset.CordialConfig config, uint currentGp, uint maxGp, Func<uint, int> inventoryCount)
-        => GetConfiguredItems(config).FirstOrDefault(itemId =>
+    {
+        if (!config.Enabled || currentGp >= maxGp)
+            return 0;
+
+        return GetConfiguredItems(config).FirstOrDefault(itemId =>
             inventoryCount(itemId) > 0
          && (!config.PreventGpOvercap || currentGp + GetGpRestoration(itemId) <= maxGp));
+    }
 
     internal static int GetGpRestoration(uint itemId)
         => itemId switch

@@ -101,6 +101,28 @@ internal static unsafe class CraftingQueuePreflight
                 continue;
 
             var executionContext = CraftingContextResolver.ResolveExecutionContext(item, recipe.Value, listConsumables);
+            if (executionContext.EffectiveSolverMode == VulcanSolverMode.Gabriel)
+            {
+                if (!CraftingContextResolver.TryBuildSimulationContext(
+                        recipe.Value,
+                        executionContext,
+                        CraftingStatsSource.AlwaysGearsetStats,
+                        CraftingSimulationIntent.Execution,
+                        out var gabrielContext))
+                {
+                    var gabrielIssue = $"{DescribeRecipe(item, recipe.Value)} cannot use Gabriel because its saved gearset stats are unavailable.";
+                    if (!issues.Contains(gabrielIssue))
+                        issues.Add(gabrielIssue);
+                    continue;
+                }
+                if (!GabrielPolicyCatalog.TryResolve(gabrielContext.SimulationState, out _, out var reason))
+                {
+                    var gabrielIssue = $"{DescribeRecipe(item, recipe.Value)} cannot use Gabriel: {reason}";
+                    if (!issues.Contains(gabrielIssue))
+                        issues.Add(gabrielIssue);
+                    continue;
+                }
+            }
             if (string.IsNullOrEmpty(executionContext.SelectedMacroId))
                 continue;
 

@@ -109,6 +109,7 @@ public class RecipeCraftSettingsPopup
                 SelectedMacroId = existing.SelectedMacroId,
                 SolverOverride = existing.SolverOverride,
                 MaximizeQualityAtCostOfTime = existing.MaximizeQualityAtCostOfTime,
+                DonatelloImprovementQuietSecondsOverride = existing.DonatelloImprovementQuietSecondsOverride,
                 SpecialistActionOverride = existing.SpecialistActionOverride,
             };
         }
@@ -154,6 +155,7 @@ public class RecipeCraftSettingsPopup
             SelectedMacroId = cs?.SelectedMacroId,
             SolverOverride = cs?.SolverOverride ?? SolverOverrideMode.Default,
             MaximizeQualityAtCostOfTime = cs?.MaximizeQualityAtCostOfTime ?? false,
+            DonatelloImprovementQuietSecondsOverride = cs?.DonatelloImprovementQuietSecondsOverride,
             SpecialistActionOverride = cs?.SpecialistActionOverride ?? SpecialistActionOverrideMode.Inherit,
         };
         
@@ -194,6 +196,7 @@ public class RecipeCraftSettingsPopup
             SelectedMacroId = cs?.SelectedMacroId,
             SolverOverride = cs?.SolverOverride ?? SolverOverrideMode.Default,
             MaximizeQualityAtCostOfTime = cs?.MaximizeQualityAtCostOfTime ?? false,
+            DonatelloImprovementQuietSecondsOverride = cs?.DonatelloImprovementQuietSecondsOverride,
             SpecialistActionOverride = cs?.SpecialistActionOverride ?? SpecialistActionOverrideMode.Inherit,
         };
 
@@ -368,6 +371,7 @@ public class RecipeCraftSettingsPopup
             SelectedMacroId = settings.MacroMode == MacroOverrideMode.Specific ? settings.SelectedMacroId : null,
             SolverOverride = settings.MacroMode == MacroOverrideMode.Specific ? settings.SolverOverride : SolverOverrideMode.Default,
             MaximizeQualityAtCostOfTime = settings.MaximizeQualityAtCostOfTime,
+            DonatelloImprovementQuietSecondsOverride = settings.DonatelloImprovementQuietSecondsOverride,
             SpecialistActionOverride = settings.SpecialistActionOverride,
         };
     }
@@ -378,7 +382,38 @@ public class RecipeCraftSettingsPopup
         if (ImGui.Checkbox("Maximize quality at cost of time", ref maximizeQuality))
             _editingSettings.MaximizeQualityAtCostOfTime = maximizeQuality;
         if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("Allow each live Donatello replan up to 30 seconds and bounded Careful Observation condition rerolls when specialist actions are allowed. This may improve quality, but crafting can pause or take longer.");
+            ImGui.SetTooltip("Keep each live Donatello search running until the configured reset window passes without a strict improvement. Every improvement extends the search without restarting it. Also enables bounded Careful Observation condition rerolls when specialist actions are allowed. Crafting may pause for a long time.");
+
+        if (!maximizeQuality)
+            return;
+
+        ImGui.Indent();
+        ImGui.AlignTextToFramePadding();
+        ImGui.Text("Improvement reset override (seconds):");
+        ImGui.SameLine();
+        var quietSeconds = _editingSettings.DonatelloImprovementQuietSecondsOverride ?? 0;
+        ImGui.SetNextItemWidth(VulcanUiScaling.Scaled(90f));
+        if (ImGui.InputInt("##DonatelloImprovementQuietOverride", ref quietSeconds, 1, 5))
+        {
+            _editingSettings.DonatelloImprovementQuietSecondsOverride = quietSeconds <= 0
+                ? null
+                : Math.Clamp(
+                    quietSeconds,
+                    DonatelloSolver.MinimumImprovementQuietPeriodSeconds,
+                    DonatelloSolver.MaximumImprovementQuietPeriodSeconds);
+        }
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("Seconds without a strict improvement before continuous replanning stops. Each strict improvement resets this timer. Set to 0 to use the global Donatello value.");
+        if (!_editingSettings.DonatelloImprovementQuietSecondsOverride.HasValue)
+        {
+            var globalSeconds = Math.Clamp(
+                GatherBuddy.Config.RaphaelSolverConfig.DonatelloImprovementQuietSeconds,
+                DonatelloSolver.MinimumImprovementQuietPeriodSeconds,
+                DonatelloSolver.MaximumImprovementQuietPeriodSeconds);
+            ImGui.SameLine();
+            ImGui.TextDisabled($"Global: {globalSeconds}s");
+        }
+        ImGui.Unindent();
     }
 
     private void DrawSpecialistActionOverride()
@@ -433,17 +468,17 @@ public class RecipeCraftSettingsPopup
                 CraftSettings = GetSettingsForEvaluation(),
             };
             var recipeExecutionContext = CraftingContextResolver.ResolveExecutionContext(item, recipe.Value, null);
-            return CraftingContextResolver.UsesRaphaelSolver(recipeExecutionContext);
+            return CraftingContextResolver.UsesSolverAssessment(recipeExecutionContext);
         }
 
         if (_editingListItem != null)
         {
             return !CraftingContextResolver.TryResolveListExecutionContext(_editingList, _editingListItem, GetSettingsForEvaluation(), out var itemExecutionContext)
-                || CraftingContextResolver.UsesRaphaelSolver(itemExecutionContext);
+                || CraftingContextResolver.UsesSolverAssessment(itemExecutionContext);
         }
 
         return !CraftingContextResolver.TryResolveListExecutionContext(_editingList, _recipeId, !_isPrecraftMode, GetSettingsForEvaluation(), out var listExecutionContext)
-            || CraftingContextResolver.UsesRaphaelSolver(listExecutionContext);
+            || CraftingContextResolver.UsesSolverAssessment(listExecutionContext);
     }
 
     private void DrawRaphaelValidationStatus()
@@ -471,9 +506,17 @@ public class RecipeCraftSettingsPopup
         };
 
         ImGui.Spacing();
-        ImGui.TextColored(color, $"Raphael: {assessment.Summary}");
+        ImGui.TextColored(color, $"{assessment.SolverName}: {assessment.Summary}");
         if (ImGui.IsItemHovered())
             ImGui.SetTooltip(assessment.Details);
+        if (assessment.SolverName == "Gabriel"
+         && assessment.State is RaphaelAssessmentState.NotGenerated or RaphaelAssessmentState.Failed)
+        {
+            ImGui.SameLine();
+            var label = assessment.State == RaphaelAssessmentState.Failed ? "Retry" : "Estimate";
+            if (ImGui.SmallButton($"{label}##GabrielEstimate"))
+                QueueCurrentGabrielAssessment(GetSettingsForEvaluation());
+        }
     }
 
     private void QueueCurrentRaphaelWarmup()
@@ -482,16 +525,36 @@ public class RecipeCraftSettingsPopup
         if (_isPrecraftMode && _editingList != null)
         {
             RaphaelAssessmentService.TryQueueWarmupForPrecraft(_recipeId, _editingList, persistedSettings);
+            QueueCurrentGabrielAssessment(persistedSettings);
             return;
         }
 
         if (_editingList != null)
         {
             RaphaelAssessmentService.TryQueueWarmupForListRecipe(_recipeId, _editingList, persistedSettings);
+            QueueCurrentGabrielAssessment(persistedSettings);
             return;
         }
 
         RaphaelAssessmentService.TryQueueWarmupForRecipe(_recipeId, persistedSettings);
+        QueueCurrentGabrielAssessment(persistedSettings);
+    }
+
+    private void QueueCurrentGabrielAssessment(RecipeCraftSettings? settings)
+    {
+        if (_isPrecraftMode && _editingList != null)
+        {
+            GabrielAssessmentService.TryAssessListPrecraft(_recipeId, _editingList, settings, queue: true, out _);
+            return;
+        }
+
+        if (_editingList != null)
+        {
+            GabrielAssessmentService.TryAssessListRecipe(_recipeId, _editingList, settings, queue: true, out _);
+            return;
+        }
+
+        GabrielAssessmentService.TryAssessRecipe(_recipeId, settings, queue: true, out _);
     }
 
     private string? ResolveEffectiveMacroIdForEdit()
@@ -683,6 +746,15 @@ public class RecipeCraftSettingsPopup
                 _editingSettings.SelectedMacroId = null;
                 _editingSettings.SolverOverride = SolverOverrideMode.DonatelloSolver;
             }
+            var recipe = RecipeManager.GetRecipe(_recipeId);
+            if (recipe.HasValue && GabrielPolicyCatalog.TryResolveRecipe(recipe.Value, out _, out _))
+            {
+                if (ImGui.Selectable("Gabriel", _editingSettings.SolverOverride == SolverOverrideMode.GabrielSolver))
+                {
+                    _editingSettings.SelectedMacroId = null;
+                    _editingSettings.SolverOverride = SolverOverrideMode.GabrielSolver;
+                }
+            }
             if (ImGui.Selectable("Progress Only", _editingSettings.SolverOverride == SolverOverrideMode.ProgressOnlySolver))
             {
                 _editingSettings.SelectedMacroId = null;
@@ -723,6 +795,7 @@ public class RecipeCraftSettingsPopup
             SolverOverrideMode.StandardSolver     => "Standard Solver",
             SolverOverrideMode.RaphaelSolver      => "Raphael Solver",
             SolverOverrideMode.DonatelloSolver    => "Donatello",
+            SolverOverrideMode.GabrielSolver      => "Gabriel",
             SolverOverrideMode.ProgressOnlySolver => "Progress Only",
             _ when !string.IsNullOrEmpty(macroId) => allMacros.FirstOrDefault(m => m.Id == macroId)?.Name ?? "(Macro Not Found)",
             _                                     => "Default (Use Solver)",

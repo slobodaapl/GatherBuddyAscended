@@ -508,6 +508,11 @@ public class CraftingListManager
         var list = GetListByID(id);
         if (list == null) return null;
 
+        return SerializeExport(list);
+    }
+
+    internal static string SerializeExport(CraftingListDefinition list)
+    {
         var copy = JsonConvert.DeserializeObject<CraftingListDefinition>(JsonConvert.SerializeObject(list))!;
         CanonicalizeOriginalItemQualitySettings(copy);
         copy.ID = 0;

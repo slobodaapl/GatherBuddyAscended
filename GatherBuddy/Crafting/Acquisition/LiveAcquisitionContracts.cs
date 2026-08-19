@@ -17,6 +17,7 @@ public enum LiveAcquisitionStage
     Completed,
     Failed,
     Cancelled,
+    Travel,
 }
 
 public enum LiveAcquisitionStatus
@@ -189,8 +190,10 @@ public interface ILiveAcquisitionEnvironment
     bool IsVNavmeshAvailable { get; }
     bool IsMarketAutomationAvailable { get; }
     bool IsVendorAutomationAvailable { get; }
+    bool IsAtMarketBoard { get; }
     bool IsInDuty { get; }
     bool IsInNonCrossWorldParty { get; }
+    uint CurrentGatewayId { get; }
     bool CanVisitWorld(uint worldId);
     bool IsGatewayAttuned(uint gatewayId);
     long GetGatewayTeleportCost(uint gatewayId);

@@ -114,7 +114,6 @@ public static unsafe class ExpertConditionSampler
     private static readonly ExpertConditionTransitionMatrix SessionMatrix = new();
     private static readonly ExpertConditionSamplingRunBudget RunBudget = new(100);
     private static readonly Guid RunId = Guid.NewGuid();
-    private const int TrialSynthesisCallbackId = 10;
     private static readonly TimeSpan ActionTimeout = TimeSpan.FromSeconds(15);
     private static readonly TimeSpan RestartPhaseTimeout = TimeSpan.FromSeconds(15);
 
@@ -132,6 +131,7 @@ public static unsafe class ExpertConditionSampler
     private static bool _restartFailureLatched;
     private static string _haltReason = string.Empty;
     private static bool _queueBlockReported;
+    private static bool _autosolveBlockReported;
     private static RestartPhase _restartPhase;
     private static DateTime _restartPhaseStartedUtc;
     private static DateTime _nextRestartActionUtc;
@@ -162,6 +162,19 @@ public static unsafe class ExpertConditionSampler
         }
 
         _queueBlockReported = false;
+
+        if (CraftingGameInterop.HasOwnedCraft)
+        {
+            EndSession("crafting-autosolve-active");
+            if (!_autosolveBlockReported)
+            {
+                _autosolveBlockReported = true;
+                GatherBuddy.Log.Error("[ExpertConditionSampler] Refusing to sample while crafting autosolve owns a craft");
+            }
+            return false;
+        }
+
+        _autosolveBlockReported = false;
 
         if (_restartPhase != RestartPhase.None)
             return UpdateAutomaticRestart();
@@ -625,7 +638,7 @@ public static unsafe class ExpertConditionSampler
             case RestartPhase.WaitRecipe:
                 if (TryFinishAutomaticRestart())
                     break;
-                if (!TryGetVisibleRecipeNote(out var recipeNote))
+                if (!TryGetVisibleRecipeNote(out _))
                     break;
                 if (TryGetVisibleSelectYesno(out _))
                 {
@@ -635,22 +648,20 @@ public static unsafe class ExpertConditionSampler
                 var selectedRecipe = RecipeNoteExt.GetSelectedRecipeEntry();
                 if (selectedRecipe == null || selectedRecipe->RecipeId != _restartRecipeId)
                     break;
-                if (TryStartTrialSynthesis(recipeNote))
+                if (TrialSynthesisUi.TryRequestStart(_restartRecipeId))
+                {
+                    GatherBuddy.Log.Information(
+                        $"[ExpertConditionSampler] Requested Trial Synthesis for recipe {_restartRecipeId}");
                     SetRestartPhase(RestartPhase.ConfirmTrialStart);
+                }
                 break;
 
             case RestartPhase.ConfirmTrialStart:
                 if (TryFinishAutomaticRestart())
                     break;
-                if (TryGetVisibleTrialSynthesisSettings(out var trialSettings))
+                if (TrialSynthesisUi.TryConfirmStart(_restartRecipeId))
                 {
-                    Callback.Fire(trialSettings, true, 0, 0, false);
                     GatherBuddy.Log.Information($"[ExpertConditionSampler] Confirmed Trial Synthesis for recipe {_restartRecipeId}");
-                    SetRestartPhase(RestartPhase.WaitTrialStart);
-                }
-                else if (TryGetVisibleSelectYesno(out var trialConfirmation))
-                {
-                    new AddonMaster.SelectYesno(trialConfirmation).Yes();
                     SetRestartPhase(RestartPhase.WaitTrialStart);
                 }
                 break;
@@ -760,13 +771,6 @@ public static unsafe class ExpertConditionSampler
         return addon != null && addon->AtkUnitBase.IsVisible && addon->AtkUnitBase.IsReady;
     }
 
-    private static bool TryGetVisibleTrialSynthesisSettings(out AtkUnitBase* addon)
-    {
-        var address = Dalamud.GameGui.GetAddonByName("RecipeNotePraticeSetting").Address;
-        addon = (AtkUnitBase*)address;
-        return addon != null && addon->IsVisible && addon->IsReady;
-    }
-
     private static bool TryScheduleSelectedExpertTrialStart()
     {
         if (!TryGetVisibleRecipeNote(out _))
@@ -800,21 +804,6 @@ public static unsafe class ExpertConditionSampler
             return false;
         var atkEvent = (AtkEvent*)eventPointer;
         addon->ReceiveEvent(atkEvent->State.EventType, (int)atkEvent->Param, eventPointer);
-        return true;
-    }
-
-    private static bool TryStartTrialSynthesis(AddonRecipeNote* addon)
-    {
-        var button = addon == null ? null : addon->TrialSynthesisButton;
-        if (button == null || !button->IsEnabled)
-            return false;
-        var ownerNode = button->AtkComponentBase.OwnerNode;
-        if (ownerNode == null || !ownerNode->AtkResNode.IsVisible())
-            return false;
-
-        Callback.Fire((AtkUnitBase*)addon, true, TrialSynthesisCallbackId);
-        GatherBuddy.Log.Information(
-            $"[ExpertConditionSampler] Requested Trial Synthesis for recipe {_restartRecipeId} using RecipeNote callback {TrialSynthesisCallbackId}");
         return true;
     }
 

@@ -110,6 +110,13 @@ public static class VendorAvailabilityResolver
         var societyRank = entry.RequiredAlliedSocietyRank != 0
             ? entry.RequiredAlliedSocietyRank
             : vendor.RequiredAlliedSocietyRank;
+        var isKnownNonAlliedScripExchange = vendor.MenuShopType == VendorMenuShopType.InclusionShop
+            && entry.Group == VendorCurrencyGroup.Scrips
+            && societyId == 0
+            && societyRank == 0;
+        if (isKnownNonAlliedScripExchange)
+            return new(VendorAvailabilityState.Available, string.Empty);
+
         var hasAlliedRequirement = societyId != 0 || societyRank != 0 || !vendor.AlliedRequirementKnown;
         if (!hasAlliedRequirement)
             return new(VendorAvailabilityState.Available, string.Empty);

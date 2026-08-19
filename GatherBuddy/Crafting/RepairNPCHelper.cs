@@ -4,8 +4,6 @@ using System.Globalization;
 using System.Linq;
 using System.Numerics;
 using Dalamud.Game.ClientState.Objects.Enums;
-using FFXIVClientStructs.FFXIV.Client.Game.UI;
-using GatherBuddy.SeFunctions;
 using Lumina.Data.Files;
 using Lumina.Data.Parsing.Layer;
 using Lumina.Excel.Sheets;
@@ -126,26 +124,26 @@ public static class RepairNPCHelper
         return nearest;
     }
 
-    public static unsafe uint FindCheapestAttunedAetheryte(uint territoryId, out uint teleportCost)
+    public static uint FindCheapestAttunedAetheryte(uint territoryId, out uint teleportCost)
     {
         teleportCost = uint.MaxValue;
-        var telepo = Telepo.Instance();
         var aetheryteSheet = Dalamud.GameData.GetExcelSheet<Aetheryte>();
-        if (telepo == null || aetheryteSheet == null)
+        if (aetheryteSheet == null)
             return 0;
 
-        telepo->UpdateAetheryteList();
         var costs = new Dictionary<uint, uint>();
-        for (var i = 0; i < telepo->TeleportList.Count; ++i)
+        var aetherytes = Dalamud.Aetherytes;
+        for (var i = 0; i < aetherytes.Length; ++i)
         {
-            var entry = telepo->TeleportList[i];
+            var entry = aetherytes[i];
+            if (entry == null)
+                continue;
             costs[entry.AetheryteId] = entry.GilCost;
         }
 
         var candidate = aetheryteSheet
             .Where(aetheryte => aetheryte.IsAetheryte
                 && aetheryte.Territory.RowId == territoryId
-                && Teleporter.IsAttuned(aetheryte.RowId)
                 && costs.ContainsKey(aetheryte.RowId))
             .Select(aetheryte => (Id: aetheryte.RowId, Cost: costs[aetheryte.RowId]))
             .OrderBy(value => value.Cost)

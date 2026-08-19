@@ -78,6 +78,7 @@ public partial class Configuration : IPluginConfiguration
     // Vulcan Configs
     public RaphaelSolveCoordinatorConfig RaphaelSolverConfig { get; set; } = new();
     public Vulcan.StandardSolverConfig StandardSolverConfig { get; set; } = new();
+    public bool VulcanAutoTakeOverManualSynthesis { get; set; } = true;
     public VulcanRepairConfig VulcanRepairConfig { get; set; } = new();
     public VulcanMateriaConfig VulcanMateriaConfig { get; set; } = new();
     public VulcanRetainerBellConfig VulcanRetainerBellConfig { get; set; } = new();

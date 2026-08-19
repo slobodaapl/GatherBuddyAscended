@@ -114,6 +114,7 @@ public class CraftingQueueProcessor : IDisposable
     public CraftingQueueProcessor()
     {
         CraftingGameInterop.CraftFinished += OnCraftFinished;
+        CraftingGameInterop.CraftActionExecuted += OnCraftActionExecuted;
         CraftingGameInterop.QuickSynthProgress += OnQuickSynthProgress;
         CraftingGameInterop.AutomationFaulted += OnAutomationFaulted;
     }
@@ -121,10 +122,17 @@ public class CraftingQueueProcessor : IDisposable
     private void OnAutomationFaulted(string reason)
         => Pause(reason);
 
+    private void OnCraftActionExecuted(VulcanSkill action)
+    {
+        if (_currentState == QueueState.Crafting && CurrentRecipeItem is { } item)
+            item.ExecutedActions.Add(action);
+    }
+
     public void Dispose()
     {
         CancelAcquisition();
         CraftingGameInterop.CraftFinished -= OnCraftFinished;
+        CraftingGameInterop.CraftActionExecuted -= OnCraftActionExecuted;
         CraftingGameInterop.QuickSynthProgress -= OnQuickSynthProgress;
         CraftingGameInterop.AutomationFaulted -= OnAutomationFaulted;
         StateChanged = null;
@@ -1234,7 +1242,7 @@ public class CraftingQueueProcessor : IDisposable
         if (SynthesisReader.IsSynthesisWindowOpen())
         {
             CraftingGatherBridge.PersistCurrentCraftOwnership(recipe.Value.RowId);
-            if (executionContext.EffectiveSolverMode != VulcanSolverMode.Donatello
+            if (executionContext.EffectiveSolverMode is not (VulcanSolverMode.Donatello or VulcanSolverMode.Gabriel)
                 && !EnsureRaphaelSolutionReadyForCurrentCraft(
                     recipeItem,
                     recipe.Value,
