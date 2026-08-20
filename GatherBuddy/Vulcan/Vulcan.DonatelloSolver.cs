@@ -118,6 +118,8 @@ public class DonatelloSolver : Solver, IDisposable
     internal const int DefaultImprovementQuietPeriodMillis = DefaultImprovementQuietPeriodSeconds * 1000;
     internal const int MinimumImprovementQuietPeriodMillis = 1;
     internal const int MaximumImprovementQuietPeriodMillis = 30_000;
+    internal const int CompletionQualitySearchMinimumCP = 18;
+    internal const int CompletionQualitySearchMinimumQuietPeriodMillis = 10_000;
     private readonly CraftState _craft;
     private List<VulcanSkill> _plan;
     private int _actionIndex;
@@ -475,6 +477,12 @@ public class DonatelloSolver : Solver, IDisposable
                 : _pendingEstablishesBaseline
                     ? Math.Clamp(raphaelConfig.RaphaelTimeoutMinutes, 1, 60) * 60 * 1000
                     : softDeadlineMillis;
+        (softDeadlineMillis, hardDeadlineMillis) = ApplyCompletionQualitySearchDeadlineFloor(
+            _craft,
+            liveRoot,
+            incumbent,
+            softDeadlineMillis,
+            hardDeadlineMillis);
         var minimizeSteps = _protectedMaxQualityPlan || _protectedRaphaelTakeover ? true : (bool?)null;
         if (_pendingUsesImprovementQuiescence)
         {
@@ -529,6 +537,26 @@ public class DonatelloSolver : Solver, IDisposable
             : Math.Max(
                 Math.Clamp(configuredDeadlineMillis, 10, 10_000),
                 Math.Clamp(actionDelayMillis, 0, 10_000));
+
+    internal static (int SoftDeadlineMillis, int HardDeadlineMillis) ApplyCompletionQualitySearchDeadlineFloor(
+        CraftState craft,
+        StepState root,
+        IReadOnlyList<VulcanSkill> incumbent,
+        int softDeadlineMillis,
+        int hardDeadlineMillis)
+    {
+        if (root.RemainingCP < CompletionQualitySearchMinimumCP
+            || incumbent.Count == 0
+            || !ShouldReplanBeforeCompletion(craft, root, incumbent[0]))
+            return (softDeadlineMillis, hardDeadlineMillis);
+
+        softDeadlineMillis = Math.Max(
+            softDeadlineMillis,
+            CompletionQualitySearchMinimumQuietPeriodMillis);
+        if (hardDeadlineMillis > 0)
+            hardDeadlineMillis = Math.Max(hardDeadlineMillis, softDeadlineMillis);
+        return (softDeadlineMillis, hardDeadlineMillis);
+    }
 
     internal static bool UsesImprovementQuiescence(CraftState craft)
         => craft.DonatelloOptions is
