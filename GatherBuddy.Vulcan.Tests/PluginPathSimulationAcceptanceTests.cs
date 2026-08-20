@@ -22,6 +22,7 @@ internal static class PluginPathSimulationAcceptanceTests
         ValidateZeroStepExpediencePreservation(require);
         await ValidateImprovementQuiescenceLifecycle(require);
         await ValidateImprovementQuiescenceSupersession(require);
+        ValidateLateRootResidualQualityRecovery(require);
         await ValidateNormalRerollAndReactiveReplan(require);
         await ValidateProtectedRaphaelConditionTakeover(require);
         await ValidatePoorPlannerReroll(require);
@@ -484,6 +485,83 @@ internal static class PluginPathSimulationAcceptanceTests
         {
             CraftingProcessor.Dispose();
         }
+    }
+
+    private static void ValidateLateRootResidualQualityRecovery(Action<bool, string> require)
+    {
+        var craft = new CraftState
+        {
+            StatCraftsmanship = 5652,
+            StatControl = 5184,
+            StatCP = 711,
+            StatLevel = 100,
+            CraftLevel = 100,
+            CraftDurability = 70,
+            CraftProgress = 10_040,
+            CraftQualityMax = 21_200,
+            CraftProgressDivider = 170,
+            CraftProgressModifier = 90,
+            CraftQualityDivider = 150,
+            CraftQualityModifier = 75,
+            CraftHQ = true,
+            UnlockedManipulation = true,
+            Specialist = true,
+            SplendorCosmic = true,
+            CrafterDelineations = 59,
+            RecipeId = 37_909,
+            ConditionFlags = NormalConditions,
+            CraftConditionProbabilities = GameStateBuilder.GetConditionProbabilities(
+                NormalConditions,
+                statLevel: 100,
+                craftExpert: false),
+            DonatelloOptions = new DonatelloExecutionOptions(
+                DonatelloSolveObjective.MaximizeQuality,
+                MinimizeSteps: false,
+                MaximizeQualityAtCostOfTime: true,
+                AllowSpecialistActions: true,
+                ImprovementQuietPeriodMillis: 50),
+        };
+        var root = GameStateBuilder.BuildInitialStepState(craft) with
+        {
+            Index = 20,
+            Progress = 9_524,
+            Quality = 16_764,
+            Durability = 5,
+            RemainingCP = 268,
+            Condition = Condition.Normal,
+            IQStacks = 9,
+            InnovationLeft = 1,
+            CarefulObservationLeft = 0,
+            CrafterDelineationsLeft = 54,
+            HeartAndSoulAvailable = false,
+            QuickInnoLeft = 0,
+            QuickInnoAvailable = false,
+            TrainedPerfectionActive = false,
+            TrainedPerfectionAvailable = false,
+            ComboAction = VulcanSkill.None,
+            PrevComboAction = VulcanSkill.AdvancedTouch,
+        };
+        var result = CraftingPluginPathSimulator.Run(
+            craft,
+            root,
+            new LiveDonatelloIncumbentDefinition([VulcanSkill.CarefulSynthesis]),
+            liveRecoveryMode: null,
+            new PluginPathSimulationScenario(
+                GameSeed: 37_909,
+                ForcedConditions: Enumerable.Range(1, 10)
+                    .ToDictionary(action => action, _ => Condition.Normal)));
+
+        require(result is
+                {
+                    SynthesisCompleted: true,
+                    FullQuality: true,
+                    SolverTerminalFailure: false,
+                    FailureReason: null,
+                }
+                && result.FinalState.Quality == craft.CraftQualityMax
+                && result.Trace.Count > 1
+                && result.Trace[0].ExecutedAction != VulcanSkill.CarefulSynthesis,
+            $"late-root plugin replan must replace the below-maximum finisher with a guaranteed max-quality continuation; actions=[{string.Join(",", result.Trace.Select(entry => entry.ExecutedAction))}], final={result.FinalState}, failure={result.FailureReason}");
     }
 
     private static void ValidateGabrielCatalog(Action<bool, string> require)
@@ -1567,6 +1645,17 @@ internal static class PluginPathSimulationAcceptanceTests
 
         public Solver CreateLive(CraftState craft)
             => new DonatelloSolver(solution, craft);
+    }
+
+    private sealed class LiveDonatelloIncumbentDefinition(IReadOnlyList<VulcanSkill> incumbent) : ISolverDefinition
+    {
+        public IEnumerable<ISolverDefinition.Desc> Flavors(CraftState craft)
+        {
+            yield return new(this, 0, 1000, "Live Donatello incumbent");
+        }
+
+        public Solver Create(CraftState craft, int flavor)
+            => new DonatelloSolver(craft, incumbent);
     }
 
     private sealed class SeededRaphaelDefinition(CachedRaphaelSolution solution) : ISolverDefinition

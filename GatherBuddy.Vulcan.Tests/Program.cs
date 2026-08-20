@@ -1639,6 +1639,47 @@ Require(DonatelloSolver.ShouldReplanBeforeCompletion(
             uncappedQualityCompletionRoot,
             VulcanSkill.BasicSynthesis),
     "normal quality-mode Donatello must replan before a guaranteed progress-completing action that leaves quality below maximum, while ProgressOnly, Expert, and Cosmic crafts preserve their separate completion contracts");
+var completionFloorRoot = uncappedQualityCompletionRoot with
+{
+    RemainingCP = DonatelloSolver.CompletionQualitySearchMinimumCP,
+};
+Require(DonatelloSolver.ApplyCompletionQualitySearchDeadlineFloor(
+            craft,
+            completionFloorRoot,
+            [VulcanSkill.BasicSynthesis],
+            1_250,
+            1_250)
+        == (DonatelloSolver.CompletionQualitySearchMinimumQuietPeriodMillis,
+            DonatelloSolver.CompletionQualitySearchMinimumQuietPeriodMillis)
+        && DonatelloSolver.ApplyCompletionQualitySearchDeadlineFloor(
+            craft,
+            completionFloorRoot,
+            [VulcanSkill.BasicSynthesis],
+            1_250,
+            0)
+        == (DonatelloSolver.CompletionQualitySearchMinimumQuietPeriodMillis, 0)
+        && DonatelloSolver.ApplyCompletionQualitySearchDeadlineFloor(
+            craft,
+            completionFloorRoot with { RemainingCP = DonatelloSolver.CompletionQualitySearchMinimumCP - 1 },
+            [VulcanSkill.BasicSynthesis],
+            1_250,
+            1_250)
+        == (1_250, 1_250)
+        && DonatelloSolver.ApplyCompletionQualitySearchDeadlineFloor(
+            craft,
+            completionFloorRoot,
+            [VulcanSkill.BasicSynthesis],
+            15_000,
+            15_000)
+        == (15_000, 15_000)
+        && DonatelloSolver.ApplyCompletionQualitySearchDeadlineFloor(
+            craft,
+            completionFloorRoot,
+            [VulcanSkill.BasicTouch],
+            1_250,
+            1_250)
+        == (1_250, 1_250),
+    "a below-maximum guaranteed finisher with at least 18 current CP must receive a 10-second search floor without shortening longer settings or affecting non-finishers");
 var maxQualityCompletion = new DonatelloPlanEvaluation(
     true, craft.CraftQualityMax, 10, 30, []);
 Require(DonatelloSolverDefinition.ShouldUseStaticPlan(craft, maxQualityCompletion)
