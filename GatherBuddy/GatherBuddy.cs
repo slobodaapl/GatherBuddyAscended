@@ -1,9 +1,11 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Net.Http;
 using System.Reflection;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Dalamud;
@@ -34,6 +36,13 @@ using ElliLib;
 using ElliLib.Classes;
 using ElliLib.Log;
 using GatherBuddy.AutoGather;
+using GatherBuddy.FcMesh.Chest;
+using GatherBuddy.FcMesh.Fulfillment;
+using GatherBuddy.FcMesh.Native;
+using GatherBuddy.FcMesh.Protocol;
+using GatherBuddy.FcMesh.Publication;
+using GatherBuddy.FcMesh.Sessions;
+using GatherBuddy.FcMesh.State;
 using Dalamud.IoC;
 using Dalamud.Game.ClientState.Objects.SubKinds;
 using ElliCon.Core;
@@ -83,6 +92,16 @@ public partial class GatherBuddy : IDalamudPlugin
     public static Crafting.RaphaelSolveCoordinator RaphaelSolveCoordinator { get; private set; } = null!;
     public static Crafting.RecipeBrowserSettings RecipeBrowserSettings { get; private set; } = null!;
     public static Crafting.ArtisanIpcShim? ArtisanShim { get; private set; }
+    public static FcChestFeasibilityProbe? FcChestProbe { get; private set; }
+    public static FcMeshNativeCoordinator? FcMeshNative { get; private set; }
+    public static FcPublishedListService? FcPublishedLists { get; private set; }
+    public static FcWorkerSessionService? FcWorkerSessions { get; private set; }
+    public static FcChestPublicationService? FcChestPublication { get; private set; }
+    /// <summary>
+    /// Developer-only in-memory FC world. It never reaches native mesh,
+    /// physical chest interaction, travel, or player inventory.
+    /// </summary>
+    public static FcSyntheticFulfillmentDriver? FcSyntheticFulfillment { get; private set; }
     internal static Crafting.NativeRecipeCraftingUi? NativeRecipeCraftingUi { get; private set; }
     public static Gui.CraftingStatusWindow? CraftingStatusWindow { get; private set; }
     public static Gui.VulcanWindow? VulcanWindow { get; private set; }
@@ -118,6 +137,11 @@ public partial class GatherBuddy : IDalamudPlugin
     internal Gui.CollectablesWindow?                 _collectablesWindow;
     private bool _disposeStarted;
     private bool _disposeCompleted;
+    private static FcGameVersionProvider? _fcGameVersionProvider;
+    private string? _fcMeshStorageDirectory;
+    private string? _fcMeshRuntimeScope;
+    private long _fcMeshRuntimeGeneration;
+    private Task<FcMeshRuntimeServices?>? _fcMeshServicesTask;
 
     internal readonly GatherBuddyIpc Ipc;
     //    internal readonly WotsitIpc Wotsit;
@@ -127,6 +151,8 @@ public partial class GatherBuddy : IDalamudPlugin
         try
         {
             Dalamud.Initialize(pluginInterface);
+            _fcGameVersionProvider = new FcGameVersionProvider(
+                Dalamud.PluginInterface.GetType().Assembly.Location);
             Icons.Init(Dalamud.GameData, Dalamud.Textures);
             Log     = new Logger();
             Version = Assembly.GetExecutingAssembly().GetName().Version?.ToString() ?? "";
@@ -196,6 +222,9 @@ public partial class GatherBuddy : IDalamudPlugin
             BiteTimerService = new AutoHookIntegration.BiteTimerService(pluginInterface.ConfigDirectory.FullName);
             AutoGather   = new AutoGather.AutoGather(this);
             CollectableManager = new AutoGather.Collectables.CollectableManager(Dalamud.Framework, Dalamud.Conditions, Config);
+            FcChestProbe = new FcChestFeasibilityProbe(Dalamud.Framework);
+            FcSyntheticFulfillment = new FcSyntheticFulfillmentDriver();
+            _fcMeshStorageDirectory = Path.Combine(pluginInterface.ConfigDirectory.FullName, "fcmesh");
             global::GatherBuddy.AutoGather.Collectables.CollectableInventoryHelper.InitializeAsync();
             CraftingGatherBridge.BindCollectableManager(CollectableManager);
             ArtisanShim = new Crafting.ArtisanIpcShim(pluginInterface);
@@ -411,6 +440,269 @@ public partial class GatherBuddy : IDalamudPlugin
         throw new TimeoutException("Dalamud framework callback did not run before the dispatch timeout.");
     }
 
+    internal static string? CurrentFcCharacterScope()
+    {
+        try
+        {
+            if (!Dalamud.PlayerState.IsLoaded || Dalamud.PlayerState.ContentId == 0)
+                return null;
+            return Dalamud.PlayerState.ContentId.ToString("X16", CultureInfo.InvariantCulture);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    internal static CharacterIdentity? CurrentFcCharacterIdentity()
+    {
+        try
+        {
+            var scope = CurrentFcCharacterScope();
+            var player = Dalamud.Objects.LocalPlayer;
+            if (scope is null || player is null)
+                return null;
+            return new CharacterIdentity(
+                scope,
+                player.Name.ToString(),
+                player.HomeWorld.Value.Name.ToString());
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    internal static string? CurrentFcGameVersion()
+        // Provider reads the loaded Dalamud hook's host-owned SupportedGameVer
+        // metadata off the framework thread; null keeps publication read-only.
+        => _fcGameVersionProvider?.CurrentVersion;
+
+    /// <summary>
+    /// Binds the managed/native FC mesh runtime to the current character. The
+    /// identity check and all lifecycle transitions happen on the framework
+    /// thread. A new native handle is created for each character so no queued
+    /// command can cross an author scope boundary.
+    /// </summary>
+    private void UpdateFcMeshRuntime()
+    {
+        var scope = CurrentFcCharacterScope();
+        if (scope is null)
+        {
+            if (FcMeshNative is not null || FcPublishedLists is not null || FcWorkerSessions is not null)
+                DisposeFcMeshRuntime();
+            return;
+        }
+
+        if (FcMeshNative is null || !string.Equals(_fcMeshRuntimeScope, scope, StringComparison.Ordinal))
+        {
+            DisposeFcMeshRuntime();
+            if (string.IsNullOrWhiteSpace(_fcMeshStorageDirectory))
+                return;
+            try
+            {
+                var coordinator = new FcMeshNativeCoordinator(new FcMeshNativePInvokeApi());
+                var result = coordinator.Start(
+                    new FcNativeConfiguration(_fcMeshStorageDirectory),
+                    Encoding.UTF8.GetBytes(scope));
+                if (!result.Succeeded)
+                {
+                    coordinator.Dispose();
+                    Log.Warning($"Failed to initialize FC mesh service for character scope: {result.ErrorCode}.");
+                    return;
+                }
+                FcMeshNative = coordinator;
+                _fcMeshRuntimeScope = scope;
+            }
+            catch (Exception exception)
+            {
+                Log.Warning($"Failed to initialize FC mesh service: {exception.Message}");
+                return;
+            }
+        }
+
+        FcMeshNative?.Tick(TimeSpan.FromMilliseconds(2));
+        TryInstallFcMeshServices();
+    }
+
+    private void TryInstallFcMeshServices()
+    {
+        if (FcMeshNative is null
+            || string.IsNullOrWhiteSpace(_fcMeshStorageDirectory)
+            || string.IsNullOrWhiteSpace(FcMeshNative.LocalAuthorId)
+            || FcPublishedLists is not null)
+            return;
+
+        if (_fcMeshServicesTask is { IsCompleted: true } completed)
+        {
+            _fcMeshServicesTask = null;
+            FcMeshRuntimeServices? services = null;
+            try { services = completed.GetAwaiter().GetResult(); }
+            catch (Exception exception) { Log.Warning($"Failed to load FC mesh state: {exception.Message}"); }
+            if (services is not null)
+            {
+                if (services.Generation == _fcMeshRuntimeGeneration
+                    && services.Native == FcMeshNative
+                    && string.Equals(services.Scope, _fcMeshRuntimeScope, StringComparison.Ordinal))
+                {
+                    FcPublishedLists = services.PublishedLists;
+                    FcChestPublication = services.ChestPublication;
+                    FcWorkerSessions = services.WorkerSessions;
+                    services = null;
+                }
+                services?.Dispose();
+            }
+        }
+
+        if (_fcMeshServicesTask is null)
+        {
+            var coordinator = FcMeshNative;
+            var scope = _fcMeshRuntimeScope;
+            var storage = _fcMeshStorageDirectory;
+            var generation = _fcMeshRuntimeGeneration;
+            if (coordinator is not null
+                && scope is { Length: > 0 }
+                && storage is { Length: > 0 })
+            {
+                var selectedScope = scope;
+                var selectedStorage = storage;
+                _fcMeshServicesTask = Task.Run<FcMeshRuntimeServices?>(() =>
+                    CreateFcMeshServices(coordinator, selectedScope, selectedStorage, generation));
+            }
+        }
+    }
+
+    private FcMeshRuntimeServices CreateFcMeshServices(
+        FcMeshNativeCoordinator coordinator,
+        string scope,
+        string storage,
+        long generation)
+    {
+        var fcPublicationState = new FcFilePublicationStateStore(storage);
+        var fcPublicationTransport = new FcMeshNativePublicationTransport(coordinator);
+        FcPublishedListService? publishedLists = null;
+        FcChestPublicationService? chestPublication = null;
+        FcWorkerSessionService? workerSessions = null;
+        try
+        {
+            publishedLists = new FcPublishedListService(
+                fcPublicationState,
+                fcPublicationTransport,
+                () => scope,
+                () => coordinator.LocalAuthorId,
+                () => new FcCompatibilityContext(
+                    FcPublishedListMapper.CurrentPlannerSemanticsVersion,
+                    CurrentFcGameVersion() ?? string.Empty),
+                localListExists: identity => CraftingListManager.GetListByID(identity.ListId) is { } local
+                    && local.CreatedAt.ToUniversalTime() == identity.CreatedAtUtc);
+            chestPublication = new FcChestPublicationService(
+                fcPublicationState,
+                fcPublicationTransport,
+                new FcCompleteChestReader(new FcChestSnapshotReader()),
+                () => scope,
+                () => coordinator.LocalAuthorId);
+            workerSessions = new FcWorkerSessionService(
+                new FcFileWorkerSessionStateStore(storage),
+                fcPublicationTransport,
+                () => scope,
+                () => coordinator.LocalAuthorId,
+                () => new FcCompatibilityContext(
+                    FcPublishedListMapper.CurrentPlannerSemanticsVersion,
+                    CurrentFcGameVersion() ?? string.Empty),
+                () => publishedLists.PublicLists,
+                CurrentFcCharacterIdentity,
+                () => CurrentFcGameVersion() ?? string.Empty,
+                FcSystemClock.Instance,
+                physicalSnapshotProvider: physicalClosure =>
+                    FcWorkerPhysicalInventorySnapshot.Capture(physicalClosure));
+            return new FcMeshRuntimeServices(
+                coordinator,
+                scope,
+                generation,
+                publishedLists,
+                chestPublication,
+                workerSessions);
+        }
+        catch
+        {
+            workerSessions?.Dispose();
+            chestPublication?.Dispose();
+            publishedLists?.Dispose();
+            throw;
+        }
+    }
+
+    private void DisposeFcMeshRuntime()
+    {
+        _fcMeshRuntimeGeneration++;
+        var servicesTask = _fcMeshServicesTask;
+        _fcMeshServicesTask = null;
+        if (servicesTask is not null)
+        {
+            _ = servicesTask.ContinueWith(
+                completed =>
+                {
+                    if (completed.Status == TaskStatus.RanToCompletion)
+                        completed.Result?.Dispose();
+                    else
+                        _ = completed.Exception;
+                },
+                TaskScheduler.Default);
+        }
+        FcWorkerSessions?.Dispose();
+        FcWorkerSessions = null;
+        FcChestPublication?.Dispose();
+        FcChestPublication = null;
+        FcPublishedLists?.Dispose();
+        FcPublishedLists = null;
+        FcMeshNative?.Dispose();
+        FcMeshNative = null;
+        _fcMeshRuntimeScope = null;
+    }
+
+    private sealed class FcMeshRuntimeServices : IDisposable
+    {
+        public FcMeshRuntimeServices(
+            FcMeshNativeCoordinator native,
+            string scope,
+            long generation,
+            FcPublishedListService publishedLists,
+            FcChestPublicationService chestPublication,
+            FcWorkerSessionService workerSessions)
+        {
+            Native = native;
+            Scope = scope;
+            Generation = generation;
+            PublishedLists = publishedLists;
+            ChestPublication = chestPublication;
+            WorkerSessions = workerSessions;
+        }
+
+        public FcMeshNativeCoordinator Native { get; }
+        public string Scope { get; }
+        public long Generation { get; }
+        public FcPublishedListService PublishedLists { get; }
+        public FcChestPublicationService ChestPublication { get; }
+        public FcWorkerSessionService WorkerSessions { get; }
+
+        public void Dispose()
+        {
+            WorkerSessions.Dispose();
+            ChestPublication.Dispose();
+            PublishedLists.Dispose();
+        }
+    }
+
+    public static FcNativeCallResult ConfigureFcMeshCharacterAuthor()
+    {
+        if (FcMeshNative is null)
+            return new FcNativeCallResult((uint)FcNativeErrorCode.InvalidHandle, 0, 0);
+        var scope = CurrentFcCharacterScope();
+        if (scope is null)
+            return new FcNativeCallResult((uint)FcNativeErrorCode.InvalidState, 0, 0);
+        return FcMeshNative.SetCharacterAuthor(Encoding.UTF8.GetBytes(scope));
+    }
+
     internal static async Task InvalidateMarketplaceMarketDataOnFrameworkThreadAsync(
         uint itemId,
         bool currentWorldOnly,
@@ -567,6 +859,18 @@ public partial class GatherBuddy : IDalamudPlugin
     private unsafe void Update(IFramework framework)
     {
         Config.SaveIfDirty();
+        try
+        {
+            UpdateFcMeshRuntime();
+            FcChestPublication?.ProcessFrameworkCommands();
+            FcPublishedLists?.ReconcileAuthoritativeState();
+            FcWorkerSessions?.ReconcileAuthoritativeState();
+            FcWorkerSessions?.Tick();
+        }
+        catch (Exception exception)
+        {
+            Log.Error($"Error while running FC mesh update: {exception.Message}");
+        }
         var prev = LastObjectsLength;
         LastObjectsLength = Dalamud.Objects.Length;
         //Scan objects every 5 secons or when the number of objects change
@@ -726,6 +1030,11 @@ public partial class GatherBuddy : IDalamudPlugin
         ArtisanShim = null;
         ExpertConditionSampler.Dispose();
         CraftingGameInterop.Dispose();
+        FcChestProbe?.Dispose();
+        FcChestProbe = null;
+        DisposeFcMeshRuntime();
+        _fcGameVersionProvider = null;
+        FcSyntheticFulfillment = null;
         FishRecorder?.Dispose();
         ContextMenu?.Dispose();
         UptimeManager?.Dispose();

@@ -37,6 +37,13 @@ CollectableTerminalActionAcceptanceTests.Run(Require);
 TimedLegendaryGpAcceptanceTests.Run(Require);
 CraftingMaterialSelectionAcceptanceTests.Run(Require);
 NativeRecipeCraftingTests.Run(Require);
+FcMeshPhase0Tests.Run(Require);
+FcMeshPhase2Tests.Run(Require);
+FcMeshPhase3Tests.Run(Require);
+FcMeshChestTests.Run(Require);
+FcMeshNativeTests.Run(Require);
+FcMeshPhase5Tests.Run(Require);
+FcMeshPhase6Tests.Run(Require);
 
 static CraftState Craft() => new()
 {

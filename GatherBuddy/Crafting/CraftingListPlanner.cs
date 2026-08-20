@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using GatherBuddy.FcMesh.Fulfillment;
 using GatherBuddy.Plugin;
 using Lumina.Excel.Sheets;
 
@@ -37,7 +38,13 @@ internal sealed class CraftingMaterialDemandNode(uint itemId, IngredientQualityD
 public readonly record struct AcquiredDependencyAvailability(int NQ, int HQ)
 {
     public int Total
-        => Math.Max(0, NQ) + Math.Max(0, HQ);
+    {
+        get
+        {
+            var total = (long)Math.Max(0, NQ) + Math.Max(0, HQ);
+            return total >= int.MaxValue ? int.MaxValue : (int)total;
+        }
+    }
 
     public AcquiredDependencyAvailability Normalize()
         => new(Math.Max(0, NQ), Math.Max(0, HQ));
@@ -64,12 +71,23 @@ public readonly record struct CraftingListPlannerOptions(
     bool ConsumeIntermediateAvailability = true,
     bool ConsumeFinalAvailability = true,
     IReadOnlyDictionary<uint, AcquiredDependencyAvailability>? AcquiredAvailability = null,
-    Func<Recipe, bool>? CanCraftPrecraft = null);
+    Func<Recipe, bool>? CanCraftPrecraft = null,
+    CraftingPlanningContext? PlanningContext = null);
 
 public static class CraftingListPlanner
 {
     public static CraftingListPlan Build(CraftingListDefinition list, CraftingListPlannerOptions options = default)
-        => new Planner(list, options).Build();
+    {
+        ArgumentNullException.ThrowIfNull(list);
+        return new Planner(list, options, options.PlanningContext ?? CraftingPlanningContext.CreatePrivate()).Build();
+    }
+
+    public static CraftingListPlan Build(
+        CraftingListDefinition list,
+        CraftingPlanningContext planningContext)
+        => Build(
+            list,
+            new CraftingListPlannerOptions(PlanningContext: planningContext));
 
     /// <summary>
     /// Builds an exact-count queue for an external orchestrator. Immediate
@@ -124,10 +142,12 @@ public static class CraftingListPlanner
         private readonly bool _consumeFinalAvailability;
         private readonly Func<Recipe, bool>? _canCraftPrecraft;
         private readonly Dictionary<uint, CraftingListItem> _originalRecipeLookup;
+        private readonly CraftingPlanningContext _planningContext;
 
-        public Planner(CraftingListDefinition list, CraftingListPlannerOptions options)
+        public Planner(CraftingListDefinition list, CraftingListPlannerOptions options, CraftingPlanningContext planningContext)
         {
             _list = list;
+            _planningContext = planningContext;
             _useRetainers = options.UseRetainerCraftableAvailability;
             _consumeIntermediateAvailability = options.ConsumeIntermediateAvailability;
             _consumeFinalAvailability = options.ConsumeFinalAvailability;
@@ -135,7 +155,10 @@ public static class CraftingListPlanner
             _originalRecipeLookup = list.Recipes
                 .GroupBy(item => item.RecipeId)
                 .ToDictionary(group => group.Key, group => group.First());
-            _availability = new AvailabilityLedger(_useRetainers, options.AcquiredAvailability);
+            _availability = new AvailabilityLedger(
+                _useRetainers,
+                options.AcquiredAvailability,
+                _planningContext.RepresentedInventory);
         }
 
         public CraftingListPlan Build()
@@ -363,6 +386,7 @@ public static class CraftingListPlanner
     private sealed class AvailabilityLedger
     {
         private readonly bool _useRetainers;
+        private readonly IItemQuantitySource _inventorySource;
         private readonly Dictionary<uint, PlannedAvailability> _plannedAvailable = new();
         private readonly Dictionary<uint, PlannedAvailability> _acquiredAvailable = new();
         private readonly Dictionary<uint, (int NQ, int HQ)> _inventoryAvailable = new();
@@ -370,9 +394,11 @@ public static class CraftingListPlanner
 
         public AvailabilityLedger(
             bool useRetainers,
-            IReadOnlyDictionary<uint, AcquiredDependencyAvailability>? acquiredAvailability)
+            IReadOnlyDictionary<uint, AcquiredDependencyAvailability>? acquiredAvailability,
+            IItemQuantitySource inventorySource)
         {
             _useRetainers = useRetainers;
+            _inventorySource = inventorySource ?? throw new ArgumentNullException(nameof(inventorySource));
             if (acquiredAvailability == null)
                 return;
 
@@ -498,11 +524,11 @@ public static class CraftingListPlanner
                 ledger[itemId] = available;
             }
 
-            var totalAvailable = available.NQ + available.HQ;
+            var totalAvailable = (long)Math.Max(0, available.NQ) + Math.Max(0, available.HQ);
             if (totalAvailable <= 0)
                 return 0;
 
-            var consumed = Math.Min(requested, totalAvailable);
+            var consumed = (int)Math.Min((long)requested, totalAvailable);
             var remainingNQ = available.NQ;
             var remainingHQ = available.HQ;
             var consumeNQ = Math.Min(consumed, remainingNQ);
@@ -535,16 +561,9 @@ public static class CraftingListPlanner
             return remaining;
         }
 
-        private static (int NQ, int HQ) GetInventorySplitCounts(uint itemId)
+        private (int NQ, int HQ) GetInventorySplitCounts(uint itemId)
         {
-            try
-            {
-                return CraftingInventoryCounter.GetInventorySplitCounts(itemId);
-            }
-            catch
-            {
-                return (0, 0);
-            }
+            return (_inventorySource.GetNq(itemId), _inventorySource.GetHq(itemId));
         }
 
         private static (int NQ, int HQ) GetRetainerSplitCounts(uint itemId)

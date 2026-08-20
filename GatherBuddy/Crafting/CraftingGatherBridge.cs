@@ -10,6 +10,8 @@ using GatherBuddy.Automation;
 using GatherBuddy.AutoGather.Lists;
 using GatherBuddy.AutoGather.Collectables;
 using GatherBuddy.Crafting.Acquisition;
+using GatherBuddy.FcMesh.Fulfillment;
+using GatherBuddy.FcMesh.Protocol;
 using GatherBuddy.Helpers;
 using GatherBuddy.Interfaces;
 using Lumina.Excel.Sheets;
@@ -71,9 +73,16 @@ public static class CraftingGatherBridge
     }
 
     private static int RoundUpToBatchSize(int quantity, int batchSize)
-        => batchSize <= 1
-            ? quantity
-            : (int)Math.Ceiling((double)quantity / batchSize) * batchSize;
+    {
+        if (quantity <= 0 || batchSize <= 1)
+            return quantity;
+
+        var batchCount = ((long)quantity + batchSize - 1) / batchSize;
+        var rounded = checked(batchCount * batchSize);
+        if (rounded > int.MaxValue)
+            throw new InvalidOperationException("Gather target exceeds the supported quantity range.");
+        return (int)rounded;
+    }
 
     public static void BindCollectableManager(CollectableManager manager)
     {
@@ -207,6 +216,8 @@ public static class CraftingGatherBridge
         {
             Name = listName,
             Enabled = false,
+            CompletionProvider = CreateGatherCompletionProvider(),
+            CompletionScope = CreateGatherCompletionScope(),
         };
 
         foreach (var (itemId, quantity) in materials)
@@ -228,6 +239,8 @@ public static class CraftingGatherBridge
 
             if (!gatherList.Add(gatherable, (uint)gatherQuantity, completionItemId))
                 GatherBuddy.Log.Debug($"[CraftingGatherBridge] Gather target {gatherable.ItemId} is duplicated in '{listName}', skipping item {itemId}");
+            else
+                gatherList.SetCompletionQuality(gatherable, GetGatherCompletionQuality(completionItemId == 0 ? gatherable.ItemId : completionItemId));
         }
 
         return gatherList;
@@ -275,19 +288,51 @@ public static class CraftingGatherBridge
         {
             if (completionItemId != 0)
                 return quantityIsDeficit
-                    ? checked(GetInventoryCount(itemId) + quantity)
+                    ? checked(GetCompletionCount(itemId) + quantity)
                     : quantity;
 
             return quantity;
         }
-        var approvedDeficit = Math.Max(0, quantity - GetInventoryCount(itemId));
-        if (approvedDeficit <= 0)
+        var batchSize = AutoGather.Helpers.Diadem.ApprovedInspectionBatchSizes.TryGetValue(itemId, out var configuredBatchSize) && configuredBatchSize > 0
+            ? configuredBatchSize > (uint)int.MaxValue
+                ? throw new InvalidOperationException("Gather batch size exceeds the supported quantity range.")
+                : (int)configuredBatchSize
+            : 1;
+        var representedDemand = BuildRepresentedMaterialDemand(itemId, quantity, quantityIsDeficit);
+        return ComputeGatherTargetQuantityForSource(
+            quantity,
+            quantityIsDeficit,
+            isApprovedItem: true,
+            isFcFulfillment: _activeExecutionPlan?.ExecutionSource == ExecutionSource.FcFulfillment,
+            currentCount: representedDemand?.CurrentRepresented ?? GetCompletionCount(itemId),
+            batchSize);
+    }
+
+    internal static int ComputeGatherTargetQuantityForSource(
+        int quantity,
+        bool quantityIsDeficit,
+        bool isApprovedItem,
+        bool isFcFulfillment,
+        int currentCount,
+        int batchSize)
+    {
+        if (quantity <= 0)
             return 0;
 
-        var batchSize = AutoGather.Helpers.Diadem.ApprovedInspectionBatchSizes.TryGetValue(itemId, out var configuredBatchSize) && configuredBatchSize > 0
-            ? (int)configuredBatchSize
-            : 1;
-        return RoundUpToBatchSize(approvedDeficit, batchSize);
+        if (!isApprovedItem)
+            return quantityIsDeficit
+                ? checked(Math.Max(0, currentCount) + quantity)
+                : quantity;
+
+        if (isFcFulfillment)
+            return quantityIsDeficit
+                ? checked(Math.Max(0, currentCount) + quantity)
+                : quantity;
+
+        var approvedDeficit = Math.Max(0, quantity - Math.Max(0, currentCount));
+        return approvedDeficit <= 0
+            ? 0
+            : RoundUpToBatchSize(approvedDeficit, batchSize);
     }
 
     private static void ResolveCraftingGatherItemIds(
@@ -663,7 +708,9 @@ public static class CraftingGatherBridge
             _gatherList = new AutoGatherList()
             {
                 Name = "Crafting Materials (Auto-Generated)",
-                Enabled = true
+                Enabled = true,
+                CompletionProvider = CreateGatherCompletionProvider(),
+                CompletionScope = CreateGatherCompletionScope(),
             };
 
             foreach (var (itemId, quantity) in ingredients)
@@ -678,9 +725,15 @@ public static class CraftingGatherBridge
                     continue;
                 
                 if (GatherBuddy.GameData.Gatherables.TryGetValue(gatherItemId, out var gatherable))
+                {
                     _gatherList.Add(gatherable, (uint)gatherQuantity, completionItemId);
+                    _gatherList.SetCompletionQuality(gatherable, GetGatherCompletionQuality(completionItemId == 0 ? gatherable.ItemId : completionItemId));
+                }
                 else if (GatherBuddy.GameData.Fishes.TryGetValue(gatherItemId, out var fish))
+                {
                     _gatherList.Add(fish, (uint)gatherQuantity, completionItemId);
+                    _gatherList.SetCompletionQuality(fish, GetGatherCompletionQuality(completionItemId == 0 ? fish.ItemId : completionItemId));
+                }
                 else
                     GatherBuddy.Log.Debug($"[CraftingGatherBridge] Item {gatherItemId} not found in gatherables or fish, skipping");
             }
@@ -894,7 +947,7 @@ public static class CraftingGatherBridge
             var needed = _gatherList.Quantities.TryGetValue(item, out var qty) ? qty : 0;
             var completionItemId = _gatherList.CompletionItemIds.GetValueOrDefault(item);
             var countedItemId = completionItemId == 0 ? item.ItemId : completionItemId;
-            var (nq, hq) = CraftingInventoryCounter.GetInventorySplitCounts(countedItemId);
+            var (nq, hq) = GetCompletionSplitCounts(countedItemId);
             var demand = _activeExecutionPlan?.IngredientDemandsView.GetValueOrDefault(countedItemId) ?? default;
             if (!IsGatheringItemComplete(needed, demand, nq, hq))
             {
@@ -928,6 +981,82 @@ public static class CraftingGatherBridge
         {
             return 0;
         }
+    }
+
+    private static int GetCompletionCount(uint itemId)
+    {
+        if (_activeExecutionPlan?.ExecutionSource == ExecutionSource.FcFulfillment)
+        {
+            var source = _activeExecutionPlan.PlanningContext.RepresentedInventory;
+            var total = (long)Math.Max(0, source.GetNq(itemId)) + Math.Max(0, source.GetHq(itemId));
+            return total >= int.MaxValue ? int.MaxValue : (int)total;
+        }
+
+        return GetInventoryCount(itemId);
+    }
+
+    private static (int NQ, int HQ) GetCompletionSplitCounts(uint itemId)
+    {
+        if (_activeExecutionPlan?.ExecutionSource == ExecutionSource.FcFulfillment)
+        {
+            var source = _activeExecutionPlan.PlanningContext.RepresentedInventory;
+            return (source.GetNq(itemId), source.GetHq(itemId));
+        }
+
+        try
+        {
+            return CraftingInventoryCounter.GetInventorySplitCounts(itemId);
+        }
+        catch
+        {
+            return (0, 0);
+        }
+    }
+
+    private static ICompletionCountProvider? CreateGatherCompletionProvider()
+        => _activeExecutionPlan?.ExecutionSource == ExecutionSource.FcFulfillment
+            ? new FcCompletionCountProvider(_activeExecutionPlan.PlanningContext.RepresentedInventory)
+            : null;
+
+    private static string CreateGatherCompletionScope()
+    {
+        if (_activeExecutionPlan?.FcContext is not { } context)
+            return AutoGatherList.DefaultCompletionScope;
+
+        return $"fc:{_activeExecutionPlan!.ListId}:{context.SessionId:N}:{string.Join(",", context.Lists.Select(list => list.ToString("N")))}:{context.WorldFingerprint}";
+    }
+
+    private static FcItemQuality? GetGatherCompletionQuality(uint itemId)
+    {
+        if (_activeExecutionPlan?.ExecutionSource != ExecutionSource.FcFulfillment)
+            return null;
+
+        var demand = _activeExecutionPlan.IngredientDemandsView.GetValueOrDefault(itemId);
+        if (demand.RequiredHQ > 0)
+            return FcItemQuality.Hq;
+        if (demand.RequiredNQ > 0)
+            return FcItemQuality.Nq;
+        return null;
+    }
+
+    private static MaterialDemand? BuildRepresentedMaterialDemand(
+        uint itemId,
+        int quantity,
+        bool quantityIsDeficit)
+    {
+        if (_activeExecutionPlan?.ExecutionSource != ExecutionSource.FcFulfillment)
+            return null;
+
+        var quality = GetGatherCompletionQuality(itemId);
+        if (quality is not { } requiredQuality)
+            return null;
+
+        var source = _activeExecutionPlan.PlanningContext.RepresentedInventory;
+        var current = source.GetQuantity(itemId, requiredQuality);
+        var required = quantityIsDeficit
+            ? checked(current + quantity)
+            : quantity;
+        return MaterialDemandBuilder.Build(itemId, requiredQuality, required, source);
     }
     
     public static void TestRepairSystem()

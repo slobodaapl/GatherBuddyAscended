@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using FFXIVClientStructs.FFXIV.Client.UI.Misc;
+using GatherBuddy.FcMesh.Fulfillment;
 using Lumina.Excel.Sheets;
 
 namespace GatherBuddy.Crafting;
@@ -164,6 +165,17 @@ internal static unsafe class CraftingQueuePreflight
 
     internal static bool TryValidateMaterials(CraftingExecutionPlan plan, out string failure)
     {
+        ArgumentNullException.ThrowIfNull(plan);
+        return TryValidateMaterials(plan, plan.PlanningContext.LocalConsumableInventory, out failure);
+    }
+
+    internal static bool TryValidateMaterials(
+        CraftingExecutionPlan plan,
+        IItemQuantitySource localConsumableInventory,
+        out string failure)
+    {
+        ArgumentNullException.ThrowIfNull(plan);
+        ArgumentNullException.ThrowIfNull(localConsumableInventory);
         failure = string.Empty;
         if (plan.MaterialsView.Count == 0)
             return true;
@@ -173,8 +185,9 @@ internal static unsafe class CraftingQueuePreflight
         {
             if (requiredQuantity <= 0)
                 continue;
-            var (nq, hq) = CraftingInventoryCounter.GetInventorySplitCounts(itemId);
-            var total = nq + hq;
+            var nq = localConsumableInventory.GetNq(itemId);
+            var hq = localConsumableInventory.GetHq(itemId);
+            var total = (long)Math.Max(0, nq) + Math.Max(0, hq);
             if (total < requiredQuantity)
             {
                 issues.Add($"{DescribeItem(itemId)} requires {requiredQuantity:N0}, but only {total:N0} are available.");

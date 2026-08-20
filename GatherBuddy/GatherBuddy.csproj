@@ -66,9 +66,20 @@
 	  <ProjectReference Include="..\ElliCon\ElliCon.csproj" />
 	</ItemGroup>
 
-	<ItemGroup>
-	  <Folder Include="AutoGather\Tasks\" />
-	</ItemGroup>
+  <ItemGroup>
+    <Folder Include="AutoGather\Tasks\" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <FcMeshNativeDll>$(MSBuildThisFileDirectory)..\gathermesh\target\x86_64-pc-windows-msvc\release\gathermesh_ffi.dll</FcMeshNativeDll>
+  </PropertyGroup>
+
+  <ItemGroup Condition="Exists('$(FcMeshNativeDll)')">
+    <None Include="$(FcMeshNativeDll)"
+          Link="gathermesh_ffi.dll"
+          CopyToOutputDirectory="PreserveNewest"
+          CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
 
 	<ItemGroup>
 	  <EmbeddedResource Include="CustomInfo\IlvConvertTable.csv" />

@@ -9,6 +9,9 @@ using ElliLib;
 using ElliLib.Raii;
 using FFXIVClientStructs.FFXIV.Client.Game;
 using GatherBuddy.Crafting;
+using GatherBuddy.FcMesh.Protocol;
+using GatherBuddy.FcMesh.Publication;
+using GatherBuddy.FcMesh.Sessions;
 using GatherBuddy.Plugin;
 using Lumina.Excel.Sheets;
 using ImRaii = ElliLib.Raii.ImRaii;
@@ -19,6 +22,8 @@ public partial class VulcanWindow
 {
     private const string CraftingListDragDropPayload = "GatherBuddyCraftingListDragDrop";
     private int? _draggedCraftingListId = null;
+    private readonly HashSet<Guid> _fcSelectedPublicLists = new();
+    private bool _fcUseOwnStock;
     private void DrawCraftingListsTab()
     {
         IDisposable tabItem;
@@ -181,6 +186,8 @@ public partial class VulcanWindow
             DrawListPreviewPanel();
             ImGui.EndChild();
         }
+
+        DrawFcPublicListsReadOnly();
 
     }
 
@@ -487,7 +494,179 @@ public partial class VulcanWindow
                 _previewList = null;
             }
         }
+
+        DrawFcLocalPublicationControls(list);
     }
+
+    private static void DrawFcLocalPublicationControls(CraftingListDefinition list)
+    {
+        var service = GatherBuddy.FcPublishedLists;
+        if (service is null)
+            return;
+
+        ImGui.Spacing();
+        ImGui.Separator();
+        ImGui.TextColored(ImGuiColors.ParsedGold, "FC public list copy");
+        var state = service.State.Lists.FirstOrDefault(value => value.LocalListId == list.ID
+            && value.CreatedAtUtc == list.CreatedAt.ToUniversalTime());
+        if (state?.Pending is { } pending)
+        {
+            ImGui.TextColored(ImGuiColors.DalamudGrey3,
+                $"Publication revision {pending.Revision}: {pending.Status}");
+            if (pending.Status == FcPublicationCommandStatus.Failed
+                && ImGui.Button("Retry FC publication##retryFcList"))
+                _ = service.RetryPending();
+            return;
+        }
+        var published = state?.LastPublishedSnapshot is { Published: true };
+        if (!published)
+        {
+            if (ImGui.Button("Publish to FC##publishFcList"))
+                _ = service.Publish(list);
+        }
+        else
+        {
+            if (ImGui.Button("Update Published FC Copy##updateFcList"))
+                _ = service.Update(list);
+            ImGui.SameLine();
+            if (ImGui.Button("Unpublish FC Copy##unpublishFcList"))
+                _ = service.Unpublish(list);
+        }
+        var diagnostics = service.Diagnostics;
+        ImGui.TextColored(ImGuiColors.DalamudGrey3,
+            $"State: {diagnostics.State}; writes: {(diagnostics.WritesAllowed ? "ready" : "read-only")}");
+        if (!string.IsNullOrWhiteSpace(diagnostics.LastError))
+            ImGui.TextWrapped(diagnostics.LastError);
+    }
+
+    private void DrawFcPublicListsReadOnly()
+    {
+        var service = GatherBuddy.FcPublishedLists;
+        if (service is null || !ImGui.CollapsingHeader("FC public lists (read-only)"))
+            return;
+
+        var session = GatherBuddy.FcWorkerSessions;
+        var compatible = new List<PublishedListRecord>();
+        var allCompatible = new List<PublishedListRecord>();
+        foreach (var view in service.PublicLists)
+        {
+            var record = view.Record;
+            var selected = _fcSelectedPublicLists.Contains(record.ListId);
+            if (view.Published && view.IsCompatible)
+            {
+                allCompatible.Add(record);
+                if (ImGui.Checkbox($"Subscribe {record.DisplayName}##fcSubscribe_{record.ListId:D}_{view.OwnerAuthorId}", ref selected))
+                {
+                    if (selected)
+                        _fcSelectedPublicLists.Add(record.ListId);
+                    else
+                        _fcSelectedPublicLists.Remove(record.ListId);
+                }
+                if (selected)
+                    compatible.Add(record);
+            }
+            ImGui.Text($"{record.DisplayName}  ·  owner {view.OwnerAuthorId}  ·  revision {view.Revision}");
+            ImGui.Text($"Published: {record.Published}; compatibility: {(view.IsCompatible ? "compatible" : view.CompatibilityReason)}");
+            foreach (var target in record.FinalTargets)
+                ImGui.BulletText($"recipe {target.RecipeId} -> item {target.ItemId} x{target.Quantity} ({target.Quality})");
+            ImGui.Text($"Final quality policy: {FormatQualityPolicy(record.FinalQualityPolicy)}");
+            ImGui.Text($"Precraft quality policy: {FormatQualityPolicy(record.PrecraftQualityPolicy)}");
+            if (view.IsOrphanedLocalMapping && service.IsLocalOwner(record))
+            {
+                if (ImGui.Button($"Unpublish retained copy##orphan_{record.ListId:D}"))
+                    _ = service.Unpublish(record.ListId);
+            }
+        }
+
+        if (session is null)
+            return;
+        var diagnostics = session.Diagnostics;
+        ImGui.Separator();
+        ImGui.TextColored(ImGuiColors.ParsedGold, "FC worker subscription (Phase 6; subscription only)");
+        ImGui.Checkbox("Use own stock##fcWorkerUseOwnStock", ref _fcUseOwnStock);
+        var selectedListsValid = compatible.Count > 0
+            && compatible.Count == _fcSelectedPublicLists.Count;
+        var canStart = diagnostics.WritesAllowed
+            && !diagnostics.Forked
+            && !diagnostics.RecoveryRequired;
+        var canRecover = session.RecoveryReady;
+        if (!canStart)
+            ImGui.TextColored(ImGuiColors.DalamudGrey3, "Start controls disabled: native/persistence/author/recovery gate is not ready.");
+        using (ImRaii.Disabled(!canStart || !selectedListsValid))
+        {
+            if (ImGui.Button("Start Selected##fcWorkerStartSelected"))
+            {
+                var closure = FcWorkerDependencyClosure.Build(compatible);
+                if (!closure.Succeeded)
+                    ImGui.TextWrapped(closure.Error);
+                else
+                {
+                    var physical = FcWorkerPhysicalInventorySnapshot.Capture(closure.Keys);
+                    _ = session.StartSelected(_fcSelectedPublicLists, physical, _fcUseOwnStock, closure.Keys);
+                }
+            }
+        }
+        ImGui.SameLine();
+        using (ImRaii.Disabled(!canStart || allCompatible.Count == 0))
+        {
+            if (ImGui.Button("Start All##fcWorkerStartAll"))
+            {
+                var closure = FcWorkerDependencyClosure.Build(allCompatible);
+                if (!closure.Succeeded)
+                    ImGui.TextWrapped(closure.Error);
+                else
+                {
+                    var physical = FcWorkerPhysicalInventorySnapshot.Capture(closure.Keys);
+                    _ = session.StartAll(physical, _fcUseOwnStock, closure.Keys);
+                }
+            }
+        }
+        ImGui.SameLine();
+        using (ImRaii.Disabled(!canRecover))
+        {
+            if (ImGui.Button("Recover##fcWorkerRecover"))
+            {
+                var desired = session.DesiredWorker;
+                var closure = desired is null
+                    ? FcWorkerDependencyClosureResult.Invalid("Durable worker selection is unavailable.")
+                    : FcWorkerDependencyClosure.Build(service.PublicLists, desired.Selection);
+                if (!closure.Succeeded)
+                    ImGui.TextWrapped(closure.Error);
+                else
+                {
+                    var physical = FcWorkerPhysicalInventorySnapshot.Capture(closure.Keys);
+                    _ = session.Recover(physical);
+                }
+            }
+        }
+        ImGui.SameLine();
+        using (ImRaii.Disabled(!diagnostics.IsSubscribed))
+        {
+            if (ImGui.Button("Waiting##fcWorkerWaiting"))
+                _ = session.SetWaiting();
+        }
+        ImGui.SameLine();
+        using (ImRaii.Disabled(!diagnostics.IsSubscribed))
+        {
+            if (ImGui.Button("Active##fcWorkerActive"))
+                _ = session.SetActive();
+        }
+        ImGui.SameLine();
+        using (ImRaii.Disabled(!diagnostics.IsSubscribed))
+        {
+            if (ImGui.Button("Stop##fcWorkerStop"))
+                _ = session.Stop();
+        }
+        ImGui.Text($"Worker: {diagnostics.WorkerState}; session {diagnostics.SessionId:D}; generation {diagnostics.SessionGeneration}; revision {diagnostics.Revision}");
+        ImGui.Text($"Last communication: {diagnostics.LastCommunicationUnixMilliseconds}; next refresh: {diagnostics.NextRefreshUnixMilliseconds}; recovery: {(diagnostics.RecoveryRequired ? "required" : "none")}");
+        if (!string.IsNullOrWhiteSpace(diagnostics.LastError))
+            ImGui.TextWrapped(diagnostics.LastError);
+    }
+
+    private static string FormatQualityPolicy(FcQualityPolicy policy)
+        => policy.Rules.Length == 0
+            ? "none"
+            : string.Join(", ", policy.Rules.Select(rule => $"{rule.ItemId}/{rule.Quality}={rule.Quantity}"));
 
     private void DrawFolderPreviewPanel(string folderPath)
     {

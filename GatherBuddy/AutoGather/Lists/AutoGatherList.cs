@@ -6,6 +6,7 @@ using System.Linq;
 using System.Text;
 using GatherBuddy.Alarms;
 using GatherBuddy.Classes;
+using GatherBuddy.FcMesh.Protocol;
 using GatherBuddy.GatherGroup;
 using GatherBuddy.Interfaces;
 using GatherBuddy.Plugin;
@@ -15,6 +16,8 @@ namespace GatherBuddy.AutoGather.Lists;
 
 public class AutoGatherList
 {
+    public const string DefaultCompletionScope = "private";
+
     public ReadOnlyCollection<IGatherable> Items
         => items.AsReadOnly();
 
@@ -38,11 +41,22 @@ public class AutoGatherList
     public bool   Fallback    { get; set; } = false;
     public bool   RemoveCompletedItems { get; set; } = false;
 
+    [JsonIgnore]
+    public ICompletionCountProvider? CompletionProvider { get; set; } = new DefaultCompletionCountProvider();
+
+    [JsonIgnore]
+    public FcItemQuality? CompletionQuality { get; set; }
+
+    [JsonIgnore]
+    public string CompletionScope { get; set; } = DefaultCompletionScope;
+
     private List<IGatherable>                  items              = [];
     private Dictionary<IGatherable, uint>      quantities         = [];
     private Dictionary<IGatherable, ILocation> preferredLocations = [];
     private Dictionary<IGatherable, bool>      enabledItems       = [];
     private Dictionary<IGatherable, uint>      completionItemIds  = [];
+    [JsonIgnore]
+    private Dictionary<IGatherable, FcItemQuality?> completionQualityOverrides = [];
 
     public AutoGatherList Clone()
         => new()
@@ -52,13 +66,17 @@ public class AutoGatherList
             preferredLocations = new(preferredLocations),
             enabledItems       = new(enabledItems),
             completionItemIds  = new(completionItemIds),
+            completionQualityOverrides = new(completionQualityOverrides),
             Name               = Name,
             Description        = Description,
             FolderPath         = FolderPath,
             Order              = Order,
             Enabled            = false,
             Fallback           = Fallback,
-            RemoveCompletedItems = RemoveCompletedItems
+            RemoveCompletedItems = RemoveCompletedItems,
+            CompletionProvider  = CompletionProvider,
+            CompletionQuality   = CompletionQuality,
+            CompletionScope     = CompletionScope,
         };
 
     public bool Add(IGatherable item, uint quantity = 1, uint completionItemId = 0)
@@ -81,7 +99,21 @@ public class AutoGatherList
         quantities.Remove(item);
         preferredLocations.Remove(item);
         completionItemIds.Remove(item);
+        completionQualityOverrides.Remove(item);
         items.RemoveAt(index);
+    }
+
+    public FcItemQuality? GetCompletionQuality(IGatherable item)
+        => completionQualityOverrides.TryGetValue(item, out var quality)
+            ? quality
+            : CompletionQuality;
+
+    public void SetCompletionQuality(IGatherable item, FcItemQuality? quality)
+    {
+        if (quality is { } value)
+            completionQualityOverrides[item] = value;
+        else
+            completionQualityOverrides.Remove(item);
     }
 
     public bool Replace(int index, IGatherable item, uint completionItemId = 0)
@@ -110,11 +142,14 @@ public class AutoGatherList
         if (old is Gatherable gatherable)
             preferredLocations.Remove(gatherable);
         completionItemIds.Remove(old);
+        completionQualityOverrides.Remove(old, out var quality);
         items[index]       = item;
         quantities[item]   = NormalizeQuantity(item, quantity);
         enabledItems[item] = enabled;
         if (completionItemId != 0 && completionItemId != item.ItemId)
             completionItemIds[item] = completionItemId;
+        if (quality is { } value)
+            completionQualityOverrides[item] = value;
 
         return true;
     }

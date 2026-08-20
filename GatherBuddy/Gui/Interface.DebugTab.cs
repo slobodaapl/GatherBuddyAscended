@@ -14,6 +14,10 @@ using GatherBuddy.AutoGather.Lists;
 using GatherBuddy.Classes;
 using GatherBuddy.CustomInfo;
 using GatherBuddy.Enums;
+using GatherBuddy.FcMesh.Chest;
+using GatherBuddy.FcMesh.Fulfillment;
+using GatherBuddy.FcMesh.Publication;
+using GatherBuddy.FcMesh.State;
 using GatherBuddy.FishTimer;
 using GatherBuddy.Levenshtein;
 using GatherBuddy.Plugin;
@@ -46,6 +50,16 @@ public partial class Interface
 
     private static uint _startId = 10031;
     private static uint _endId   = 10096;
+    private int _fcSyntheticItemId = 100;
+    private int _fcSyntheticTargetQuantity = 100;
+    private int _fcSyntheticTargetRevision = 1;
+    private int _fcSyntheticChestQuantity;
+    private int _fcSyntheticChestRevision = 1;
+    private int _fcSyntheticRemoteQuantity;
+    private int _fcSyntheticRemoteAgeSeconds;
+    private string _fcSyntheticSelectedListIds = FcSyntheticFulfillmentDriver.DefaultListId.ToString("D");
+    private string? _fcSyntheticError;
+    private string _fcGroupTicket = string.Empty;
 
     private static void DrawDebugAetheryte(Aetheryte a)
     {
@@ -219,6 +233,10 @@ public partial class Interface
 
             if (ImGui.Button("Set All Fish Unlocked"))
                 GatherBuddy.FishLog.SetAllUnlocked();
+
+            DrawFcChestProbeDebug();
+            DrawFcMeshNativeDebug();
+            DrawFcSyntheticFulfillmentDebug();
 
             if (FishTimerWindow.CollectableIcon.TryGetWrap(out var wrapCollectable, out _))
                 ImGui.Image(wrapCollectable.Handle, wrapCollectable.Size);
@@ -750,6 +768,238 @@ public partial class Interface
                 ImUtf8.Text("(Mooch)");
             }
         }
+    }
+
+    private void DrawFcSyntheticFulfillmentDebug()
+    {
+        if (!ImGui.CollapsingHeader("FC synthetic fulfillment"))
+            return;
+
+        var driver = GatherBuddy.FcSyntheticFulfillment;
+        if (driver is null)
+        {
+            ImGui.Text("Synthetic driver unavailable.");
+            return;
+        }
+
+        ImGui.TextColored(new Vector4(1f, 0.75f, 0.2f, 1f),
+            "DEVELOPER-ONLY / SYNTHETIC / NO PHYSICAL EFFECTS");
+        ImGui.TextWrapped(
+            "Private in-memory FC world. No native publication, network, chest interaction, travel, or player-inventory mutation.");
+        ImGui.InputInt("Target item", ref _fcSyntheticItemId);
+        ImGui.InputInt("Target quantity", ref _fcSyntheticTargetQuantity);
+        ImGui.InputInt("Target revision", ref _fcSyntheticTargetRevision);
+        ImGui.InputInt("Chest quantity", ref _fcSyntheticChestQuantity);
+        ImGui.InputInt("Chest revision", ref _fcSyntheticChestRevision);
+        ImGui.InputInt("Remote held quantity", ref _fcSyntheticRemoteQuantity);
+        ImGui.InputInt("Remote HLC age (seconds)", ref _fcSyntheticRemoteAgeSeconds);
+        ImGui.InputText("Selected list IDs (CSV)", ref _fcSyntheticSelectedListIds, 512);
+
+        if (ImGui.Button("Synthetic reset"))
+            RunSyntheticAction(driver.Reset);
+        ImGui.SameLine();
+        if (ImGui.Button("Apply selection"))
+            RunSyntheticResult(() => driver.SetSelection(
+                _fcSyntheticSelectedListIds
+                    .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                    .Select(Guid.Parse)
+                    .ToArray()));
+        ImGui.SameLine();
+        if (ImGui.Button("Inject target"))
+            RunSyntheticResult(() => driver.InjectDemoList(
+                driver.SelectedListIds.First(),
+                (uint)Math.Max(0, _fcSyntheticItemId),
+                _fcSyntheticTargetQuantity,
+                (ulong)Math.Max(1, _fcSyntheticTargetRevision)));
+        ImGui.SameLine();
+        if (ImGui.Button("Inject chest"))
+            RunSyntheticResult(() => driver.InjectDemoChest(
+                _fcSyntheticChestQuantity,
+                (ulong)Math.Max(1, _fcSyntheticChestRevision),
+                (uint)Math.Max(0, _fcSyntheticItemId)));
+
+        if (ImGui.Button("Inject remote worker"))
+            RunSyntheticResult(() => driver.InjectDemoRemoteWorker(
+                "synthetic-remote",
+                Guid.Parse("00000000-0000-0000-0000-00000000f303"),
+                driver.SelectedListIds.First(),
+                _fcSyntheticRemoteQuantity,
+                TimeSpan.FromSeconds(Math.Max(0, _fcSyntheticRemoteAgeSeconds)),
+                itemId: (uint)Math.Max(0, _fcSyntheticItemId)));
+        ImGui.SameLine();
+        if (ImGui.Button("Synthetic step"))
+            RunSyntheticAction(() => driver.Step());
+        ImGui.SameLine();
+        if (ImGui.Button("Synthetic run"))
+            RunSyntheticAction(() => driver.Run());
+        ImGui.SameLine();
+        if (ImGui.Button("Synthetic cancel"))
+            RunSyntheticAction(() => driver.Cancel());
+
+        ImGui.Text($"State: {driver.State}; world revision: {driver.World.Revision.Number}; "
+            + $"demand: {driver.World.Fulfillment.TotalDemand}; matched: {driver.World.Fulfillment.TotalMatched}");
+        ImGui.Text($"Selected lists: {string.Join(", ", driver.SelectedListIds)}; active lists: {string.Join(", ", driver.World.ActiveListIds)}; "
+            + $"active workers: {driver.World.ActiveWorkers.Count}; chest fresh: {driver.World.Chest.IsFresh}");
+        foreach (var contribution in driver.World.Fulfillment.Contributions.TakeLast(12))
+            ImGui.TextWrapped(
+                $"Contribution {contribution.ListId}: {(contribution.IsChest ? "FC chest" : contribution.SourceId)} "
+                + $"{contribution.Key.ItemId}/{contribution.Key.Quality} x{contribution.Quantity}");
+        if (driver.LastAction is { } action)
+            ImGui.TextWrapped($"Last: #{action.Sequence} {action.Kind} {action.ItemId}/{action.Quality} x{action.Quantity} - {action.Message}");
+        if (!string.IsNullOrWhiteSpace(_fcSyntheticError))
+            ImGui.TextWrapped($"Synthetic input error: {_fcSyntheticError}");
+        foreach (var logEntry in driver.ActionLog.TakeLast(8))
+            ImGui.TextWrapped($"#{logEntry.Sequence} {logEntry.Kind} {logEntry.ItemId}/{logEntry.Quality} x{logEntry.Quantity}");
+    }
+
+    private void RunSyntheticResult(Func<FcApplyResult> action)
+    {
+        try
+        {
+            _fcSyntheticError = null;
+            var result = action();
+            if (result.Status is not (FcApplyStatus.Accepted or FcApplyStatus.Duplicate))
+                _fcSyntheticError = $"Synthetic record rejected: {result.Message}";
+        }
+        catch (Exception exception)
+        {
+            _fcSyntheticError = exception.Message;
+        }
+    }
+
+    private void RunSyntheticAction(Action action)
+    {
+        try
+        {
+            _fcSyntheticError = null;
+            action();
+        }
+        catch (Exception exception)
+        {
+            _fcSyntheticError = exception.Message;
+        }
+    }
+
+    private static void DrawFcChestProbeDebug()
+    {
+        var probe = GatherBuddy.FcChestProbe;
+        if (probe is null)
+            return;
+
+        ImGui.Separator();
+        ImGui.Text("FC chest feasibility probe (dangerous developer diagnostic)");
+        ImGui.Text($"State: {probe.State}");
+        ImGui.TextWrapped(probe.StatusText);
+
+        if (probe.Preparation is { } preparation)
+        {
+            ImGui.Text($"Selected: {preparation.Withdrawal.Item}");
+            ImGui.Text($"Withdraw: {preparation.Withdrawal.Source} -> {preparation.Withdrawal.Destination}");
+        }
+
+        if (probe.DepositPlan is { } deposit)
+            ImGui.Text($"Deposit: {deposit.Source} -> {deposit.Destination}");
+        if (probe.LastDelta is { } delta)
+            ImGui.Text($"Observed delta: {delta.Failure} - {delta.Message}");
+
+        using (ImRaii.PushId("FcChestProbe"))
+        {
+            if (ImGui.Button("Prepare FC chest probe"))
+                probe.RequestPrepare();
+
+            if (probe.State == FcChestProbeState.Prepared)
+            {
+                var armed = probe.IsArmed;
+                if (ImGui.Checkbox("Arm physical transfer", ref armed))
+                    probe.SetArmed(armed);
+
+                if (ImGui.Button("Execute withdrawal + deposit"))
+                    probe.RequestExecute();
+            }
+
+            if (probe.State is FcChestProbeState.Withdrawing
+                or FcChestProbeState.ReconcilingWithdraw
+                or FcChestProbeState.Depositing
+                or FcChestProbeState.ReconcilingDeposit)
+            {
+                if (ImGui.Button("Cancel FC chest probe"))
+                    probe.Cancel();
+            }
+        }
+    }
+
+    private void DrawFcMeshNativeDebug()
+    {
+        var mesh = GatherBuddy.FcMeshNative;
+        if (mesh is null)
+            return;
+
+        var diagnostics = mesh.Diagnostics;
+        var readiness = mesh.Readiness;
+        ImGui.Separator();
+        ImGui.Text("FC mesh native service (developer diagnostic)");
+        ImGui.Text($"Lifecycle: {diagnostics.Lifecycle}");
+        ImGui.Text($"Group: {diagnostics.GroupState}");
+        ImGui.Text($"Events: sequence {diagnostics.LastEventSequence}, epoch {diagnostics.WorldEpoch}, queued {diagnostics.PendingEvents}");
+        ImGui.Text($"Snapshot: {(diagnostics.SnapshotInProgress ? $"active (base {diagnostics.SnapshotBaseEventSequence})" : "idle")}");
+        ImGui.Text($"FC automation decisions: {(diagnostics.AutomationDecisionsAllowed ? "allowed" : "paused")}");
+        ImGui.Text($"Readiness: {diagnostics.ReadinessState}; sync peer: {diagnostics.ContactedPeer ?? "none"}; sync event: {diagnostics.SyncEventSequence}; base: {readiness.SnapshotBaseEventSequence}; records: {diagnostics.SyncRecordCount}; metadata: {diagnostics.GroupMetadataCompatible}");
+        if (readiness.GroupTicket is { Length: > 0 } ticket)
+        {
+            _fcGroupTicket = ticket;
+            ImGui.Text("Group ticket received; copy it below for another character.");
+            if (ImGui.Button("Copy group ticket##fcMeshCopyTicket"))
+                ImGui.SetClipboardText(ticket);
+        }
+        if (ImGui.Button("Select current character author##fcMeshAuthor"))
+        {
+            var result = GatherBuddy.ConfigureFcMeshCharacterAuthor();
+            if (!result.Succeeded)
+                GatherBuddy.Log.Warning($"FC mesh character-author selection failed: {result.ErrorCode}");
+        }
+        ImGui.SameLine();
+        if (ImGui.Button("Create FC group##fcMeshCreate"))
+            _ = mesh.CreateGroup();
+        ImGui.InputText("Join ticket##fcMeshTicket", ref _fcGroupTicket, 4096);
+        ImGui.SameLine();
+        if (ImGui.Button("Join FC group##fcMeshJoin") && !string.IsNullOrWhiteSpace(_fcGroupTicket))
+            _ = mesh.JoinGroup(Encoding.UTF8.GetBytes(_fcGroupTicket));
+        ImGui.SameLine();
+        if (ImGui.Button("Leave FC group##fcMeshLeave"))
+            _ = mesh.LeaveGroup();
+        var chestPublication = GatherBuddy.FcChestPublication;
+        if (chestPublication is not null)
+        {
+            if (ImGui.Button("Publish current complete FC chest observation##fcChestPublish"))
+                _ = chestPublication.PublishCurrentCompleteObservation();
+            ImGui.Text($"Chest publication queue: {chestPublication.PendingCommands}");
+            if (!string.IsNullOrWhiteSpace(chestPublication.LastError))
+            {
+                ImGui.TextWrapped($"Chest publication: {chestPublication.LastError}");
+                if (ImGui.Button("Retry chest publication##fcChestRetry"))
+                    _ = chestPublication.RetryPending();
+            }
+        }
+        var projectedChest = new FcWorldProjection(mesh.WorldStore)
+            .Build(
+                FcSystemClock.Instance,
+                new FcCompatibilityContext(
+                    FcPublishedListMapper.CurrentPlannerSemanticsVersion,
+                    GatherBuddy.CurrentFcGameVersion() ?? string.Empty))
+            .Chest;
+        if (projectedChest.Snapshot is { } chest)
+        {
+            var chestHlc = mesh.WorldStore.GetChestHlc(chest.Header.OwnerAuthorId);
+            ImGui.Text($"Chest: observer {chest.Header.OwnerAuthorId}; revision {chest.Header.Revision}; fresh {projectedChest.IsFresh}; HLC {chestHlc}");
+            ImGui.Text($"Chest items: {string.Join(", ", chest.Items.Select(entry => $"{entry.ItemId}/{entry.Quality}={entry.Quantity}"))}");
+            ImGui.Text($"Chest crystals: {string.Join(", ", chest.Crystals.Entries.Select(entry => $"{entry.CrystalId}={entry.Quantity}"))}");
+        }
+        else
+        {
+            ImGui.Text("Chest: unknown/stale; a complete local inspection is required.");
+        }
+        if (!string.IsNullOrWhiteSpace(diagnostics.LastError))
+            ImGui.TextWrapped($"Last error: {diagnostics.LastError}");
     }
 
     private void DrawDebugTab()

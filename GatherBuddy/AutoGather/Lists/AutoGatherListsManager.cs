@@ -1,5 +1,6 @@
 using ElliLib.Filesystem;
 using GatherBuddy.Interfaces;
+using GatherBuddy.FcMesh.Protocol;
 using GatherBuddy.Plugin;
 using Newtonsoft.Json;
 using System;
@@ -10,6 +11,23 @@ using System.Linq;
 using Functions = GatherBuddy.Plugin.Functions;
 
 namespace GatherBuddy.AutoGather.Lists;
+
+internal readonly record struct RuntimeActiveItem(
+    IGatherable Item,
+    uint Quantity,
+    uint CompletionItemId,
+    ICompletionCountProvider? CompletionProvider,
+    FcItemQuality? CompletionQuality,
+    string CompletionScope)
+{
+    internal CompletionTrackingDescriptor Tracking
+        => CompletionTrackingPolicy.Create(
+            Item.ItemId,
+            CompletionItemId,
+            CompletionQuality,
+            CompletionScope,
+            CompletionTrackingPolicy.GetProviderKey(CompletionProvider));
+}
 
 public class ManualOrderSortMode : ISortMode<AutoGatherList>
 {
@@ -40,6 +58,8 @@ public partial class AutoGatherListsManager : IDisposable
     private readonly FileSystem<AutoGatherList>             _fileSystem;
     private readonly List<(IGatherable Item, uint Quantity, uint CompletionItemId)> _activeItems = [];
     private readonly List<(IGatherable Item, uint Quantity)> _fallbackItems = [];
+    private readonly List<RuntimeActiveItem> _runtimeActiveItems = [];
+    private readonly Dictionary<(IGatherable Item, CompletionTrackingDescriptor Tracking), ICompletionCountProvider?> _completionProviders = [];
     public static ManualOrderSortMode SortMode { get; } = new();
 
     public FileSystem<AutoGatherList> FileSystem
@@ -53,6 +73,18 @@ public partial class AutoGatherListsManager : IDisposable
 
     public ReadOnlyCollection<(IGatherable Item, uint Quantity)> FallbackItems
         => _fallbackItems.AsReadOnly();
+
+    internal ReadOnlyCollection<RuntimeActiveItem> RuntimeActiveItems
+        => _runtimeActiveItems.AsReadOnly();
+
+    internal ICompletionCountProvider? GetCompletionCountProvider(
+        IGatherable item,
+        uint completionItemId,
+        FcItemQuality? quality,
+        string completionScope)
+        => _completionProviders.GetValueOrDefault((
+            item,
+            CompletionTrackingPolicy.Create(item.ItemId, completionItemId, quality, completionScope)));
 
     public AutoGatherListsManager()
     {
@@ -122,6 +154,8 @@ public partial class AutoGatherListsManager : IDisposable
             Save();
         _activeItems.Clear();
         _fallbackItems.Clear();
+        _runtimeActiveItems.Clear();
+        _completionProviders.Clear();
 
         var items = _fileSystem.Root.GetAllDescendants(SortMode)
             .OfType<FileSystem<AutoGatherList>.Leaf>()
@@ -131,18 +165,48 @@ public partial class AutoGatherListsManager : IDisposable
                 Item: i,
                 Quantity: l.Quantities[i],
                 CompletionItemId: l.CompletionItemIds.GetValueOrDefault(i),
-                l.Fallback,
+                CompletionProvider: l.CompletionProvider,
+                CompletionQuality: l.GetCompletionQuality(i),
+                CompletionScope: string.IsNullOrWhiteSpace(l.CompletionScope)
+                    ? AutoGatherList.DefaultCompletionScope
+                    : l.CompletionScope,
+                Fallback: l.Fallback,
                 ItemEnabled: l.EnabledItems[i])))
             .Where(i => i.ItemEnabled)
-            .GroupBy(i => (i.Item, i.CompletionItemId, i.Fallback))
-            .Select(x => (
-                x.Key.Item,
-                Quantity: (uint)Math.Min(x.Sum(g => g.Quantity), uint.MaxValue),
-                x.Key.CompletionItemId,
-                x.Key.Fallback));
+            .ToList();
 
-        foreach (var (item, quantity, completionItemId, fallback) in items)
+        foreach (var group in items.GroupBy(i => (
+                     i.Item,
+                     Tracking: CompletionTrackingPolicy.Create(
+                         i.Item.ItemId,
+                         i.CompletionItemId,
+                         i.CompletionQuality,
+                         i.CompletionScope,
+                         CompletionTrackingPolicy.GetProviderKey(i.CompletionProvider)),
+                     i.Fallback)))
         {
+            var item = group.Key.Item;
+            var quantity = (uint)Math.Min(group.Sum(g => g.Quantity), uint.MaxValue);
+            var fallback = group.Key.Fallback;
+            if (fallback)
+                continue;
+            var provider = group.Select(g => g.CompletionProvider).FirstOrDefault(value => value != null);
+            _runtimeActiveItems.Add(new RuntimeActiveItem(
+                item,
+                quantity,
+                group.Key.Tracking.CompletionItemId,
+                provider,
+                group.Key.Tracking.Quality,
+                group.Key.Tracking.Scope));
+            _completionProviders[(item, group.Key.Tracking)] = provider;
+        }
+
+        foreach (var group in items.GroupBy(i => (i.Item, i.CompletionItemId, i.Fallback)))
+        {
+            var item = group.Key.Item;
+            var quantity = (uint)Math.Min(group.Sum(g => g.Quantity), uint.MaxValue);
+            var completionItemId = group.Key.CompletionItemId;
+            var fallback = group.Key.Fallback;
             if (fallback)
             {
                 _fallbackItems.Add((item, quantity));

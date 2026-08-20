@@ -446,8 +446,7 @@ public partial class AutoGatherListsManager
             if (!list.Quantities.TryGetValue(item, out var quantity))
                 continue;
 
-            var totalCount = item.GetCompletionCount(list.CompletionItemIds.GetValueOrDefault(item));
-            if (totalCount < quantity)
+            if (!IsCompletionSatisfied(list, item, quantity, out var totalCount))
                 continue;
 
             var index = list.Items.IndexOf(item);
@@ -484,8 +483,7 @@ public partial class AutoGatherListsManager
                 if (!list.Quantities.TryGetValue(item, out var quantity))
                     continue;
 
-                var totalCount = item.GetCompletionCount(list.CompletionItemIds.GetValueOrDefault(item));
-                if (totalCount < quantity)
+                if (!IsCompletionSatisfied(list, item, quantity, out var totalCount))
                     continue;
 
                 GatherBuddy.Log.Debug(
@@ -496,6 +494,39 @@ public partial class AutoGatherListsManager
         }
 
         return removedAny;
+    }
+
+    private bool IsCompletionSatisfied(
+        AutoGatherList list,
+        IGatherable item,
+        uint quantity,
+        out int totalCount)
+    {
+        var completionItemId = list.CompletionItemIds.GetValueOrDefault(item);
+        var expectedTracking = CompletionTrackingPolicy.Create(
+            item.ItemId,
+            completionItemId,
+            list.GetCompletionQuality(item),
+            list.CompletionScope,
+            CompletionTrackingPolicy.GetProviderKey(list.CompletionProvider));
+        var observedTracking = expectedTracking;
+        foreach (var runtimeItem in _runtimeActiveItems)
+        {
+            if (runtimeItem.Item != item)
+                continue;
+
+            observedTracking = runtimeItem.Tracking;
+            if (CompletionTrackingPolicy.Matches(expectedTracking, observedTracking))
+                break;
+        }
+
+        totalCount = list.CompletionProvider?.GetCompletionCount(item, completionItemId, expectedTracking.Quality)
+            ?? item.GetCompletionCount(completionItemId);
+        return CompletionTrackingPolicy.IsCompleteFor(
+            expectedTracking,
+            observedTracking,
+            totalCount,
+            quantity);
     }
 
     public void AddItem(AutoGatherList list, IGatherable item, uint completionItemId = 0)

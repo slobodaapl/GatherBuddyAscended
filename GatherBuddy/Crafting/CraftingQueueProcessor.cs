@@ -399,10 +399,21 @@ public class CraftingQueueProcessor : IDisposable
             .ToDictionary(pair => pair.Key, pair => requiredQuantities[pair.Key]);
 
     private Dictionary<uint, int> BuildCurrentMaterialDeficits()
-        => ComputeCurrentMaterialDeficits(
+    {
+        if (_executionPlan?.ExecutionSource == ExecutionSource.FcFulfillment)
+        {
+            var represented = _executionPlan.PlanningContext.RepresentedInventory;
+            return ComputeCurrentMaterialDeficits(
+                MaterialTargets,
+                IngredientDemandTargets,
+                itemId => (represented.GetNq(itemId), represented.GetHq(itemId)));
+        }
+
+        return ComputeCurrentMaterialDeficits(
             MaterialTargets,
             IngredientDemandTargets,
             CraftingInventoryCounter.GetInventorySplitCounts);
+    }
 
     internal static Dictionary<uint, int> ComputeCurrentMaterialDeficits(
         IReadOnlyDictionary<uint, int> materialTargets,
@@ -421,12 +432,17 @@ public class CraftingQueueProcessor : IDisposable
 
             var (nq, hq) = inventoryCounts(itemId);
             var demand = ingredientDemands.GetValueOrDefault(itemId);
-            var totalMissing = Math.Max(0, requiredQuantity - Math.Max(0, nq) - Math.Max(0, hq));
-            var requiredHqMissing = Math.Max(0, demand.RequiredHQ - Math.Max(0, hq));
-            var requiredNqMissing = Math.Max(0, demand.RequiredNQ - Math.Max(0, nq));
-            var missing = Math.Max(totalMissing, requiredHqMissing + requiredNqMissing);
+            var totalAvailable = (long)Math.Max(0, nq) + Math.Max(0, hq);
+            var totalMissing = Math.Max(0L, (long)requiredQuantity - totalAvailable);
+            var requiredHqMissing = Math.Max(0L, (long)demand.RequiredHQ - Math.Max(0, hq));
+            var requiredNqMissing = Math.Max(0L, (long)demand.RequiredNQ - Math.Max(0, nq));
+            var missing = Math.Max(totalMissing, checked(requiredHqMissing + requiredNqMissing));
             if (missing > 0)
-                deficits[itemId] = missing;
+            {
+                if (missing > int.MaxValue)
+                    throw new InvalidOperationException($"Material deficit for item {itemId} exceeds the supported quantity range.");
+                deficits[itemId] = (int)missing;
+            }
         }
 
         return deficits;

@@ -72,12 +72,14 @@ public class CraftingListDefinition
 
     public CraftingListPlan CreatePlan(
         bool useRetainerCraftableAvailability = false,
-        IReadOnlyDictionary<uint, AcquiredDependencyAvailability>? acquiredAvailability = null)
+        IReadOnlyDictionary<uint, AcquiredDependencyAvailability>? acquiredAvailability = null,
+        CraftingPlanningContext? planningContext = null)
         => CraftingListPlanner.Build(
             this,
             new CraftingListPlannerOptions(
                 UseRetainerCraftableAvailability: useRetainerCraftableAvailability,
-                AcquiredAvailability: acquiredAvailability));
+                AcquiredAvailability: acquiredAvailability,
+                PlanningContext: planningContext));
 
     public Acquisition.AcquisitionPlanningSettings GetAcquisitionSettings()
         => new()

@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using GatherBuddy.FcMesh.Fulfillment;
+using GatherBuddy.FcMesh.State;
 using GatherBuddy.Plugin;
 using Lumina.Excel.Sheets;
 
@@ -15,6 +17,8 @@ public sealed class CraftingExecutionPlan
     private readonly Dictionary<uint, int> _acquiredDependencyCaps;
     private readonly HashSet<uint> _finalOutputItemIds;
     private readonly Dictionary<uint, AcquiredDependencyAvailability> _acquiredAvailability = new();
+    private CraftingPlanningContext _planningContext;
+    private CraftingPlanningContext? _pendingWorldRevisionContext;
 
     public int ListId { get; }
     public string ListName { get; }
@@ -30,6 +34,13 @@ public sealed class CraftingExecutionPlan
     public long? MaximumGilSpend { get; }
     public bool ReturnToHomeWorldBeforeCrafting { get; }
     public bool AllowMaterialAcquisition => !_directCraft;
+    public CraftingPlanningContext PlanningContext => _planningContext;
+    public ExecutionSource ExecutionSource => _planningContext.Source;
+    public FcExecutionContext? FcContext => _planningContext.FcContext;
+    public FcWorldRevision? WorldRevision => _planningContext.FcContext?.WorldRevision;
+    public FcWorldRevision? CurrentWorldRevision => WorldRevision;
+    public bool IsWorldRevisionDirty => _pendingWorldRevisionContext != null;
+    public CraftingPlanningContext? PendingWorldRevisionContext => _pendingWorldRevisionContext;
     public bool UsesMissionProvidedMaterials => _directCraft
         && OriginalRecipes.Count > 0
         && OriginalRecipes.All(item => RecipeManager.GetRecipe(item.RecipeId) is { Number: 0 });
@@ -56,9 +67,11 @@ public sealed class CraftingExecutionPlan
         bool useRetainerCraftableAvailability,
         CraftingListPlan resolvedPlan,
         bool directCraft = false,
-        IReadOnlyList<CraftingListItem>? recoveryQueue = null)
+        IReadOnlyList<CraftingListItem>? recoveryQueue = null,
+        CraftingPlanningContext? planningContext = null)
     {
         _planningSnapshot = planningSnapshot;
+        _planningContext = planningContext ?? CraftingPlanningContext.CreatePrivate();
         _useRetainerCraftableAvailability = useRetainerCraftableAvailability;
         _directCraft = directCraft;
         _recoveryQueue = recoveryQueue?.Select(CloneRecoveryQueueItem).ToList();
@@ -83,14 +96,54 @@ public sealed class CraftingExecutionPlan
     }
 
     public static CraftingExecutionPlan Create(CraftingListDefinition list)
+        => Create(list, CraftingPlanningContext.CreatePrivate());
+
+    public static CraftingExecutionPlan Create(
+        CraftingListDefinition list,
+        CraftingPlanningContext planningContext)
     {
+        ArgumentNullException.ThrowIfNull(list);
+        ArgumentNullException.ThrowIfNull(planningContext);
         var planningSnapshot = list.CreateRetainerPlanningSnapshot();
         var useRetainerCraftableAvailability = planningSnapshot.SkipIfEnough
             && planningSnapshot.RetainerRestock
             && AllaganTools.Enabled;
-        var resolvedPlan = planningSnapshot.CreatePlan(useRetainerCraftableAvailability);
-        return new CraftingExecutionPlan(planningSnapshot, useRetainerCraftableAvailability, resolvedPlan);
+        var resolvedPlan = planningSnapshot.CreatePlan(
+            useRetainerCraftableAvailability,
+            planningContext: planningContext);
+        return new CraftingExecutionPlan(
+            planningSnapshot,
+            useRetainerCraftableAvailability,
+            resolvedPlan,
+            planningContext: planningContext);
     }
+
+    /// <summary>
+    /// Creates an FC execution plan through the same planner used by private
+    /// lists. The explicit name keeps synthetic/native callers from
+    /// accidentally falling back to the private physical-inventory context.
+    /// </summary>
+    public static CraftingExecutionPlan CreateFc(
+        CraftingListDefinition list,
+        CraftingPlanningContext planningContext)
+    {
+        ArgumentNullException.ThrowIfNull(planningContext);
+        if (planningContext.Source != ExecutionSource.FcFulfillment)
+            throw new ArgumentException("FC execution requires an FC planning context.", nameof(planningContext));
+        return Create(list, planningContext);
+    }
+
+    public static CraftingExecutionPlan CreateFc(
+        CraftingListDefinition list,
+        IItemQuantitySource representedInventory,
+        IItemQuantitySource localConsumableInventory,
+        FcExecutionContext fcContext)
+        => CreateFc(
+            list,
+            CraftingPlanningContext.CreateFc(
+                representedInventory,
+                localConsumableInventory,
+                fcContext));
 
     public static CraftingExecutionPlan CreateDirect(CraftingListDefinition list)
     {
@@ -128,7 +181,8 @@ public sealed class CraftingExecutionPlan
             useRetainerCraftableAvailability: false,
             resolvedPlan,
             directCraft: true,
-            recoveryQueue: remainingQueue);
+            recoveryQueue: remainingQueue,
+            planningContext: CraftingPlanningContext.CreatePrivate());
         return plan;
     }
 
@@ -154,13 +208,33 @@ public sealed class CraftingExecutionPlan
         if (!_useRetainerCraftableAvailability)
             return;
 
-        ApplyResolvedPlan(_planningSnapshot.CreatePlan(true, _acquiredAvailability));
+        var planningContext = GetRefreshPlanningContext();
+        var resolvedPlan = _planningSnapshot.CreatePlan(
+            true,
+            _acquiredAvailability,
+            planningContext);
+        _planningContext = planningContext;
+        ApplyResolvedPlan(resolvedPlan);
     }
 
     public void RefreshFromCurrentInventory()
-        => ApplyResolvedPlan(_directCraft
-            ? CraftingListPlanner.BuildDirect(_planningSnapshot)
-            : _planningSnapshot.CreatePlan(false, _acquiredAvailability));
+    {
+        if (_directCraft)
+        {
+            var freshPlanningContext = GetRefreshPlanningContext();
+            ApplyResolvedPlan(CraftingListPlanner.BuildDirect(_planningSnapshot));
+            _planningContext = freshPlanningContext;
+            return;
+        }
+
+        var planningContext = GetRefreshPlanningContext();
+        var resolvedPlan = _planningSnapshot.CreatePlan(
+                false,
+                _acquiredAvailability,
+                planningContext);
+        _planningContext = planningContext;
+        ApplyResolvedPlan(resolvedPlan);
+    }
 
     internal CraftingListPlan CreateAcquisitionBoundaryPlan(Func<Recipe, bool> canCraftPrecraft)
     {
@@ -170,7 +244,100 @@ public sealed class CraftingExecutionPlan
             new CraftingListPlannerOptions(
                 UseRetainerCraftableAvailability: _useRetainerCraftableAvailability,
                 AcquiredAvailability: _acquiredAvailability,
-                CanCraftPrecraft: canCraftPrecraft));
+                CanCraftPrecraft: canCraftPrecraft,
+                PlanningContext: GetRefreshPlanningContext()));
+    }
+
+    /// <summary>
+    /// Records a newer relevant FC world revision for application at a safe
+    /// framework boundary. It never rebuilds an active craft or gather action.
+    /// </summary>
+    public bool MarkWorldRevisionChanged(CraftingPlanningContext updatedContext)
+    {
+        ArgumentNullException.ThrowIfNull(updatedContext);
+        var baseline = _pendingWorldRevisionContext ?? _planningContext;
+        if (!IsRelevantNewerContext(updatedContext, baseline))
+            return false;
+
+        _pendingWorldRevisionContext = updatedContext;
+        return true;
+    }
+
+    public bool MarkWorldRevisionChanged(FcExecutionContext updatedContext)
+    {
+        ArgumentNullException.ThrowIfNull(updatedContext);
+        var source = _pendingWorldRevisionContext ?? _planningContext;
+        return MarkWorldRevisionChanged(new CraftingPlanningContext(
+            source.RepresentedInventory,
+            source.LocalConsumableInventory,
+            ExecutionSource.FcFulfillment,
+            updatedContext));
+    }
+
+    public bool ApplyPendingWorldRevisionAtSafeBoundary(
+        bool isCrafting,
+        bool isGatheringInteraction)
+    {
+        if (isCrafting || isGatheringInteraction || _pendingWorldRevisionContext is not { } pending)
+            return false;
+
+        var resolvedPlan = _directCraft
+            ? CraftingListPlanner.BuildDirect(_planningSnapshot)
+            : _planningSnapshot.CreatePlan(
+                _useRetainerCraftableAvailability,
+                _acquiredAvailability,
+                pending);
+        ApplyResolvedPlan(resolvedPlan);
+        _planningContext = pending;
+        _pendingWorldRevisionContext = null;
+        return true;
+    }
+
+    public bool ApplyPendingWorldRevisionAtSafeBoundary(
+        CraftingPlanningContext updatedContext,
+        bool isCrafting,
+        bool isGatheringInteraction)
+    {
+        ArgumentNullException.ThrowIfNull(updatedContext);
+        MarkWorldRevisionChanged(updatedContext);
+        return ApplyPendingWorldRevisionAtSafeBoundary(isCrafting, isGatheringInteraction);
+    }
+
+    public bool ConsumeWorldRevisionReplanAtSafeBoundary(
+        CraftingPlanningContext updatedContext,
+        bool isCrafting,
+        bool isGatheringInteraction)
+        => ApplyPendingWorldRevisionAtSafeBoundary(updatedContext, isCrafting, isGatheringInteraction);
+
+    public bool ConsumeWorldRevisionReplanAtSafeBoundary(
+        bool isCrafting,
+        bool isGatheringInteraction)
+        => ApplyPendingWorldRevisionAtSafeBoundary(isCrafting, isGatheringInteraction);
+
+    private bool IsRelevantNewerContext(
+        CraftingPlanningContext updatedContext,
+        CraftingPlanningContext baseline)
+        => baseline.Source == ExecutionSource.FcFulfillment
+        && updatedContext.Source == ExecutionSource.FcFulfillment
+        && baseline.FcContext is { } current
+        && updatedContext.FcContext is { } updated
+        && current.MatchesScope(updated)
+        && updated.WorldRevision.Number > current.WorldRevision.Number;
+
+    private CraftingPlanningContext GetRefreshPlanningContext()
+    {
+        if (_planningContext.Source != ExecutionSource.PrivateList)
+            return _planningContext;
+
+        var physical = new CraftingPhysicalInventorySource();
+        var local = _planningContext.LocalConsumableInventory is CraftingPhysicalInventorySource
+            ? physical
+            : _planningContext.LocalConsumableInventory;
+        return new CraftingPlanningContext(
+            physical,
+            local,
+            ExecutionSource.PrivateList,
+            null);
     }
 
     /// <summary>
