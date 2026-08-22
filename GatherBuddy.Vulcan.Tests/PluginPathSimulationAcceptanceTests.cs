@@ -22,6 +22,7 @@ internal static class PluginPathSimulationAcceptanceTests
         ValidateZeroStepExpediencePreservation(require);
         await ValidateImprovementQuiescenceLifecycle(require);
         await ValidateImprovementQuiescenceSupersession(require);
+        await ValidateLiveReplanMaximumQualityLock(require);
         ValidateLateRootResidualQualityRecovery(require);
         await ValidateNormalRerollAndReactiveReplan(require);
         await ValidateProtectedRaphaelConditionTakeover(require);
@@ -1053,7 +1054,7 @@ internal static class PluginPathSimulationAcceptanceTests
 
     private static async Task ValidateNormalRerollAndReactiveReplan(Action<bool, string> require)
     {
-        var craft = Craft();
+        var craft = Craft() with { CraftQualityMax = 5_000 };
         var root = Root(craft, Condition.Normal) with
         {
             GreatStridesLeft = 2,
@@ -1136,6 +1137,61 @@ internal static class PluginPathSimulationAcceptanceTests
             require(solver.NativeReplanCount >= 3,
                 "the complete plugin path must natively re-solve at initial, Excellent, and Poor roots");
             CraftingProcessor.OnCraftFinished(craft, final, craft.RecipeId, cancelled: false);
+        }
+        finally
+        {
+            CraftingProcessor.Dispose();
+        }
+    }
+
+    private static async Task ValidateLiveReplanMaximumQualityLock(Action<bool, string> require)
+    {
+        var craft = Craft() with { CraftProgress = 500 };
+        var root = Root(craft, Condition.Normal) with
+        {
+            GreatStridesLeft = 2,
+            InnovationLeft = 2,
+        };
+
+        SetupWithSeededDonatello();
+        try
+        {
+            require(CraftingProcessor.TryAdoptLiveCraft(
+                    craft,
+                    root,
+                    allowDonatelloLiveRecovery: true,
+                    out var failureReason),
+                $"live maximum-quality lock fixture must start Donatello: {failureReason}");
+            var recommendation = await AwaitRecommendation();
+            var solver = CraftingProcessor.ActiveSolver as DonatelloSolver
+                ?? throw new InvalidOperationException("live maximum-quality lock fixture did not select Donatello");
+            require(solver is
+                    {
+                        NativeReplanCount: 1,
+                        HasGuaranteedMaximumQualityPlan: true,
+                    }
+                    && recommendation.Action != VulcanSkill.None
+                    && Simulator.CanUseAction(craft, root, recommendation.Action),
+                "the admitted live replan must promote its proven maximum-quality suffix before execution");
+
+            var game = new SeededGame(
+                craft,
+                root,
+                actionSeed: 53,
+                conditionSeed: 59,
+                forcedConditions: new Dictionary<int, Condition> { [1] = Condition.Good });
+            var actual = game.Execute(recommendation.Action, require);
+            require(actual.Progress < craft.CraftProgress,
+                "the live maximum-quality lock fixture must remain in progress after its first action");
+            var reconciled = ReconcileRecommended(craft, root, recommendation.Action, actual, require);
+            CraftingProcessor.OnCraftAdvanced(craft, reconciled, craft.RecipeId);
+
+            var next = await AwaitRecommendation();
+            require(solver.NativeReplanCount == 1
+                    && !solver.HasPendingOpportunisticReplan
+                    && next.Action != VulcanSkill.None
+                    && Simulator.CanUseAction(craft, reconciled, next.Action),
+                "Good after a live replan proves maximum quality must continue the suffix without another native search");
         }
         finally
         {
@@ -1269,7 +1325,11 @@ internal static class PluginPathSimulationAcceptanceTests
 
     private static async Task ValidateScriptedConditionAndManualActionRecovery(Action<bool, string> require)
     {
-        var craft = Craft() with { CrafterDelineations = 3 };
+        var craft = Craft() with
+        {
+            CrafterDelineations = 3,
+            CraftQualityMax = 5_000,
+        };
         var root = Root(craft, Condition.Normal) with
         {
             CrafterDelineationsLeft = 3,
@@ -1525,12 +1585,26 @@ internal static class PluginPathSimulationAcceptanceTests
 
     private static async Task ValidateProtectedRaphaelConditionTakeover(Action<bool, string> require)
     {
-        var craft = Craft() with
+        var qualityProbeCraft = Craft() with
         {
             StatControl = 700,
             CraftDurability = 40,
-            CraftQualityMax = 100,
+            CraftQualityMax = 10_000,
         };
+        var qualityProbeRoot = Root(qualityProbeCraft, Condition.Normal);
+        var (_, qualityAfterFirst) = Simulator.Execute(
+            qualityProbeCraft,
+            qualityProbeRoot,
+            VulcanSkill.BasicTouch,
+            0,
+            1);
+        var (_, qualityAfterSecond) = Simulator.Execute(
+            qualityProbeCraft,
+            qualityAfterFirst,
+            VulcanSkill.BasicTouch,
+            0,
+            1);
+        var craft = qualityProbeCraft with { CraftQualityMax = qualityAfterSecond.Quality };
         var solution = new CachedRaphaelSolution
         {
             ActionIds =
@@ -1555,45 +1629,113 @@ internal static class PluginPathSimulationAcceptanceTests
                 var recommendation = await AwaitRecommendation();
                 require(recommendation.Action == VulcanSkill.BasicTouch,
                     "the protected Raphael incumbent must issue its first static action");
-                ((DonatelloSolver)CraftingProcessor.ActiveSolver!).NotifyOpportunisticActionIssued();
                 var (_, observed) = Simulator.Execute(craft, root, recommendation.Action, 0, 1);
                 observed.Condition = condition;
                 CraftingProcessor.OnCraftAdvanced(craft, observed, craft.RecipeId);
 
                 require(CraftingProcessor.ActiveSolver is DonatelloProtectedRaphaelSolver,
                     $"{condition} must keep the protected Raphael incumbent solver");
-                var wait = condition is Condition.Excellent or Condition.Poor
-                    ? TimeSpan.FromSeconds(30)
-                    : TimeSpan.FromSeconds(10);
-                var takeoverRecommendation = await AwaitRecommendation(wait);
-                require(!takeoverRecommendation.IsTerminalFailure
-                        && takeoverRecommendation.Action != VulcanSkill.None
-                        && Simulator.CanUseAction(craft, observed, takeoverRecommendation.Action)
-                        && CraftingProcessor.ActiveSolver is DonatelloSolver { NativeReplanCount: >= 1 },
-                    $"protected Raphael must replan from {condition} without replacing the incumbent solver");
-
                 if (condition == Condition.Good)
                 {
-                    var active = (DonatelloSolver)CraftingProcessor.ActiveSolver!;
-                    require(active.HasPendingOpportunisticReplan,
-                        "Good-condition regression must issue the incumbent while its same-root opportunistic replan is still pending");
-                    var expectedRemaining = active.RemainingActions.ToArray();
-                    require(expectedRemaining.Length > 0,
-                        "Good-condition regression requires an incumbent suffix after the issued action");
-                    active.NotifyOpportunisticActionIssued();
-                    var (_, afterIssuedAction) = Simulator.Execute(
-                        craft,
+                    var protectedRecommendation = await AwaitRecommendation();
+                    require(protectedRecommendation.Action == VulcanSkill.BasicTouch
+                            && CraftingProcessor.ActiveSolver is DonatelloSolver
+                            {
+                                NativeReplanCount: 0,
+                                HasPendingOpportunisticReplan: false,
+                            },
+                        "Good must continue the proven maximum-quality suffix without native work");
+                }
+                else
+                {
+                    var recoveryRecommendation = await AwaitRecommendation(TimeSpan.FromSeconds(30));
+                    require(!recoveryRecommendation.IsTerminalFailure
+                            && recoveryRecommendation.Action != VulcanSkill.None
+                            && Simulator.CanUseAction(craft, observed, recoveryRecommendation.Action)
+                            && CraftingProcessor.ActiveSolver is DonatelloSolver { NativeReplanCount: 1 },
+                        $"{condition} must remain the normal-craft recovery exception for a protected maximum-quality suffix");
+                }
+            }
+            finally
+            {
+                CraftingProcessor.Dispose();
+            }
+        }
+
+        var expertProbeCraft = Craft() with
+        {
+            CraftExpert = true,
+            StatControl = 700,
+            CraftDurability = 40,
+            CraftProgress = 10_000,
+            CraftQualityMax = 10_000,
+        };
+        var expertProbeRoot = Root(expertProbeCraft, Condition.Normal);
+        var normalProgress = Simulator.CalculateProgress(
+            expertProbeCraft,
+            expertProbeRoot,
+            VulcanSkill.BasicSynthesis);
+        var (_, expertAfterProgress) = Simulator.Execute(
+            expertProbeCraft,
+            expertProbeRoot,
+            VulcanSkill.BasicSynthesis,
+            0,
+            1);
+        var (_, expertAfterTouch) = Simulator.Execute(
+            expertProbeCraft,
+            expertAfterProgress,
+            VulcanSkill.BasicTouch,
+            0,
+            1);
+        var expertCraft = expertProbeCraft with
+        {
+            CraftProgress = normalProgress + 1,
+            CraftQualityMax = expertAfterTouch.Quality,
+        };
+        var expertSolution = new CachedRaphaelSolution
+        {
+            ActionIds =
+            [
+                (uint)VulcanSkill.BasicSynthesis,
+                (uint)VulcanSkill.BasicTouch,
+                (uint)VulcanSkill.BasicSynthesis,
+            ],
+        };
+
+        foreach (var condition in new[] { Condition.Good, Condition.Malleable })
+        {
+            CraftingProcessor.Setup();
+            CraftingProcessor.RegisterSolver(new SeededDonatelloDefinition(expertSolution));
+            try
+            {
+                var observed = Root(expertCraft, condition);
+                CraftingProcessor.OnCraftStarted(expertCraft, observed, expertCraft.RecipeId, isTrial: false);
+                require(CraftingProcessor.ActiveSolver is DonatelloProtectedRaphaelSolver,
+                    "the Expert early-completion fixture must start with a proven maximum-quality suffix");
+
+                var recommendation = await AwaitRecommendation(TimeSpan.FromSeconds(30));
+                require(!recommendation.IsTerminalFailure
+                        && recommendation.Action != VulcanSkill.None
+                        && Simulator.CanUseAction(expertCraft, observed, recommendation.Action),
+                    $"the protected Expert suffix must emit a legal action under {condition}");
+                if (condition == Condition.Good)
+                {
+                    require(recommendation.Action == VulcanSkill.BasicSynthesis
+                            && CraftingProcessor.ActiveSolver is DonatelloSolver { NativeReplanCount: 0 },
+                        "beneficial Expert condition churn must keep the proven suffix without native work");
+                }
+                else
+                {
+                    var (_, afterRecommendation) = Simulator.Execute(
+                        expertCraft,
                         observed,
-                        takeoverRecommendation.Action,
+                        recommendation.Action,
                         0,
                         1);
-                    afterIssuedAction.Condition = Condition.Normal;
-                    require(active.WaitForPendingSolve(TimeSpan.FromSeconds(5)),
-                        "interrupted old-root opportunistic replan must stop before the next observed node");
-                    CraftingProcessor.OnCraftAdvanced(craft, afterIssuedAction, craft.RecipeId);
-                    var nextRecommendation = await AwaitRecommendation();
-                    require(nextRecommendation.Action == expectedRemaining[0],
-                        $"late old-root replan must not rewind the consumed action; expected={expectedRemaining[0]}, actual={nextRecommendation.Action}, comment={nextRecommendation.Comment}");
+                    require(CraftingProcessor.ActiveSolver is DonatelloSolver { NativeReplanCount: 1 }
+                            && (afterRecommendation.Progress < expertCraft.CraftProgress
+                                || afterRecommendation.Quality >= expertCraft.CraftQualityMax),
+                        "Malleable must replan only when the incumbent progress action would complete below maximum quality");
                 }
             }
             finally

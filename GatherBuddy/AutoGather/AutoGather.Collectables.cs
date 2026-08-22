@@ -57,7 +57,8 @@ namespace GatherBuddy.AutoGather
                 Gatherable item,
                 uint quantity,
                 int gatherChance,
-                uint completionItemId = 0)
+                uint completionItemId = 0,
+                bool planStartingGp = false)
             {
                 this.config = config;
                 shouldUseFullRotation = Player.Object?.CurrentGp >= config.CollectableActionsMinGP;
@@ -65,6 +66,7 @@ namespace GatherBuddy.AutoGather
                 this.quantity = quantity;
                 this.gatherChance = gatherChance;
                 this.completionItemId = completionItemId;
+                shouldPlanStartingGp = planStartingGp && config.ChooseBestActionsAutomatically;
             }
 
             private readonly bool shouldUseFullRotation = false;
@@ -73,6 +75,7 @@ namespace GatherBuddy.AutoGather
             private readonly uint quantity;
             private readonly int gatherChance;
             private readonly uint completionItemId;
+            private bool shouldPlanStartingGp;
             private int? previousIntegrity;
             private bool revisitUsed;
             private Task<GatheringDecision>? pendingSolve;
@@ -85,9 +88,11 @@ namespace GatherBuddy.AutoGather
 
             public bool TryGetNextAction(
                 GatheringMasterpieceReader masterpieceReader,
-                out Actions.BaseAction action)
+                out Actions.BaseAction action,
+                out int? minimumStartingGp)
             {
                 action = null!;
+                minimumStartingGp = null;
                 try
                 {
                     var terminalAction = CollectableTerminalActionPolicy.Resolve(
@@ -139,8 +144,12 @@ namespace GatherBuddy.AutoGather
                     pendingRequest = null;
                     if (!RequestStillMatchesLiveState(masterpieceReader, solvedRequest))
                         return false;
+                    shouldPlanStartingGp = false;
                     if (decision.FallbackReason != null)
                         GatherBuddy.Log.Debug($"[AutoGather] Expected-scrip solver used legacy fallback for {item.Name}: {decision.FallbackReason}");
+                    if (decision.GpPlanningError != null)
+                        GatherBuddy.Log.Warning($"[AutoGather] Solver GP planning unavailable for {item.Name}: {decision.GpPlanningError}");
+                    minimumStartingGp = decision.MinimumStartingGp;
                     action = MapAction(decision.Action);
                     return true;
                 }
@@ -238,7 +247,8 @@ namespace GatherBuddy.AutoGather
                         shouldUseFullRotation,
                         config.CollectableAlwaysUseSolidAge,
                         ShouldAbandonCompletedCollectable(item)),
-                    mode == GatheringSolverMode.ExpectedScrip ? unsupportedReason : null);
+                    mode == GatheringSolverMode.ExpectedScrip ? unsupportedReason : null,
+                    shouldPlanStartingGp);
             }
 
             private bool RequestStillMatchesLiveState(

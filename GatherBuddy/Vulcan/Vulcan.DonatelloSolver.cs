@@ -50,7 +50,7 @@ public sealed class DonatelloSolverDefinition : ISolverDefinition
         var evaluation = DonatelloPlanEvaluator.Evaluate(craft, initial, actions);
         if (ShouldUseStaticPlan(craft, evaluation))
         {
-            GatherBuddy.Log.Debug("[Donatello] Initial Raphael plan already reaches maximum quality; using protected incumbent with concurrent opportunistic replans");
+            GatherBuddy.Log.Debug("[Donatello] Initial Raphael plan already reaches maximum quality; using protected incumbent without unnecessary condition replans");
             return new DonatelloProtectedRaphaelSolver(solution, craft);
         }
         return new DonatelloSolver(solution, craft);
@@ -140,11 +140,12 @@ public class DonatelloSolver : Solver, IDisposable
     private bool _replanAtProgressBoundary;
     private string? _maximumQualityGuardRoot;
     private readonly bool _protectedRaphaelTakeover;
-    private readonly bool _protectedMaxQualityPlan;
+    private bool _protectedMaxQualityPlan;
     private bool _opportunisticPending;
     private bool _pendingResultInvalidatedByIssuedAction;
     private bool _pendingUsesImprovementQuiescence;
     internal int NativeReplanCount { get; private set; }
+    internal bool HasGuaranteedMaximumQualityPlan => _protectedMaxQualityPlan;
     internal bool HasPendingOpportunisticReplan
         => _opportunisticPending && _pendingSolve is { IsCompleted: false };
     internal IReadOnlyList<VulcanSkill> RemainingActions => _plan.Skip(_actionIndex).ToList();
@@ -235,7 +236,9 @@ public class DonatelloSolver : Solver, IDisposable
             }
         }
 
-        if (_actionIndex < _plan.Count && ShouldUseCarefulObservation(_craft, step))
+        if (!_protectedMaxQualityPlan
+            && _actionIndex < _plan.Count
+            && ShouldUseCarefulObservation(_craft, step))
         {
             var (observationResult, observationExpected) = Simulator.Execute(_craft, step, VulcanSkill.CarefulObservation, 0, 1);
             if (observationResult != Simulator.ExecuteResult.CantUse)
@@ -249,7 +252,7 @@ public class DonatelloSolver : Solver, IDisposable
         if (_maximumQualityGuardRoot != null
             && !string.Equals(_maximumQualityGuardRoot, rootKey, StringComparison.Ordinal))
             _maximumQualityGuardRoot = null;
-        if (_needsInitialStagedReplan || _replanAtProgressBoundary)
+        if (!_protectedMaxQualityPlan && (_needsInitialStagedReplan || _replanAtProgressBoundary))
         {
             _needsInitialStagedReplan = false;
             _replanAtProgressBoundary = false;
@@ -257,39 +260,44 @@ public class DonatelloSolver : Solver, IDisposable
             return new(VulcanSkill.None, "Donatello preparing staged progress plan");
         }
 
-        var progressConditionReaction = !IsProgressOnly(_craft)
+        if (_actionIndex >= _plan.Count)
+            return new(VulcanSkill.None, "Donatello plan exhausted before craft completion", IsTerminalFailure: true);
+
+        while (_protectedMaxQualityPlan
+            && step.Quality >= _craft.CraftQualityMax
+            && _actionIndex < _plan.Count
+            && IsQualityOnlyAction(_craft, step, _plan[_actionIndex]))
+            _actionIndex++;
+        if (_actionIndex >= _plan.Count)
+            return new(VulcanSkill.None, "Donatello plan exhausted before craft completion", IsTerminalFailure: true);
+
+        var action = _plan[_actionIndex];
+        var progressConditionReaction = !_protectedMaxQualityPlan
+            && !IsProgressOnly(_craft)
             && !_craft.CraftExpert
             && step.Progress < _craft.CraftProgress - 1
             && step.Quality < _craft.CraftQualityMax
             && step.Condition is Condition.Good or Condition.Excellent;
-        var poorCarefulObservationReaction = ShouldPlanCarefulObservation(_craft, step);
-        var protectedConditionReplan = _protectedMaxQualityPlan
-            && !IsProgressOnly(_craft)
-            && step.Condition != Condition.Normal
-            && (IsProtectedQualityRecoveryCondition(step.Condition)
-                || ResolveProtectedOpportunisticDeadlineMillis(GatherBuddy.Config.VulcanExecutionDelayMs) > 0);
-        if ((RequiresReplan(_craft, _expectedState, step)
+        var poorCarefulObservationReaction = !_protectedMaxQualityPlan
+            && ShouldPlanCarefulObservation(_craft, step);
+        var protectedPlanReplan = _protectedMaxQualityPlan
+            && RequiresProtectedMaximumQualityReplan(_craft, _expectedState, step, action);
+        if (((_protectedMaxQualityPlan
+                    ? protectedPlanReplan
+                    : RequiresReplan(_craft, _expectedState, step))
                 || progressConditionReaction
-                || poorCarefulObservationReaction
-                || protectedConditionReplan)
+                || poorCarefulObservationReaction)
             && rootKey != _handledRoot)
         {
             if (CanRepresentLiveRoot(step, out var unsupportedReason))
             {
-                var opportunistic = CanStartOpportunisticProtectedReplan(step);
-                StartReplan(step, rootKey, opportunistic);
-                if (opportunistic)
-                    return CommitCurrentAction(step, "Donatello opportunistic replan overlapping action delay");
+                StartReplan(step, rootKey, opportunistic: false);
                 return new(VulcanSkill.None, "Donatello re-optimizing remaining craft");
             }
             _handledRoot = rootKey;
             GatherBuddy.Log.Warning($"[Donatello] Replan skipped; retaining incumbent: {unsupportedReason}");
         }
 
-        if (_actionIndex >= _plan.Count)
-            return new(VulcanSkill.None, "Donatello plan exhausted before craft completion", IsTerminalFailure: true);
-
-        var action = _plan[_actionIndex];
         var shouldReplanBeforeCompletion = ShouldReplanBeforeCompletion(_craft, step, action);
         var shouldReplanAfterMaximumQuality = ShouldReplanAfterMaximumQuality(_craft, step, action);
         if (shouldReplanAfterMaximumQuality)
@@ -439,7 +447,8 @@ public class DonatelloSolver : Solver, IDisposable
             interrupt = _pendingInterrupt;
         }
         var solveMode = ResolvePendingSolveMode(_craft, incumbent.Count);
-        _pendingUsesImprovementQuiescence = UsesImprovementQuiescence(_craft)
+        _pendingUsesImprovementQuiescence = !_protectedMaxQualityPlan
+            && UsesImprovementQuiescence(_craft)
             && solveMode != DonatelloNative.SolveMode.CompleteFastest;
         _pendingEstablishesBaseline = solveMode == DonatelloNative.SolveMode.OptimizeQuality
             && ProtectsRaphaelBaseline(_craft)
@@ -645,7 +654,10 @@ public class DonatelloSolver : Solver, IDisposable
             if (ShouldAdoptCandidate(_craft, candidateScore, incumbentScore, stagedProgressPlan))
             {
                 _plan = candidate;
-                _progressBoundaryActionCount = result.ProgressBoundary?.ActionCount;
+                _protectedMaxQualityPlan = IsGuaranteedMaximumQuality(_craft, candidateScore);
+                _progressBoundaryActionCount = _protectedMaxQualityPlan
+                    ? null
+                    : result.ProgressBoundary?.ActionCount;
                 GatherBuddy.Log.Debug(
                     $"[Donatello] Adopted {(_pendingEstablishesBaseline ? "live Raphael baseline" : stagedProgressPlan ? "staged progress plan" : "strict improvement")}: quality={candidateScore.Quality}, steps={candidateScore.Steps}, "
                     + $"optimal={result.Optimal}, bound={result.QualityUpperBound}, elapsed={result.ElapsedMillis}ms");
@@ -653,6 +665,7 @@ public class DonatelloSolver : Solver, IDisposable
             else if (incumbentScore.Completes)
             {
                 _plan = incumbent;
+                _protectedMaxQualityPlan = IsGuaranteedMaximumQuality(_craft, incumbentScore);
                 _progressBoundaryActionCount = null;
                 GatherBuddy.Log.Debug("[Donatello] Retained incumbent; candidate did not prove a strict improvement");
             }
@@ -663,9 +676,11 @@ public class DonatelloSolver : Solver, IDisposable
         }
         catch (Exception ex)
         {
-            if (DonatelloPlanEvaluator.Evaluate(_craft, root, incumbent).Completes)
+            var incumbentScore = DonatelloPlanEvaluator.Evaluate(_craft, root, incumbent);
+            if (incumbentScore.Completes)
             {
                 _plan = incumbent;
+                _protectedMaxQualityPlan = IsGuaranteedMaximumQuality(_craft, incumbentScore);
                 GatherBuddy.Log.Warning($"[Donatello] Replan failed; retaining validated incumbent: {ex.Message}");
             }
             else
@@ -730,11 +745,6 @@ public class DonatelloSolver : Solver, IDisposable
             _replanAtProgressBoundary = true;
         return new(action, comment);
     }
-
-    private bool CanStartOpportunisticProtectedReplan(StepState step)
-        => _protectedMaxQualityPlan
-            && !IsProtectedQualityRecoveryCondition(step.Condition)
-            && ResolveProtectedOpportunisticDeadlineMillis(GatherBuddy.Config.VulcanExecutionDelayMs) > 0;
 
     internal static bool IsProtectedQualityRecoveryCondition(Condition condition)
         => condition is Condition.Excellent or Condition.Poor;
@@ -895,6 +905,35 @@ public class DonatelloSolver : Solver, IDisposable
             : !Equivalent(expected, actual, fullQualityNormalCraft);
     }
 
+    internal static bool RequiresProtectedMaximumQualityReplan(
+        CraftState craft,
+        StepState? expected,
+        StepState actual,
+        VulcanSkill action)
+    {
+        if (expected != null)
+        {
+            if (actual.Quality + 1 < expected.Quality)
+                return true;
+            if (!Equivalent(expected, actual, ignoreQualityAndCondition: true))
+                return true;
+        }
+        if (actual.Quality >= craft.CraftQualityMax)
+            return false;
+        if (!craft.CraftExpert)
+            return IsProtectedQualityRecoveryCondition(actual.Condition);
+        if (actual.Condition != Condition.Malleable)
+            return false;
+        if (!Simulator.CanUseAction(craft, actual, action)
+            || Simulator.GetSuccessRate(actual, action) < 1.0)
+            return true;
+
+        var (result, next) = Simulator.Execute(craft, actual, action, 0, 1);
+        return result == Simulator.ExecuteResult.Succeeded
+            && next.Progress >= craft.CraftProgress
+            && next.Quality < craft.CraftQualityMax;
+    }
+
     internal static bool ShouldReplanBeforeCompletion(CraftState craft, StepState step, VulcanSkill action)
     {
         if (IsProgressOnly(craft)
@@ -923,6 +962,12 @@ public class DonatelloSolver : Solver, IDisposable
         return Simulator.CalculateProgress(craft, step, action) == 0
             && Simulator.CalculateQuality(craft, step, action) > 0;
     }
+
+    private static bool IsQualityOnlyAction(CraftState craft, StepState step, VulcanSkill action)
+        => Simulator.CanUseAction(craft, step, action)
+            && Simulator.GetSuccessRate(step, action) >= 1.0
+            && Simulator.CalculateProgress(craft, step, action) == 0
+            && Simulator.CalculateQuality(craft, step, action) > 0;
 
     internal static DonatelloNative.SolveMode ResolveLiveSolveMode(CraftState craft)
         => IsProgressOnly(craft)
@@ -972,6 +1017,11 @@ public class DonatelloSolver : Solver, IDisposable
 
     internal static bool ProtectsRaphaelBaseline(CraftState craft)
         => !IsProgressOnly(craft);
+
+    private static bool IsGuaranteedMaximumQuality(
+        CraftState craft,
+        DonatelloPlanEvaluation evaluation)
+        => evaluation.Completes && evaluation.Quality >= craft.CraftQualityMax;
 
     private static string Fingerprint(StepState step)
         => $"{step.Index}/{step.Progress}/{step.Quality}/{step.Durability}/{step.RemainingCP}/{(int)step.Condition}/"

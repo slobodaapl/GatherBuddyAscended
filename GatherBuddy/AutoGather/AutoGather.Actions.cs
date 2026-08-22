@@ -522,8 +522,14 @@ namespace GatherBuddy.AutoGather
                 LastCollectability = collectibility;
                 LastIntegrity      = integrity;
 
-                if (CurrentCollectableRotation.TryGetNextAction(MasterpieceReader, out var collectibleAction))
-                    EnqueueActionWithDelay(() => UseAction(collectibleAction));
+                if (CurrentCollectableRotation.TryGetNextAction(
+                        MasterpieceReader,
+                        out var collectibleAction,
+                        out var minimumStartingGp))
+                {
+                    if (!TryBeginCollectableGpWait(minimumStartingGp))
+                        EnqueueActionWithDelay(() => UseAction(collectibleAction));
+                }
                 else
                     AutoStatus = "Calculating best collectable action...";
             }

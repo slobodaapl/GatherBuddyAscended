@@ -231,6 +231,7 @@ namespace GatherBuddy.AutoGather
                     Waiting                    = false;
                     ActionSequence             = null;
                     CurrentCollectableRotation = null;
+                    _pendingCollectableGpPlan  = null;
                     
                     CleanupAutoHook();
 
@@ -1908,10 +1909,8 @@ namespace GatherBuddy.AutoGather
                     else
                         MoveToCloseNode(
                             nextNode,
-                            next.Gatherable!,
-                            config,
-                            next.CompletionItemId,
-                            next.Time);
+                            next,
+                            config);
                 }
             }
             else
@@ -1990,15 +1989,14 @@ namespace GatherBuddy.AutoGather
                 
                 if (next.Gatherable != null)
                 {
+                    DiscardCollectableGpPlanForOtherTarget(next);
                     if (ShouldWaitForUpcomingLegendaryGp(next, config, closestTargetableNode))
                         return;
 
                     MoveToCloseNode(
                         closestTargetableNode,
-                        next.Gatherable,
-                        config,
-                        next.CompletionItemId,
-                        next.Time);
+                        next,
+                        config);
                 }
                 else if (next.Fish != null)
                 {

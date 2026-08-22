@@ -97,7 +97,8 @@ internal sealed record GatheringSolveRequest(
     GatheringActionModel Actions,
     GatheringMechanics Mechanics,
     GatheringLegacyOptions Legacy,
-    string? UnsupportedReason);
+    string? UnsupportedReason,
+    bool PlanStartingGp);
 
 internal sealed record GatheringDecision(
     GatheringSolverAction Action,
@@ -105,6 +106,8 @@ internal sealed record GatheringDecision(
     double ExpectedReward,
     double ExpectedPerfectCollects,
     double ExpectedTerminalGp,
+    int? MinimumStartingGp,
+    string? GpPlanningError,
     string? FallbackReason);
 
 internal static partial class DonatelloNative

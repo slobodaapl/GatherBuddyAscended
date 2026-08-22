@@ -34,6 +34,7 @@ Require(new GatherBuddy.Config.Configuration().VulcanAutoTakeOverManualSynthesis
 
 ExpertConditionSamplerTests.Run(Require);
 CollectableTerminalActionAcceptanceTests.Run(Require);
+CollectableGpPlanningAcceptanceTests.Run(Require);
 TimedLegendaryGpAcceptanceTests.Run(Require);
 CraftingMaterialSelectionAcceptanceTests.Run(Require);
 NativeRecipeCraftingTests.Run(Require);
@@ -1600,6 +1601,61 @@ Require(DonatelloSolver.RequiresReplan(craft, fullQualityGood, fullQualityGood w
     "full quality must not suppress replanning for non-quality state divergence");
 Require(DonatelloSolver.RequiresReplan(craft with { CraftExpert = true }, null, fullQualityGood),
     "full quality must not suppress expert-craft condition replanning");
+var protectedExpected = Root();
+Require(!DonatelloSolver.RequiresProtectedMaximumQualityReplan(
+            craft,
+            protectedExpected,
+            protectedExpected with { Condition = Condition.Good },
+            VulcanSkill.BasicSynthesis)
+        && DonatelloSolver.RequiresProtectedMaximumQualityReplan(
+            craft,
+            protectedExpected,
+            protectedExpected with { Condition = Condition.Excellent },
+            VulcanSkill.BasicSynthesis)
+        && DonatelloSolver.RequiresProtectedMaximumQualityReplan(
+            craft,
+            protectedExpected,
+            protectedExpected with { Condition = Condition.Poor },
+            VulcanSkill.BasicSynthesis)
+        && DonatelloSolver.RequiresProtectedMaximumQualityReplan(
+            craft,
+            protectedExpected,
+            protectedExpected with { Condition = Condition.Good, RemainingCP = 499 },
+            VulcanSkill.BasicSynthesis)
+        && DonatelloSolver.RequiresProtectedMaximumQualityReplan(
+            craft,
+            protectedExpected with { Quality = 100 },
+            protectedExpected with { Quality = 98, Condition = Condition.Good },
+            VulcanSkill.BasicSynthesis),
+    "a protected normal-craft maximum-quality suffix must ignore beneficial Good but still recover from Excellent/Poor, lost quality, and real state divergence");
+var expertProgressCraft = craft with { CraftExpert = true, CraftProgress = 10_000 };
+var expertMalleable = Root(Condition.Malleable);
+var protectedMalleableProgress = Simulator.CalculateProgress(
+    expertProgressCraft,
+    expertMalleable,
+    VulcanSkill.BasicSynthesis);
+expertProgressCraft = expertProgressCraft with { CraftProgress = protectedMalleableProgress };
+Require(DonatelloSolver.RequiresProtectedMaximumQualityReplan(
+            expertProgressCraft,
+            Root(),
+            expertMalleable,
+            VulcanSkill.BasicSynthesis)
+        && !DonatelloSolver.RequiresProtectedMaximumQualityReplan(
+            expertProgressCraft with { CraftProgress = protectedMalleableProgress + 1 },
+            Root(),
+            expertMalleable,
+            VulcanSkill.BasicSynthesis)
+        && !DonatelloSolver.RequiresProtectedMaximumQualityReplan(
+            expertProgressCraft,
+            Root(),
+            expertMalleable with { Quality = expertProgressCraft.CraftQualityMax },
+            VulcanSkill.BasicSynthesis)
+        && !DonatelloSolver.RequiresProtectedMaximumQualityReplan(
+            expertProgressCraft,
+            Root(),
+            expertMalleable with { Condition = Condition.Pliant },
+            VulcanSkill.BasicSynthesis),
+    "a protected Expert maximum-quality suffix must ignore condition churn and replan only when Malleable would complete below maximum quality");
 Require(DonatelloSolver.ShouldReplanAfterMaximumQuality(craft, fullQualityGood, VulcanSkill.BasicTouch)
         && DonatelloSolver.ShouldReplanAfterMaximumQuality(craft, fullQualityGood, VulcanSkill.PreparatoryTouch)
         && !DonatelloSolver.ShouldReplanAfterMaximumQuality(craft, fullQualityGood, VulcanSkill.BasicSynthesis)
@@ -1699,11 +1755,28 @@ var protectedMaxQualitySolution = new CachedRaphaelSolution
         (uint)VulcanSkill.BasicSynthesis,
     ],
 };
-var protectedMaxQualityCraft = Craft() with
+var protectedQualityProbeCraft = Craft() with
 {
     StatControl = 700,
     CraftDurability = 40,
-    CraftQualityMax = 100,
+    CraftQualityMax = 10_000,
+};
+var protectedQualityProbeRoot = GameStateBuilder.BuildInitialStepState(protectedQualityProbeCraft);
+var (_, protectedQualityAfterFirst) = Simulator.Execute(
+    protectedQualityProbeCraft,
+    protectedQualityProbeRoot,
+    VulcanSkill.BasicTouch,
+    0,
+    1);
+var (_, protectedQualityAfterSecond) = Simulator.Execute(
+    protectedQualityProbeCraft,
+    protectedQualityAfterFirst,
+    VulcanSkill.BasicTouch,
+    0,
+    1);
+var protectedMaxQualityCraft = protectedQualityProbeCraft with
+{
+    CraftQualityMax = protectedQualityAfterSecond.Quality,
 };
 var protectedNormal = GameStateBuilder.BuildInitialStepState(protectedMaxQualityCraft);
 var protectedSolver = DonatelloSolverDefinition.CreateFromSolution(
@@ -1723,10 +1796,10 @@ var (_, protectedAfterTouch) = Simulator.Execute(
     1);
 protectedAfterTouch.Condition = Condition.Good;
 var protectedGood = protectedSolver.Solve(protectedMaxQualityCraft, protectedAfterTouch);
-Require(protectedGood.Action != VulcanSkill.None
+Require(protectedGood.Action == VulcanSkill.BasicTouch
         && !protectedGood.IsTerminalFailure
-        && protectedSolver is DonatelloSolver { NativeReplanCount: 1 },
-    "Good on a protected max-quality plan must start a concurrent opportunistic replan and keep the incumbent action");
+        && protectedSolver is DonatelloSolver { NativeReplanCount: 0 },
+    "Good must keep a protected maximum-quality suffix without starting a native replan");
 var protectedRecovery = (DonatelloSolver)DonatelloSolverDefinition.CreateFromSolution(
     protectedMaxQualitySolution,
     protectedMaxQualityCraft);
@@ -1736,7 +1809,7 @@ protectedAfterTouch.Condition = Condition.Excellent;
 var protectedExcellent = protectedRecovery.Solve(protectedMaxQualityCraft, protectedAfterTouch);
 Require(protectedExcellent.Action == VulcanSkill.None
         && protectedRecovery.NativeReplanCount == 1,
-    "Excellent/Poor on a protected max-quality plan must wait for the 30s recovery search");
+    "Excellent/Poor must remain the normal-craft recovery exception for a protected maximum-quality suffix");
 
 // Explicit known-condition progression, including zero-step preservation.
 var excellent = Root(Condition.Excellent);

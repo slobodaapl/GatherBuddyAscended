@@ -153,13 +153,17 @@ namespace GatherBuddy.AutoGather
             {
                 // Since it's possible that we are not gathering the top item in the list,
                 // we need to remember what we are going to gather inside MasterpieceAddon
-                var target = _activeItemList.FirstOrDefault(x => x.Item == slot.Item);
+                var target = _currentGatherTarget is { } current && current.Item == slot.Item
+                    ? current
+                    : _activeItemList.FirstOrDefault(x => x.Item == slot.Item);
+                var skipStartingGpPlan = ConsumeReadyCollectableGpPlan(target);
                 CurrentCollectableRotation = new CollectableRotation(
                     MatchConfigPreset(slot.Item),
                     slot.Item,
                     target.Quantity,
                     slot.GatherChance,
-                    target.CompletionItemId);
+                    target.CompletionItemId,
+                    !skipStartingGpPlan);
             }
 
             EnqueueActionWithDelay(slot.Gather);

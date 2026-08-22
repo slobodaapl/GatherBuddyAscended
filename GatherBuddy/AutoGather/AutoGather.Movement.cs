@@ -3,6 +3,7 @@ using Dalamud.Game.ClientState.Objects.Types;
 using FFXIVClientStructs.FFXIV.Client.Game;
 using FFXIVClientStructs.FFXIV.Client.Game.Object;
 using FFXIVClientStructs.FFXIV.Client.Game.UI;
+using GatherBuddy.AutoGather.Lists;
 using GatherBuddy.Classes;
 using GatherBuddy.CustomInfo;
 using GatherBuddy.Data;
@@ -79,12 +80,12 @@ namespace GatherBuddy.AutoGather
 
         private void MoveToCloseNode(
             IGameObject gameObject,
-            Gatherable targetItem,
-            ConfigPreset config,
-            uint completionItemId,
-            TimeInterval targetTime)
+            GatherTarget target,
+            ConfigPreset config)
         {
             if (!Player.Available) return;
+
+            var targetItem = target.Gatherable!;
 
             // We can open a node with less than 3 vertical and less than 3.5 horizontal separation
             var hSeparation = Vector2.Distance(gameObject.Position.ToVector2(), Player.Position.ToVector2());
@@ -92,16 +93,14 @@ namespace GatherBuddy.AutoGather
 
             if (hSeparation < 3.5)
             {
-                var collectableMinGp = config.CollectableMinGP;
-                var maximizeReduction = config.ChooseBestActionsAutomatically
-                    && targetItem.ItemData.AetherialReduce > 0
-                    && IsRareReductionTarget(completionItemId);
+                var solverRequiredGp = GetSolverRequiredGp(target);
+                var collectableMinGp = CollectableGpWaitPolicy.ResolveRequiredGp(
+                    config.CollectableMinGP,
+                    solverRequiredGp,
+                    (int)Player.Object.MaxGp);
                 var enoughWindowToWait = TimedNodeGpWaitPolicy.CanWaitBeforeGathering(
-                    targetTime,
+                    target.Time,
                     GatherBuddy.Time.ServerTime);
-                var waitForMaximumGp = maximizeReduction && enoughWindowToWait;
-                if (waitForMaximumGp)
-                    collectableMinGp = Math.Max(collectableMinGp, (int)Player.Object.MaxGp);
 
                 var waitGP = enoughWindowToWait
                           && (targetItem.ItemData.IsCollectable && Player.Object.CurrentGp < collectableMinGp
@@ -120,8 +119,8 @@ namespace GatherBuddy.AutoGather
                 else if (waitGP)
                 {
                     StopNavigation();
-                    AutoStatus = waitForMaximumGp
-                        ? "Waiting for GP to maximize reduction collectability..."
+                    AutoStatus = solverRequiredGp > config.CollectableMinGP
+                        ? $"Waiting for solver-required GP ({Player.Object.CurrentGp}/{collectableMinGp})..."
                         : "Waiting for GP to regenerate...";
                 }
                 else
@@ -149,6 +148,7 @@ namespace GatherBuddy.AutoGather
                         if (vSeparation < 3 && !(_navState.offset && Dalamud.Conditions[ConditionFlag.InFlight] && IsPathing))
                         {
                             StopNavigation();
+                            MarkCollectableGpPlanReady(target);
                             EnqueueNodeInteraction(gameObject, targetItem);
                         } 
                         else
@@ -499,7 +499,7 @@ namespace GatherBuddy.AutoGather
                 && nodeId.HasValue 
                 && AutoOffsets.TryGetRandomOffset(nodeId.Value, destination, player, out var offset))
             {
-                GatherBuddy.Log.Debug($"Using auto-offset for node {nodeId.Value}: {offset}. Distance to node: {Vector2.Distance(offset.ToVector2(), destination.ToVector2()):F2}y, angle: {Math.Acos(Vector2.Dot(Vector2.Normalize((player - destination).ToVector2()), Vector2.Normalize((offset - destination).ToVector2()))) * 180.0 / Math.PI:F1}°");
+                GatherBuddy.Log.Debug($"Using auto-offset for node {nodeId.Value}: {offset}. Distance to node: {Vector2.Distance(offset.ToVector2(), destination.ToVector2()):F2}y, angle: {Math.Acos(Vector2.Dot(Vector2.Normalize((player - destination).ToVector2()), Vector2.Normalize((offset - destination).ToVector2()))) * 180.0 / Math.PI:F1}Â°");
                 return offset;
             }
 
