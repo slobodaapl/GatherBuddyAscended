@@ -273,6 +273,12 @@ const CONFIG_FIELDS: &[&str] = &[
 static NEXT_HANDLE: AtomicU64 = AtomicU64::new(1);
 static SERVICES: OnceLock<Mutex<BTreeMap<gbm_handle, Arc<Service>>>> = OnceLock::new();
 
+#[cfg(test)]
+static TEST_PANIC_INJECTION: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+#[cfg(test)]
+static TEST_PANICS_CONTAINED: AtomicU64 = AtomicU64::new(0);
+
 fn services() -> &'static Mutex<BTreeMap<gbm_handle, Arc<Service>>> {
     SERVICES.get_or_init(|| Mutex::new(BTreeMap::new()))
 }
@@ -313,6 +319,8 @@ fn error_result(error: NativeError) -> gbm_result {
 }
 
 fn panic_result() -> gbm_result {
+    #[cfg(test)]
+    TEST_PANICS_CONTAINED.fetch_add(1, Ordering::Relaxed);
     error_result(NativeError::new(
         ErrorCode::Panic,
         "panic contained at native ABI boundary",
@@ -320,10 +328,46 @@ fn panic_result() -> gbm_result {
 }
 
 fn guarded(function: impl FnOnce() -> NativeResult<()>) -> gbm_result {
-    match catch_unwind(AssertUnwindSafe(function)) {
+    match catch_unwind(AssertUnwindSafe(|| {
+        #[cfg(test)]
+        if TEST_PANIC_INJECTION.load(Ordering::Relaxed) {
+            panic!("test-only ABI panic injection");
+        }
+        function()
+    })) {
         Ok(Ok(())) => ok(),
         Ok(Err(error)) => error_result(error),
         Err(_) => panic_result(),
+    }
+}
+
+fn guarded_value<T: Default>(function: impl FnOnce() -> T) -> T {
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        #[cfg(test)]
+        if TEST_PANIC_INJECTION.load(Ordering::Relaxed) {
+            panic!("test-only ABI panic injection");
+        }
+        function()
+    }));
+    if result.is_err() {
+        #[cfg(test)]
+        TEST_PANICS_CONTAINED.fetch_add(1, Ordering::Relaxed);
+    }
+    result.unwrap_or_default()
+}
+
+fn guarded_void(function: impl FnOnce()) {
+    if catch_unwind(AssertUnwindSafe(|| {
+        #[cfg(test)]
+        if TEST_PANIC_INJECTION.load(Ordering::Relaxed) {
+            panic!("test-only ABI panic injection");
+        }
+        function();
+    }))
+    .is_err()
+    {
+        #[cfg(test)]
+        TEST_PANICS_CONTAINED.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -421,7 +465,7 @@ fn config_from_json(bytes: &[u8]) -> NativeResult<NativeConfig> {
             "relay URL configuration exceeds native limits",
         ));
     }
-    if config.relay_mode > 1 {
+    if config.relay_mode > 2 {
         return Err(NativeError::invalid("unsupported relay_mode"));
     }
     let defaults = NativeConfig::default();
@@ -472,7 +516,7 @@ fn config_from_json(bytes: &[u8]) -> NativeResult<NativeConfig> {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn gbm_abi_version() -> u32 {
-    catch_unwind(AssertUnwindSafe(|| GBM_ABI_VERSION)).unwrap_or_default()
+    guarded_value(|| GBM_ABI_VERSION)
 }
 
 /// Creates a service handle from the caller-owned versioned JSON configuration.
@@ -834,20 +878,20 @@ pub unsafe extern "C" fn gbm_error_message(error_id: u64, out: *mut gbm_buffer) 
 
 #[unsafe(no_mangle)]
 pub extern "C" fn gbm_error_free(error_id: u64) {
-    let _ = catch_unwind(AssertUnwindSafe(|| global_errors().remove(error_id)));
+    guarded_void(|| global_errors().remove(error_id));
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn gbm_buffer_free(buffer: gbm_buffer) {
-    let _ = catch_unwind(AssertUnwindSafe(|| {
+    guarded_void(|| {
         // SAFETY: caller promises the buffer was allocated by this library.
         unsafe { release_buffer(buffer) };
-    }));
+    });
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn gbm_event_free(event: gbm_event) {
-    let _ = catch_unwind(AssertUnwindSafe(|| {
+    guarded_void(|| {
         // SAFETY: all fields came from event_to_ffi and are independently owned.
         unsafe {
             release_buffer(event.key);
@@ -855,5 +899,92 @@ pub extern "C" fn gbm_event_free(event: gbm_event) {
             release_buffer(event.actual_author);
             release_buffer(event.content_hash);
         }
-    }));
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn guarded_contains_test_panic_without_crossing_the_abi() {
+        let result = guarded(|| -> NativeResult<()> {
+            panic!("test-only panic injection");
+        });
+        assert_eq!(result.code, GBM_E_PANIC);
+        assert_ne!(result.error_id, 0);
+    }
+
+    #[test]
+    fn every_abi_export_contains_test_panic_without_unwinding() {
+        TEST_PANIC_INJECTION.store(true, Ordering::Relaxed);
+
+        let mut handle = 0;
+        assert_eq!(gbm_abi_version(), 0);
+        assert_eq!(
+            unsafe { gbm_create(std::ptr::null(), 0, &mut handle) }.code,
+            GBM_E_PANIC
+        );
+        assert_eq!(gbm_start(0).code, GBM_E_PANIC);
+        assert_eq!(gbm_create_group(0).code, GBM_E_PANIC);
+        assert_eq!(
+            unsafe { gbm_join_group(0, std::ptr::null(), 0) }.code,
+            GBM_E_PANIC
+        );
+        assert_eq!(gbm_leave_group(0).code, GBM_E_PANIC);
+        assert_eq!(
+            unsafe {
+                gbm_put(
+                    0,
+                    std::ptr::null(),
+                    0,
+                    std::ptr::null(),
+                    0,
+                    std::ptr::null(),
+                    0,
+                    0,
+                    0,
+                    0,
+                    std::ptr::null(),
+                    0,
+                )
+            }
+            .code,
+            GBM_E_PANIC
+        );
+        assert_eq!(
+            unsafe { gbm_poll_event(0, std::ptr::null_mut()) }.code,
+            GBM_E_PANIC
+        );
+        assert_eq!(
+            unsafe { gbm_get_status(0, std::ptr::null_mut()) }.code,
+            GBM_E_PANIC
+        );
+        assert_eq!(gbm_shutdown(0, 0).code, GBM_E_PANIC);
+        assert_eq!(gbm_destroy(0).code, GBM_E_PANIC);
+        assert_eq!(
+            unsafe { gbm_set_character_author(0, std::ptr::null(), 0) }.code,
+            GBM_E_PANIC
+        );
+        assert_eq!(gbm_request_snapshot(0, 0).code, GBM_E_PANIC);
+        assert_eq!(
+            unsafe { gbm_snapshot_open(0, 0, std::ptr::null_mut(), std::ptr::null_mut()) }.code,
+            GBM_E_PANIC
+        );
+        assert_eq!(
+            unsafe { gbm_snapshot_poll(0, std::ptr::null_mut(), std::ptr::null_mut()) }.code,
+            GBM_E_PANIC
+        );
+        assert_eq!(gbm_snapshot_destroy(0).code, GBM_E_PANIC);
+        assert_eq!(
+            unsafe { gbm_error_message(0, std::ptr::null_mut()) }.code,
+            GBM_E_PANIC
+        );
+        gbm_error_free(0);
+        gbm_buffer_free(gbm_buffer::default());
+        gbm_event_free(gbm_event::default());
+
+        TEST_PANIC_INJECTION.store(false, Ordering::Relaxed);
+        assert!(TEST_PANICS_CONTAINED.load(Ordering::Relaxed) >= 20);
+    }
 }

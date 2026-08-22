@@ -24,6 +24,19 @@ namespace GatherBuddy.Gui;
 
 public partial class VulcanWindow : Window, IDisposable
 {
+    private const int CraftingListsTabIndex = 0;
+    private const int FcListsTabIndex = 1;
+    private const int RecipesTabIndex = 2;
+    private const int WorkshopsTabIndex = 3;
+    private const int MacrosTabIndex = 4;
+    private const int StandardSolverTabIndex = 5;
+    private const int SolutionsTabIndex = 6;
+    private const int SettingsTabIndex = 7;
+    private const int DebugTabIndex = 8;
+    private const int MarketboardTabIndex = 9;
+    private const int VendorsTabIndex = 10;
+    private const int VulcanTabCount = 11;
+
     // Shared state
     private CraftingListDefinition? _editingList  = null;
     private CraftingListDefinition? _previewList  = null;
@@ -31,6 +44,7 @@ public partial class VulcanWindow : Window, IDisposable
     private CraftingListEditor?     _listEditor   = null;
     private bool                    _deferEditorDraw = false;
     private bool                    _craftingListsRequestFocus = false;
+    private bool                    _fcListsTabRequestFocus    = false;
     private bool                    _recipesTabRequestFocus    = false;
     private bool                    _vendorsTabRequestFocus    = false;
     private uint?                   _pendingRecipeId           = null;
@@ -115,6 +129,13 @@ public partial class VulcanWindow : Window, IDisposable
         IsOpen                  = true;
         _recipesTabRequestFocus = true;
         _pendingRecipeId        = null;
+    }
+
+    private void OpenToFcLists()
+    {
+        _pendingCollapseState = false;
+        IsOpen = true;
+        _fcListsTabRequestFocus = true;
     }
 
     public void OpenToRecipe(uint recipeId)
@@ -298,7 +319,7 @@ public partial class VulcanWindow : Window, IDisposable
     public override void Draw()
     {
         using var theme = VulcanUiStyle.PushTheme();
-        GatherBuddy.ControllerSupport?.TabNavigation.Update(Dalamud.GamepadState, 10);
+        GatherBuddy.ControllerSupport?.TabNavigation.Update(Dalamud.GamepadState, VulcanTabCount);
         
         // Track window focus for controller input blocking
         var isFocused = ImGui.IsWindowFocused(ImGuiFocusedFlags.RootAndChildWindows);
@@ -322,6 +343,7 @@ public partial class VulcanWindow : Window, IDisposable
                 if (tab)
                 {
                     DrawCraftingListsTab();
+                    DrawFcListsTab();
                     DrawRecipesTab();
                     DrawWorkshopsTab();
                     DrawMacrosTab();

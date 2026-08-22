@@ -11,6 +11,8 @@ crate-type = ["cdylib", "rlib"]
 
 [profile.release]
 panic = "unwind"
+# Keep native symbol files available for release crash diagnostics; CI uploads them separately.
+debug = 1
 
 [dependencies]
 anyhow = "1"

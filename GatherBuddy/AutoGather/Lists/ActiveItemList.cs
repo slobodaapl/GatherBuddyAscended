@@ -39,6 +39,8 @@ namespace GatherBuddy.AutoGather.Lists
         private          int                                     _lastTimedNodePrecog = -1;
         private          int                                     _lastTimedNodeEarlyAbandonment = -1;
         private          GatherTarget                            _currentItem;
+        private          Dictionary<uint, int>                    _fcIntentRanks = [];
+        private          Func<IReadOnlyList<uint>?>?               _fcIntentOrderProvider;
 
         internal ReadOnlyDictionary<GatheringNode, TimeInterval> DebugVisitedTimedLocations
             => _visitedTimedNodes.AsReadOnly();
@@ -47,7 +49,15 @@ namespace GatherBuddy.AutoGather.Lists
         /// First item on the list as of the last enumeration or default.
         /// </summary>
         public GatherTarget CurrentOrDefault
-            => IsInitialized ? _currentItem : GetNextOrDefault();
+        {
+            get
+            {
+                if (_fcIntentOrderProvider is not null
+                    && !_autoGather.HasCurrentGatherTarget)
+                    return GetNextOrDefault();
+                return IsInitialized ? _currentItem : GetNextOrDefault();
+            }
+        }
 
         /// <summary>
         /// Determines whether there are any items that need to be gathered,
@@ -93,6 +103,68 @@ namespace GatherBuddy.AutoGather.Lists
         }
 
         /// <summary>
+        /// Sets a framework-local FC intent hint for the current temporary
+        /// gather execution. It is never copied into an AutoGatherList or
+        /// persisted PreferredLocations state.
+        /// </summary>
+        internal void SetFcIntentOrder(IReadOnlyList<uint>? itemOrder)
+        {
+            _fcIntentRanks = itemOrder is null
+                ? []
+                : itemOrder
+                    .Where(itemId => itemId != 0)
+                    .Distinct()
+                    .Select((itemId, index) => (itemId, index))
+                    .ToDictionary(value => value.itemId, value => value.index);
+            _forceUpdateUnconditionally = true;
+        }
+
+        internal void SetFcIntentOrderProvider(Func<IReadOnlyList<uint>?>? provider)
+        {
+            _fcIntentOrderProvider = provider;
+            if (provider is null)
+            {
+                SetFcIntentOrder(null);
+                return;
+            }
+            RefreshFcIntentOrderAtSelection();
+        }
+
+        private void RefreshFcIntentOrderAtSelection()
+            => RefreshFcIntentOrderAtSelectionBoundary(
+                _fcIntentOrderProvider,
+                _autoGather.HasCurrentGatherTarget,
+                _autoGather.IsGathering || _autoGather.IsFishing,
+                SetFcIntentOrder);
+
+        /// <summary>
+        /// Exact FC target-selection boundary used by
+        /// <see cref="GetNextOrDefault"/>. A live interaction retains its
+        /// target; an unavailable current-intent read retains the incumbent
+        /// route, while a valid empty preference clears only the advisory
+        /// hint.
+        /// </summary>
+        internal static void RefreshFcIntentOrderAtSelectionBoundary(
+            Func<IReadOnlyList<uint>?>? provider,
+            bool hasCurrentGatherTarget,
+            bool interactionActive,
+            Action<IReadOnlyList<uint>?> applyOrder)
+        {
+            ArgumentNullException.ThrowIfNull(applyOrder);
+            if (provider is null || (hasCurrentGatherTarget && interactionActive))
+                return;
+
+            try
+            {
+                applyOrder(provider());
+            }
+            catch (Exception)
+            {
+                // A failed current-intent read retains the incumbent order.
+            }
+        }
+
+        /// <summary>
         /// Returns an enumerator that iterates through the available gather targets.
         /// </summary>
         /// <returns>
@@ -109,6 +181,7 @@ namespace GatherBuddy.AutoGather.Lists
         /// <returns>The next item to gather. </returns>
         public GatherTarget GetNextOrDefault()
         {
+            RefreshFcIntentOrderAtSelection();
             if (IsUpdateNeeded())
                 DoUpdate();
 
@@ -240,6 +313,18 @@ namespace GatherBuddy.AutoGather.Lists
         private static bool IsAvailable(TimeInterval time, TimeStamp startTime, TimeStamp endTime)
             => TimedTargetTravelPolicy.IsAvailable(time, startTime, endTime);
 
+        private int GetFcIntentPriority(GatherTarget target)
+        {
+            if (_fcIntentRanks.Count == 0)
+                return 0;
+            if (_fcIntentRanks.TryGetValue(target.Item.ItemId, out var itemRank))
+                return itemRank;
+            if (target.CompletionItemId != 0
+                && _fcIntentRanks.TryGetValue(target.CompletionItemId, out var completionRank))
+                return completionRank;
+            return int.MaxValue;
+        }
+
         private sealed class FishWindowPriorityComparer : IComparer<FishWindowPriority>
         {
             public static readonly FishWindowPriorityComparer Instance = new();
@@ -325,7 +410,7 @@ namespace GatherBuddy.AutoGather.Lists
             return (lhs.Time == TimeInterval.Always).CompareTo(rhs.Time == TimeInterval.Always);
         }
 
-        private static int CompareFishTargetOrder(GatherTarget lhs, GatherTarget rhs, TimeStamp startTime, TimeStamp endTime)
+        private int CompareFishTargetOrder(GatherTarget lhs, GatherTarget rhs, TimeStamp startTime, TimeStamp endTime)
         {
             var availabilityComparison = GetAvailabilityPriority(lhs, startTime, endTime).CompareTo(GetAvailabilityPriority(rhs, startTime, endTime));
             if (availabilityComparison != 0)
@@ -335,10 +420,13 @@ namespace GatherBuddy.AutoGather.Lists
             if (windowComparison != 0)
                 return windowComparison;
 
-            return CompareLegacyTargetOrder(lhs, rhs, startTime, endTime);
+            var legacyComparison = CompareLegacyTargetOrder(lhs, rhs, startTime, endTime);
+            return legacyComparison != 0
+                ? legacyComparison
+                : GetFcIntentPriority(lhs).CompareTo(GetFcIntentPriority(rhs));
         }
 
-        private static List<GatherTarget> ApplyFishPriorityOrdering(IEnumerable<GatherTarget> targets, TimeStamp startTime, TimeStamp endTime)
+        private List<GatherTarget> ApplyFishPriorityOrdering(IEnumerable<GatherTarget> targets, TimeStamp startTime, TimeStamp endTime)
         {
             var orderedTargets = targets.ToList();
             var fishSlots = new List<int>(orderedTargets.Count);
@@ -494,7 +582,12 @@ namespace GatherBuddy.AutoGather.Lists
                 // Put inactive timed nodes to the end, ordered by start time.
                 .OrderBy(x => IsAvailable(x.Time, adjustedServerTime, adjustedEndTime) ? TimeStamp.MinValue : x.Time.Start)
                 // Bring active timed nodes to the front.
-                .ThenBy(x => x.Time == TimeInterval.Always);
+                .ThenBy(x => x.Time == TimeInterval.Always)
+                // FC intent is advisory only: preserve timed-node
+                // availability/schedule as the authoritative keys, then
+                // prefer a free item. Route and node selection remain the
+                // incumbent fallback within that preferred set.
+                .ThenBy(GetFcIntentPriority);
 
             if (GatherBuddy.Config.AutoGatherConfig.SortingMethod == AutoGatherConfig.SortingType.Location)
             {
@@ -806,6 +899,8 @@ namespace GatherBuddy.AutoGather.Lists
             _lastTimedNodeEarlyAbandonment = -1;
             _gatherableItems.Clear();
             _gatherableItems.TrimExcess();
+            _fcIntentRanks = [];
+            _fcIntentOrderProvider = null;
             _teleportationCosts.Clear();
             _teleportationCosts.TrimExcess();
             _permanentlyUnreachableLocations.Clear();

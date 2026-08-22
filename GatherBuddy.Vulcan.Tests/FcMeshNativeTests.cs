@@ -4,10 +4,13 @@ using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Text.Encodings.Web;
 using System.Text.Json;
 using GatherBuddy.FcMesh.Native;
 using GatherBuddy.FcMesh.Protocol;
 using GatherBuddy.FcMesh.State;
+using Org.BouncyCastle.Crypto.Parameters;
+using Org.BouncyCastle.Crypto.Signers;
 
 namespace GatherBuddy.Vulcan.Tests;
 
@@ -27,7 +30,7 @@ internal static class FcMeshNativeTests
         var decoded = FcNativeEnvelopeDecoder.Decode(
             fixture,
             Convert.FromHexString("ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c"),
-            new byte[32],
+            Convert.FromHexString("4f96c1b5388852c1b47f957ce89b40689ffc6b9fb908e6bb6da4e67d2c7a456c"),
             System.Text.Encoding.UTF8.GetBytes("v1/workers/ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c"));
         require(decoded.IsValid && decoded.Record is not null && decoded.VerifiedContext is not null,
             "the checked-in Rust native envelope must deserialize through the strict managed wire decoder");
@@ -96,10 +99,94 @@ internal static class FcMeshNativeTests
         {
             require(orderCoordinator.Start(new FcNativeConfiguration("ordered-start"), TestCharacterKey).Succeeded,
                 "keyed startup must cross the fake native boundary successfully");
-            require(orderFake.Calls.SequenceEqual(new[] { "Create", "SetCharacterAuthor", "Start" })
+        require(orderFake.Calls.SequenceEqual(new[] { "Create", "SetCharacterAuthor", "Start" })
                     && orderFake.SelectedAuthorAtStart is not null
                     && orderFake.SelectedAuthorAtStart.SequenceEqual(TestCharacterKey),
                 "native startup must select the persisted-group author before Start reopens it");
+        }
+
+        var restoreFake = new FakeNativeApi();
+        using (var restoreCoordinator = new FcMeshNativeCoordinator(restoreFake))
+        {
+            require(restoreCoordinator.Start(new FcNativeConfiguration("persisted-restore"), TestCharacterKey).Succeeded,
+                "persisted-restore author fixture must start through the managed native boundary");
+            restoreFake.EnqueueStarted(Convert.FromHexString(TestAuthor));
+            restoreCoordinator.Tick(TimeSpan.FromMilliseconds(100));
+            require(restoreCoordinator.LocalAuthorId == TestAuthor
+                    && !string.IsNullOrWhiteSpace(restoreCoordinator.LocalAuthorId),
+                "Started event author must install the local identity needed by persisted FC service restoration");
+        }
+
+        var restoredAuthorBytes = Enumerable.Repeat((byte)0xaa, 32).ToArray();
+        var restoredAuthorId = Convert.ToHexString(restoredAuthorBytes).ToLowerInvariant();
+        var restoredNamespaceId = new string('1', 64);
+        var restoredReadyFake = new FakeNativeApi();
+        using (var restoredReadyCoordinator = new FcMeshNativeCoordinator(
+                   restoredReadyFake,
+                   new FcWorldStore(),
+                   () => new FcWorldStore(),
+                   statusInterval: TimeSpan.Zero))
+        {
+            require(restoredReadyCoordinator.Start(
+                        new FcNativeConfiguration("persisted-restore-ready"),
+                        TestCharacterKey).Succeeded,
+                "managed persisted-restore readiness fixture must start through the native boundary");
+            restoredReadyFake.EnqueueStarted(restoredAuthorBytes);
+            restoredReadyFake.EnqueueJoined(created: true);
+            restoredReadyFake.EnqueueCompatibleGroupMetadataSnapshot();
+            for (var index = 0; index < 16 && !restoredReadyCoordinator.AutomationDecisionsAllowed; index++)
+                restoredReadyCoordinator.Tick(TimeSpan.FromMilliseconds(100));
+            var restoredReadiness = restoredReadyCoordinator.Readiness;
+            require(restoredReadyCoordinator.AutomationDecisionsAllowed
+                    && restoredReadiness.State == FcMeshReadinessState.Ready
+                    && restoredReadiness.NamespaceId == restoredNamespaceId
+                    && restoredReadiness.GroupTicket == "phase5-created-ticket"
+                    && restoredReadyCoordinator.LocalAuthorId == restoredAuthorId
+                    && !restoredReadyFake.ObservedEventKinds.Contains(FcNativeEventKind.InitialSyncCompleted),
+                "restored Joined plus a valid local metadata snapshot must reach Ready without peer sync evidence");
+        }
+
+        var missingMetadataFake = new FakeNativeApi();
+        using (var missingMetadataCoordinator = new FcMeshNativeCoordinator(
+                   missingMetadataFake,
+                   new FcWorldStore(),
+                   () => new FcWorldStore(),
+                   statusInterval: TimeSpan.Zero))
+        {
+            require(missingMetadataCoordinator.Start(
+                        new FcNativeConfiguration("persisted-restore-missing-metadata"),
+                        TestCharacterKey).Succeeded,
+                "missing-metadata restore fixture must start through the native boundary");
+            missingMetadataFake.EnqueueStarted(restoredAuthorBytes);
+            missingMetadataFake.EnqueueJoined(created: true);
+            for (var index = 0; index < 8; index++)
+                missingMetadataCoordinator.Tick(TimeSpan.FromMilliseconds(100));
+            require(!missingMetadataCoordinator.AutomationDecisionsAllowed
+                    && missingMetadataCoordinator.Readiness.State != FcMeshReadinessState.Ready
+                    && !missingMetadataFake.ObservedEventKinds.Contains(FcNativeEventKind.InitialSyncCompleted),
+                "restored local readiness must remain blocked when group metadata is missing");
+        }
+
+        var incompatibleMetadataFake = new FakeNativeApi();
+        using (var incompatibleMetadataCoordinator = new FcMeshNativeCoordinator(
+                   incompatibleMetadataFake,
+                   new FcWorldStore(),
+                   () => new FcWorldStore(),
+                   statusInterval: TimeSpan.Zero))
+        {
+            require(incompatibleMetadataCoordinator.Start(
+                        new FcNativeConfiguration("persisted-restore-incompatible-metadata"),
+                        TestCharacterKey).Succeeded,
+                "incompatible-metadata restore fixture must start through the native boundary");
+            incompatibleMetadataFake.EnqueueStarted(restoredAuthorBytes);
+            incompatibleMetadataFake.EnqueueJoined(created: true);
+            incompatibleMetadataFake.EnqueueIncompatibleGroupMetadataSnapshot();
+            for (var index = 0; index < 8; index++)
+                incompatibleMetadataCoordinator.Tick(TimeSpan.FromMilliseconds(100));
+            require(!incompatibleMetadataCoordinator.AutomationDecisionsAllowed
+                    && incompatibleMetadataCoordinator.Readiness.State != FcMeshReadinessState.Ready
+                    && !incompatibleMetadataFake.ObservedEventKinds.Contains(FcNativeEventKind.InitialSyncCompleted),
+                "restored local readiness must remain blocked when group metadata is incompatible");
         }
 
         require(Marshal.SizeOf<FcNativeBuffer>() == 16
@@ -716,12 +803,61 @@ internal static class FcMeshNativeTests
             "dispose reentrant with the framework tick is contained and destroys the native handle once");
     }
 
-    private const string NativeAuthor = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    private static readonly byte[] NativeAuthorSeed =
+    [
+        0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
+        0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x10,
+        0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80, 0x90,
+        0xa0, 0xb0, 0xc0, 0xd0, 0xe0, 0xf0, 0x01, 0x02,
+    ];
+    private static readonly string NativeAuthor = Convert.ToHexString(
+            new Ed25519PrivateKeyParameters(NativeAuthorSeed, 0)
+        .GeneratePublicKey()
+        .GetEncoded())
+        .ToLowerInvariant();
+    private static readonly byte[] TestAuthorSeed =
+    [
+        0x21, 0x32, 0x43, 0x54, 0x65, 0x76, 0x87, 0x98,
+        0xa9, 0xba, 0xcb, 0xdc, 0xed, 0xfe, 0x0f, 0x11,
+        0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99,
+        0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x10, 0x20,
+    ];
+    private static readonly byte[] TestRemoteAuthorSeed =
+    [
+        0x31, 0x42, 0x53, 0x64, 0x75, 0x86, 0x97, 0xa8,
+        0xb9, 0xca, 0xdb, 0xec, 0xfd, 0x0e, 0x1f, 0x21,
+        0x32, 0x43, 0x54, 0x65, 0x76, 0x87, 0x98, 0xa9,
+        0xba, 0xcb, 0xdc, 0xed, 0xfe, 0x1f, 0x30, 0x40,
+    ];
+    private static readonly string TestAuthor = PublicAuthor(TestAuthorSeed);
+    private static readonly string TestRemoteAuthor = PublicAuthor(TestRemoteAuthorSeed);
+    private static readonly IReadOnlyDictionary<string, byte[]> TestAuthorSeeds
+        = new Dictionary<string, byte[]>(StringComparer.Ordinal)
+        {
+            [NativeAuthor] = NativeAuthorSeed,
+            [TestAuthor] = TestAuthorSeed,
+            [TestRemoteAuthor] = TestRemoteAuthorSeed,
+        };
+    private static readonly JsonSerializerOptions RustCanonicalJsonOptions
+        = new(FcJsonContext.Default.Options)
+        {
+            Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
+        };
     private const string NativeHlcNode = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     private static readonly Guid NativeSession = Guid.Parse("00000000-0000-0000-0000-000000000111");
     private static readonly Guid NativeList = Guid.Parse("00000000-0000-0000-0000-000000000112");
     private static readonly Guid NativeChestRecord = Guid.Parse("00000000-0000-0000-0000-000000000113");
     private static readonly Guid NativeTransfer = Guid.Parse("00000000-0000-0000-0000-000000000114");
+
+    internal static string DeterministicAuthor => TestAuthor;
+    internal static string DeterministicRemoteAuthor => TestRemoteAuthor;
+
+    private static string PublicAuthor(byte[] seed)
+        => Convert.ToHexString(
+                new Ed25519PrivateKeyParameters(seed, 0)
+                    .GeneratePublicKey()
+                    .GetEncoded())
+            .ToLowerInvariant();
 
     private static WorkerSessionRecord MakeWorker(
         string owner,
@@ -823,31 +959,28 @@ internal static class FcMeshNativeTests
             RecordType = header.RecordType,
             Payload = payloadBytes,
             PayloadHash = FcMeshSignature.HashPayload(payloadBytes),
-            Signature = Convert.ToBase64String(new byte[64]),
+            Signature = string.Empty,
             DocumentKeyOwnerId = header.OwnerAuthorId,
             DocumentKey = FcMeshKey.ForRecord(header.RecordType, header.OwnerAuthorId, header.RecordId.ToString("D")),
             SignatureAlgorithm = FcNativeEnvelopeDecoder.SignatureAlgorithm,
         };
-        var envelopeBytes = JsonSerializer.SerializeToUtf8Bytes(wire, FcJsonContext.Default.FcNativeEnvelopeWire);
-        var key = Encoding.UTF8.GetBytes(wire.DocumentKey);
-        var actualAuthor = Convert.FromHexString(header.OwnerAuthorId);
-        var contentHash = Enumerable.Repeat((byte)0xA5, 32).ToArray();
+        var signed = SignNativeEnvelope(wire);
         var eventValue = new FcMeshNativeEvent(
             FcProtocolVersion.Current,
             FcNativeEventKind.RecordInserted,
             sequence,
             epoch,
-            key,
-            envelopeBytes,
-            actualAuthor,
-            contentHash,
+            signed.Key,
+            signed.Envelope,
+            signed.Author,
+            signed.ContentHash,
             header.Revision);
         var snapshotValue = new FcMeshNativeSnapshotRecord(
             FcProtocolVersion.Current,
-            key,
-            envelopeBytes,
-            actualAuthor,
-            contentHash,
+            signed.Key,
+            signed.Envelope,
+            signed.Author,
+            signed.ContentHash,
             generationValue,
             header.Revision,
             header.RecordType,
@@ -855,6 +988,34 @@ internal static class FcMeshNativeTests
             0,
             Convert.FromHexString(NativeHlcNode));
         return new NativeRecordFixture(eventValue, snapshotValue);
+    }
+
+    private static SignedNativeEnvelope SignNativeEnvelope(FcNativeEnvelopeWire wire)
+    {
+        if (!TestAuthorSeeds.TryGetValue(wire.ActualAuthorId, out var authorSeed))
+            throw new InvalidOperationException(
+                "fake native envelope author is not registered with a deterministic Ed25519 test key");
+        if (!string.Equals(PublicAuthor(authorSeed), wire.ActualAuthorId, StringComparison.Ordinal))
+            throw new InvalidOperationException(
+                "fake native envelope author does not match its deterministic Ed25519 public key");
+        if (!FcNativeEnvelopeCrypto.TryEncodeSigningBytes(
+                wire,
+                out var signingBytes,
+                out var error))
+            throw new InvalidOperationException($"fake native envelope signing shape rejected: {error}");
+
+        var signer = new Ed25519Signer();
+        signer.Init(true, new Ed25519PrivateKeyParameters(authorSeed, 0));
+        signer.BlockUpdate(signingBytes, 0, signingBytes.Length);
+        wire.Signature = Convert.ToBase64String(signer.GenerateSignature());
+        var envelope = JsonSerializer.SerializeToUtf8Bytes(
+            wire,
+            RustCanonicalJsonOptions);
+        return new SignedNativeEnvelope(
+            Encoding.UTF8.GetBytes(wire.DocumentKey),
+            envelope,
+            Convert.FromHexString(wire.ActualAuthorId),
+            FcNativeEnvelopeCrypto.HashEnvelope(envelope));
     }
 
     private static FcRecordHeader HeaderOf(object payload)
@@ -872,6 +1033,12 @@ internal static class FcMeshNativeTests
     internal sealed record NativeRecordFixture(
         FcMeshNativeEvent Event,
         FcMeshNativeSnapshotRecord Snapshot);
+
+    private sealed record SignedNativeEnvelope(
+        byte[] Key,
+        byte[] Envelope,
+        byte[] Author,
+        byte[] ContentHash);
 
     private static string? FindFixture()
     {
@@ -913,6 +1080,7 @@ internal static class FcMeshNativeTests
         public ulong LastSnapshotBaseEventSequence { get; private set; }
         public int SnapshotRecordsPolled { get; private set; }
         public List<string> Calls { get; } = new();
+        public List<FcNativeEventKind> ObservedEventKinds { get; } = new();
         public byte[]? SelectedAuthorAtStart { get; private set; }
         public byte[]? RequiredAuthorBeforeStart { get; set; }
 
@@ -967,7 +1135,9 @@ internal static class FcMeshNativeTests
                 value = null;
                 return Error(FcNativeErrorCode.NoEvent);
             }
-            value = _events.Dequeue();
+            var dequeued = _events.Dequeue();
+            value = dequeued;
+            ObservedEventKinds.Add(dequeued.Kind);
             return Ok();
         }
 
@@ -1085,6 +1255,18 @@ internal static class FcMeshNativeTests
                 Array.Empty<byte>(),
                 0));
 
+        public void EnqueueStarted(byte[] actualAuthor)
+            => Enqueue(new FcMeshNativeEvent(
+                1,
+                FcNativeEventKind.Started,
+                ++_sequence,
+                _worldEpoch,
+                Array.Empty<byte>(),
+                Array.Empty<byte>(),
+                actualAuthor.ToArray(),
+                Array.Empty<byte>(),
+                0));
+
         public void EnqueueJoined(bool created = false)
             => Enqueue(new FcMeshNativeEvent(
                 1,
@@ -1118,6 +1300,9 @@ internal static class FcMeshNativeTests
         public void EnqueueCompatibleGroupMetadataSnapshot()
             => EnqueueSnapshotRecord(BuildGroupMetadataRecord(0).Snapshot);
 
+        public void EnqueueIncompatibleGroupMetadataSnapshot()
+            => EnqueueSnapshotRecord(BuildGroupMetadataRecord(0, 0x22).Snapshot);
+
         public void EnqueueInvalidation(ulong epoch)
         {
             _worldEpoch = epoch;
@@ -1149,11 +1334,13 @@ internal static class FcMeshNativeTests
 
         private void Enqueue(FcMeshNativeEvent value) => _events.Enqueue(value);
 
-        private static NativeRecordFixture BuildGroupMetadataRecord(ulong sequence)
+        private static NativeRecordFixture BuildGroupMetadataRecord(
+            ulong sequence,
+            byte namespaceFill = 0x11)
         {
             const string recordId = "00000000-0000-0000-0000-000000000115";
-            const string owner = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-            var namespaceBytes = Enumerable.Repeat((byte)0x11, 32).ToArray();
+            var owner = NativeAuthor;
+            var namespaceBytes = Enumerable.Repeat(namespaceFill, 32).ToArray();
             var payload = new[]
                     { (byte)FcProtocolVersion.Current, (byte)9 }
                 .Concat(Encoding.UTF8.GetBytes("iroh-docs"))
@@ -1178,31 +1365,28 @@ internal static class FcMeshNativeTests
                 RecordType = recordType,
                 Payload = payload,
                 PayloadHash = FcMeshSignature.HashPayload(payload),
-                Signature = Convert.ToBase64String(new byte[64]),
+                Signature = string.Empty,
                 DocumentKeyOwnerId = owner,
                 DocumentKey = documentKey,
                 SignatureAlgorithm = FcNativeEnvelopeDecoder.SignatureAlgorithm,
             };
-            var envelope = JsonSerializer.SerializeToUtf8Bytes(wire, FcJsonContext.Default.FcNativeEnvelopeWire);
-            var key = Encoding.UTF8.GetBytes(documentKey);
-            var actualAuthor = Convert.FromHexString(owner);
-            var contentHash = Enumerable.Repeat((byte)0xA5, 32).ToArray();
+            var signed = SignNativeEnvelope(wire);
             var eventValue = new FcMeshNativeEvent(
                 FcProtocolVersion.Current,
                 FcNativeEventKind.RecordInserted,
                 sequence,
                 0,
-                key,
-                envelope,
-                actualAuthor,
-                contentHash,
+                signed.Key,
+                signed.Envelope,
+                signed.Author,
+                signed.ContentHash,
                 1);
             var snapshotValue = new FcMeshNativeSnapshotRecord(
                 FcProtocolVersion.Current,
-                key,
-                envelope,
-                actualAuthor,
-                contentHash,
+                signed.Key,
+                signed.Envelope,
+                signed.Author,
+                signed.ContentHash,
                 null,
                 1,
                 recordType,

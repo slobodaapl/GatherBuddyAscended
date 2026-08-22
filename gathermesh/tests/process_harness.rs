@@ -42,6 +42,8 @@ fn separate_process_create_join_restart_smoke() {
             host_observed.to_str().expect("UTF-8 observation path"),
             "--published-file",
             host_published.to_str().expect("UTF-8 published path"),
+            "--relay-mode",
+            "1",
             "--seconds",
             "12",
         ])
@@ -78,6 +80,8 @@ fn separate_process_create_join_restart_smoke() {
             join_observed.to_str().expect("UTF-8 observation path"),
             "--published-file",
             join_published.to_str().expect("UTF-8 published path"),
+            "--relay-mode",
+            "1",
             "--seconds",
             "5",
         ])
@@ -115,16 +119,45 @@ fn separate_process_create_join_restart_smoke() {
             join_store.to_str().expect("UTF-8 temp path"),
             "--ticket-file",
             ticket.to_str().expect("UTF-8 ticket path"),
+            "--relay-mode",
+            "1",
             "--seconds",
             "2",
         ])
-        .status()
+        .output()
         .expect("restart process should spawn");
+    if !restart.status.success() {
+        let diagnostic = format!(
+            "status={:?}\nstdout={}\nstderr={}\n",
+            restart.status,
+            bounded_child_output(&restart.stdout),
+            bounded_child_output(&restart.stderr),
+        );
+        let _ = fs::write(root.join("restart-diagnostics.txt"), diagnostic);
+    }
     assert!(
-        restart.success(),
-        "restarted process should complete cleanly"
+        restart.status.success(),
+        "restarted process should complete cleanly: status={:?}, stdout={}, stderr={}",
+        restart.status,
+        bounded_child_output(&restart.stdout),
+        bounded_child_output(&restart.stderr),
     );
     let _ = fs::remove_dir_all(root);
+}
+
+fn bounded_child_output(bytes: &[u8]) -> String {
+    const MAX_DIAGNOSTIC_BYTES: usize = 4096;
+    let text = String::from_utf8_lossy(bytes);
+    if text.len() <= MAX_DIAGNOSTIC_BYTES {
+        return text.into_owned();
+    }
+    text.chars()
+        .rev()
+        .take(MAX_DIAGNOSTIC_BYTES)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect()
 }
 
 #[test]
@@ -144,6 +177,8 @@ fn corrupted_persistent_manifest_fails_without_starting_native_process() {
             "create",
             "--storage",
             root.to_str().expect("UTF-8 temp path"),
+            "--relay-mode",
+            "1",
             "--seconds",
             "1",
         ])
@@ -195,6 +230,8 @@ fn separate_process_line_propagates_opaque_records_through_intermediate_peer() {
             a_observed.to_str().expect("UTF-8 observation path"),
             "--published-file",
             a_published.to_str().expect("UTF-8 published path"),
+            "--relay-mode",
+            "1",
             "--seconds",
             "30",
         ])
@@ -218,6 +255,8 @@ fn separate_process_line_propagates_opaque_records_through_intermediate_peer() {
             c_ticket.to_str().expect("UTF-8 ticket path"),
             "--put-payload",
             "line-c-record",
+            "--relay-mode",
+            "1",
             "--seconds",
             "25",
         ])
@@ -227,7 +266,7 @@ fn separate_process_line_propagates_opaque_records_through_intermediate_peer() {
         .expect("C process should spawn");
     wait_for_file(&c_ticket);
 
-    let b_status = Command::new(binary)
+    let b_output = Command::new(binary)
         .args([
             "--mode",
             "join",
@@ -245,12 +284,20 @@ fn separate_process_line_propagates_opaque_records_through_intermediate_peer() {
             b_observed.to_str().expect("UTF-8 observation path"),
             "--published-file",
             b_published.to_str().expect("UTF-8 published path"),
+            "--relay-mode",
+            "1",
             "--seconds",
             "10",
         ])
-        .status()
+        .output()
         .expect("B process should spawn");
-    assert!(b_status.success(), "B process should complete cleanly");
+    assert!(
+        b_output.status.success(),
+        "B process should complete cleanly: status={:?}, stdout={}, stderr={}",
+        b_output.status,
+        bounded_child_output(&b_output.stdout),
+        bounded_child_output(&b_output.stderr),
+    );
     let c_status = c.wait().expect("C process should complete");
     let a_status = a.wait().expect("A process should complete");
     assert!(c_status.success(), "C process should complete cleanly");
@@ -311,6 +358,8 @@ fn separate_process_partition_reconnect_reconciles_after_intermediate_restart() 
             "reconnect-b-record",
             "--observed-file",
             a_observed.to_str().expect("UTF-8 observation path"),
+            "--relay-mode",
+            "1",
             "--seconds",
             "24",
         ])
@@ -334,6 +383,8 @@ fn separate_process_partition_reconnect_reconciles_after_intermediate_restart() 
             c_ticket.to_str().expect("UTF-8 ticket path"),
             "--put-payload",
             "reconnect-c-record",
+            "--relay-mode",
+            "1",
             "--seconds",
             "24",
         ])
@@ -360,6 +411,8 @@ fn separate_process_partition_reconnect_reconciles_after_intermediate_restart() 
             "reconnect-b-record",
             "--published-file",
             b_published.to_str().expect("UTF-8 published path"),
+            "--relay-mode",
+            "1",
             "--seconds",
             "16",
         ])
@@ -382,6 +435,8 @@ fn separate_process_partition_reconnect_reconciles_after_intermediate_restart() 
             "reconnect-b-record",
             "--observed-file",
             c_observed.to_str().expect("UTF-8 observation path"),
+            "--relay-mode",
+            "1",
             "--seconds",
             "10",
         ])
@@ -432,6 +487,8 @@ fn separate_process_large_opaque_payload_reaches_remote_register() {
             host_store.to_str().expect("UTF-8 temp path"),
             "--ticket-file",
             ticket.to_str().expect("UTF-8 ticket path"),
+            "--relay-mode",
+            "1",
             "--seconds",
             "18",
         ])
@@ -454,6 +511,8 @@ fn separate_process_large_opaque_payload_reaches_remote_register() {
             "1048576",
             "--published-file",
             published.to_str().expect("UTF-8 published path"),
+            "--relay-mode",
+            "1",
             "--seconds",
             "8",
         ])
@@ -477,6 +536,8 @@ fn separate_process_large_opaque_payload_reaches_remote_register() {
             "1048576",
             "--observed-file",
             observed.to_str().expect("UTF-8 observation path"),
+            "--relay-mode",
+            "1",
             "--seconds",
             "8",
         ])

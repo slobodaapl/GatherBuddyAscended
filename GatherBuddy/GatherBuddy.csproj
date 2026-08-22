@@ -57,6 +57,7 @@
     <PackageReference Include="Dalamud.NET.Sdk" Version="15.0.0" />
     <PackageReference Include="LuminaSupplemental.Excel" Version="4.3.0" />
     <PackageReference Include="MessagePack" Version="3.1.8" />
+    <PackageReference Include="BouncyCastle.Cryptography" Version="2.7.0" />
   </ItemGroup>
 
 	<ItemGroup>
@@ -77,6 +78,13 @@
   <ItemGroup Condition="Exists('$(FcMeshNativeDll)')">
     <None Include="$(FcMeshNativeDll)"
           Link="gathermesh_ffi.dll"
+          CopyToOutputDirectory="PreserveNewest"
+          CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="$(MSBuildThisFileDirectory)..\gathermesh\NOTICE.md"
+          Link="gathermesh-NOTICE.md"
           CopyToOutputDirectory="PreserveNewest"
           CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>

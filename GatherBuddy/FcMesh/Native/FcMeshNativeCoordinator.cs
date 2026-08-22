@@ -5,6 +5,7 @@ using System.Linq;
 using System.Text;
 using System.Text.Json;
 using GatherBuddy.FcMesh.Protocol;
+using GatherBuddy.FcMesh.Publication;
 using GatherBuddy.FcMesh.State;
 
 namespace GatherBuddy.FcMesh.Native;
@@ -502,6 +503,20 @@ public sealed class FcMeshNativeCoordinator : IDisposable
         }
     }
 
+    private bool TryApplyStartedAuthor(FcMeshNativeEvent value)
+    {
+        if (value.ActualAuthor.Length == 0)
+            return true;
+        if (value.ActualAuthor.Length != 32)
+        {
+            FailAndPause(FcNativeErrorCode.InvalidRecord, "Native Started event author is malformed.");
+            return false;
+        }
+
+        _localAuthorId = Convert.ToHexString(value.ActualAuthor).ToLowerInvariant();
+        return true;
+    }
+
     private void ProcessEvent(FcMeshNativeEvent value)
     {
         if (value.ProtocolVersion != FcProtocolVersion.Current)
@@ -554,6 +569,7 @@ public sealed class FcMeshNativeCoordinator : IDisposable
         {
             case FcNativeEventKind.Started:
                 _lifecycle = "Starting";
+                TryApplyStartedAuthor(value);
                 break;
             case FcNativeEventKind.Stopped:
                 _lifecycle = "Stopped";
@@ -590,14 +606,16 @@ public sealed class FcMeshNativeCoordinator : IDisposable
                     }
                     _groupMetadataCompatible = true;
                 }
-                // CreateGroup returns the ticket in Joined.value. A joined
-                // peer emits an empty Joined value immediately before its
-                // InitialSyncCompleted signal.
+                // Group creation and persisted restoration return the ticket
+                // in Joined.value. A joined peer emits an empty Joined value
+                // immediately before its InitialSyncCompleted signal.
                 if (value.Value.Length > 0)
                 {
+                    _requiresInitialSync = false;
+                    _requiresManagedGroupMetadata = true;
+                    _hasInitialSyncSignal = false;
                     _groupTicket = Encoding.UTF8.GetString(value.Value);
                     _ticketForDiagnostics = _groupTicket;
-                    _hasInitialSyncSignal = false;
                     BeginSnapshot(value.WorldEpoch, value.Sequence);
                 }
                 break;
@@ -1014,7 +1032,7 @@ public sealed class FcMeshNativeCoordinator : IDisposable
             }
             case FcNativeEventKind.Started:
                 _lifecycle = "Starting";
-                return true;
+                return TryApplyStartedAuthor(value);
             case FcNativeEventKind.Joining:
                 _groupState = "Joining";
                 return true;
@@ -1166,7 +1184,7 @@ public sealed class FcMeshNativeCoordinator : IDisposable
         return false;
     }
 
-    private static FcApplyResult ApplyDecodedRecord(
+    internal static FcApplyResult ApplyDecodedRecord(
         FcWorldStore target,
         FcMeshRecord envelope,
         FcVerifiedMeshContext context,
@@ -1176,12 +1194,13 @@ public sealed class FcMeshNativeCoordinator : IDisposable
         {
             object? payload = envelope.RecordType switch
             {
-                FcRecordTypes.PublishedList => JsonSerializer.Deserialize<PublishedListRecord>(envelope.Payload, FcJsonContext.Default.PublishedListRecord),
+                FcRecordTypes.PublishedList => FcPublishedListPayloadCompatibility.Deserialize(envelope.Payload),
                 FcRecordTypes.WorkerSession => JsonSerializer.Deserialize<WorkerSessionRecord>(envelope.Payload, FcJsonContext.Default.WorkerSessionRecord),
                 FcRecordTypes.ChestSnapshot => JsonSerializer.Deserialize<ChestSnapshotRecord>(envelope.Payload, FcJsonContext.Default.ChestSnapshotRecord),
                 FcRecordTypes.CapabilityRequest => JsonSerializer.Deserialize<CapabilityRequestRecord>(envelope.Payload, FcJsonContext.Default.CapabilityRequestRecord),
                 FcRecordTypes.CapabilityResponse => JsonSerializer.Deserialize<CapabilityResponseRecord>(envelope.Payload, FcJsonContext.Default.CapabilityResponseRecord),
                 FcRecordTypes.InventoryTransfer => JsonSerializer.Deserialize<FcInventoryTransferRecord>(envelope.Payload, FcJsonContext.Default.FcInventoryTransferRecord),
+                FcRecordTypes.FcChestLocation => JsonSerializer.Deserialize<FcEstateChestLocationRecord>(envelope.Payload, FcJsonContext.Default.FcEstateChestLocationRecord),
                 _ => null,
             };
             if (payload is null)
@@ -1191,6 +1210,11 @@ public sealed class FcMeshNativeCoordinator : IDisposable
             // ordinary ApplyTransfer path and revalidates its quantity delta.
             if (snapshotBootstrap && payload is FcInventoryTransferRecord transfer)
                 return target.ApplySnapshotBootstrapTransfer(envelope, transfer, context);
+            if (payload is PublishedListRecord publishedList)
+                return target.ApplyPublishedListWithUnknownOptionalMembers(
+                    envelope,
+                    publishedList,
+                    context);
             return target.Apply(envelope, payload, context);
         }
         catch (Exception exception)

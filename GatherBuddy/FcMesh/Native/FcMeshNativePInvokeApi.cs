@@ -5,6 +5,8 @@ namespace GatherBuddy.FcMesh.Native;
 
 internal sealed class FcMeshNativePInvokeApi : IFcMeshNativeApi, IDisposable
 {
+    // Use one explicit name across the Windows plugin and Linux managed smoke.
+    // The Linux ELF is staged under this name by the justfile test target.
     private const string LibraryName = "gathermesh_ffi.dll";
 
     public uint AbiVersion() => gbm_abi_version();

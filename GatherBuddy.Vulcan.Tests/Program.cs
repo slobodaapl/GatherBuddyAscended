@@ -44,6 +44,10 @@ FcMeshChestTests.Run(Require);
 FcMeshNativeTests.Run(Require);
 FcMeshPhase5Tests.Run(Require);
 FcMeshPhase6Tests.Run(Require);
+FcMeshPhase7Tests.Run(Require);
+FcMeshPhase8Tests.Run(Require);
+FcMeshPhase9Tests.Run(Require);
+FcMeshPhase10Tests.Run(Require);
 
 static CraftState Craft() => new()
 {

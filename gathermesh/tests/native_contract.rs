@@ -31,6 +31,66 @@ fn concurrent_hlc_wire_values_have_a_deterministic_total_order() {
 }
 
 #[test]
+fn raw_hlc_words_preserve_causality_and_concurrent_total_order() {
+    // These values are independent wire fixtures, not timestamps produced by HLCBuilder. The
+    // first pair models a received remote stamp and a later local stamp while the physical clock
+    // is unchanged; the second pair models concurrent observers with distinct physical samples.
+    let remote = HlcWire {
+        physical_unix_ms: 1_700_000_000_000,
+        logical: 0x0100,
+        node_id: [0x11; 16],
+        raw: 0x0100,
+    };
+    let causal_local = HlcWire {
+        physical_unix_ms: 1_700_000_000_000,
+        logical: 0x0101,
+        node_id: [0x22; 16],
+        raw: 0x0101,
+    };
+    assert_eq!(remote.physical_unix_ms, causal_local.physical_unix_ms);
+    assert!(
+        causal_local > remote,
+        "logical HLC advancement must order causally later work"
+    );
+
+    let first_observation = HlcWire {
+        physical_unix_ms: 1_700_000_000_001,
+        logical: 0,
+        node_id: [0x33; 16],
+        raw: 0,
+    };
+    let second_observation = HlcWire {
+        physical_unix_ms: 1_700_000_000_002,
+        logical: 0,
+        node_id: [0x44; 16],
+        raw: 0,
+    };
+    assert!(second_observation > first_observation);
+    assert_eq!(
+        first_observation.cmp(&second_observation),
+        second_observation.cmp(&first_observation).reverse()
+    );
+
+    let concurrent_a = HlcWire {
+        physical_unix_ms: 1_700_000_000_003,
+        logical: 9,
+        node_id: [0x55; 16],
+        raw: 9,
+    };
+    let concurrent_b = HlcWire {
+        physical_unix_ms: 1_700_000_000_003,
+        logical: 9,
+        node_id: [0x66; 16],
+        raw: 9,
+    };
+    assert_ne!(concurrent_a, concurrent_b);
+    assert_eq!(
+        concurrent_a.cmp(&concurrent_b),
+        concurrent_b.cmp(&concurrent_a).reverse()
+    );
+}
+
+#[test]
 fn relaying_an_envelope_preserves_author_hlc_and_payload() {
     let author = Author::from_bytes(&[7u8; 32]);
     let hlc = HLCBuilder::new()
@@ -123,6 +183,15 @@ fn golden_json_fixture_is_verified_and_byte_stable() {
         .verify(author.id(), &envelope.key)
         .expect("golden fixture signature should verify");
     assert_eq!(
+        hex::encode(
+            envelope
+                .signing_bytes_for_golden()
+                .expect("golden signing bytes should encode")
+        ),
+        include_str!("fixtures/mesh-envelope-v1-signing-bytes.hex").trim(),
+        "Rust postcard signing bytes must remain byte-stable for managed verification"
+    );
+    assert_eq!(
         envelope.record_id,
         parse_record_id("00112233-4455-6677-8899-aabbccddeeff").expect("fixture id")
     );
@@ -132,6 +201,10 @@ fn golden_json_fixture_is_verified_and_byte_stable() {
     assert_eq!(envelope.payload, b"opaque-fixture");
     assert_eq!(envelope.hlc.physical_unix_ms, 1_700_000_000_000);
     assert_eq!(envelope.hlc.logical, 7_301_444_403_200_000_000);
+    assert_eq!(
+        hex::encode(envelope.content_hash().expect("fixture content hash")),
+        "4f96c1b5388852c1b47f957ce89b40689ffc6b9fb908e6bb6da4e67d2c7a456c"
+    );
     assert_eq!(
         envelope.encode().expect("fixture should re-encode"),
         bytes,

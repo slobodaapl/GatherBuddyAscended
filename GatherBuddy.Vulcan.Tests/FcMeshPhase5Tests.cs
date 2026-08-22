@@ -15,8 +15,8 @@ namespace GatherBuddy.Vulcan.Tests;
 internal static class FcMeshPhase5Tests
 {
     private static readonly string Scope = "0000000000000001";
-    private static readonly string Author = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-    private static readonly string RemoteAuthor = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    private static readonly string Author = FcMeshNativeTests.DeterministicAuthor;
+    private static readonly string RemoteAuthor = FcMeshNativeTests.DeterministicRemoteAuthor;
 
     public static void Run(Action<bool, string> require)
     {
@@ -90,42 +90,102 @@ internal static class FcMeshPhase5Tests
                     && !payload.Contains("Consumable", StringComparison.Ordinal),
                 "published payload must not carry private list settings");
         }
-        // A default list entry is faithful to the explicit UseAllHQ policy;
-        // contradictory per-item NQOnly is the rejected ambiguity.
-        var contradictory = new CraftingListDefinition
+        var ingredientPolicyOff = new CraftingListDefinition
         {
-            ID = list.ID,
+            ID = 43,
             CreatedAt = list.CreatedAt,
-            Name = list.Name,
+            Name = "Ingredient policy off",
+            UseAllHQ = false,
+            Recipes = [new CraftingListItem(10, 1)],
+        };
+        var ingredientPolicyOn = new CraftingListDefinition
+        {
+            ID = 44,
+            CreatedAt = list.CreatedAt,
+            Name = "Ingredient policy on",
+            UseAllHQ = true,
+            Recipes = [new CraftingListItem(10, 1)],
+        };
+        var policyOffMapped = FcPublishedListMapper.TryMap(
+            ingredientPolicyOff,
+            Author,
+            "game-1",
+            1,
+            Guid.Parse("00000000-0000-0000-0000-000000000503"),
+            _ => new FcRecipeOutput(100, 1));
+        var policyOnMapped = FcPublishedListMapper.TryMap(
+            ingredientPolicyOn,
+            Author,
+            "game-1",
+            1,
+            Guid.Parse("00000000-0000-0000-0000-000000000505"),
+            _ => new FcRecipeOutput(100, 1));
+        require(policyOffMapped.IsValid
+                && policyOnMapped.IsValid
+                && policyOffMapped.Record?.FinalTargets.Single().Quality == FcItemQuality.Hq
+                && policyOnMapped.Record?.FinalTargets.Single().Quality == FcItemQuality.Hq,
+            "UseAllHQ ingredient policy must not change an ordinary HQ-capable final target");
+
+        var nqOnlyOn = new CraftingListDefinition
+        {
+            ID = 45,
+            CreatedAt = list.CreatedAt,
+            Name = "NQ-only policy on",
             UseAllHQ = true,
             Recipes = [new CraftingListItem(10, 1)
             {
                 Options = new ListItemOptions { NQOnly = true },
             }],
         };
-        require(mapped.IsValid && !FcPublishedListMapper.TryMap(
-                    contradictory,
-                    Author,
-                    "game-1",
-                    1,
-                    Guid.Parse("00000000-0000-0000-0000-000000000503"),
-                    _ => new FcRecipeOutput(100, 1)).IsValid,
-            "only faithful quality mappings may be published; contradictory HQ/NQ intent is blocked");
-        var ambiguous = new CraftingListDefinition
+        var nqOnlyOff = new CraftingListDefinition
         {
-            ID = list.ID,
+            ID = 46,
             CreatedAt = list.CreatedAt,
-            Name = list.Name,
+            Name = "NQ-only policy off",
+            UseAllHQ = false,
+            Recipes = [new CraftingListItem(10, 1)
+            {
+                Options = new ListItemOptions { NQOnly = true },
+            }],
+        };
+        var nqOnlyOnMapped = FcPublishedListMapper.TryMap(
+            nqOnlyOn,
+            Author,
+            "game-1",
+            1,
+            Guid.Parse("00000000-0000-0000-0000-000000000507"),
+            _ => new FcRecipeOutput(100, 1));
+        var nqOnlyOffMapped = FcPublishedListMapper.TryMap(
+            nqOnlyOff,
+            Author,
+            "game-1",
+            1,
+            Guid.Parse("00000000-0000-0000-0000-000000000509"),
+            _ => new FcRecipeOutput(100, 1));
+        require(nqOnlyOnMapped.IsValid
+                && nqOnlyOffMapped.IsValid
+                && nqOnlyOnMapped.Record?.FinalTargets.Single().Quality == FcItemQuality.Nq
+                && nqOnlyOffMapped.Record?.FinalTargets.Single().Quality == FcItemQuality.Nq,
+            "NQOnly must select NQ output regardless of UseAllHQ ingredient policy");
+
+        var nonHqOutput = new CraftingListDefinition
+        {
+            ID = 47,
+            CreatedAt = list.CreatedAt,
+            Name = "Non-HQ output",
+            UseAllHQ = true,
             Recipes = [new CraftingListItem(10, 1)],
         };
-        require(!FcPublishedListMapper.TryMap(
-                    ambiguous,
-                    Author,
-                    "game-1",
-                    1,
-                    Guid.Parse("00000000-0000-0000-0000-000000000505"),
-                    _ => new FcRecipeOutput(100, 1)).IsValid,
-            "quality-ambiguous final targets must not be flattened to NQ");
+        var nonHqMapped = FcPublishedListMapper.TryMap(
+            nonHqOutput,
+            Author,
+            "game-1",
+            1,
+            Guid.Parse("00000000-0000-0000-0000-000000000511"),
+            _ => new FcRecipeOutput(100, 1, CanBeHq: false));
+        require(nonHqMapped.IsValid
+                && nonHqMapped.Record?.FinalTargets.Single().Quality == FcItemQuality.Nq,
+            "final outputs that cannot be HQ must map to NQ");
     }
 
     private static void PublishUpdateUnpublishAndPersistence(Action<bool, string> require)

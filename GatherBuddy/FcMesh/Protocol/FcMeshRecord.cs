@@ -23,7 +23,7 @@ public sealed record FcMeshRecord(
     /// <summary>Application envelope protocol version supplied by native mesh.</summary>
     public ushort ProtocolVersion { get; init; }
 
-    /// <summary>Opaque native/Iroh signature metadata; C# never creates or verifies it.</summary>
+    /// <summary>Native/Iroh signature metadata independently checked at the native envelope boundary.</summary>
     public string Signature { get; init; } = string.Empty;
 
     /// <summary>Owner encoded in the verified document key.</summary>
@@ -160,9 +160,9 @@ public interface IFcMeshRecordVerifier
 }
 
 /// <summary>
-/// Structural gate for native verification results. It deliberately performs
-/// no signature cryptography: Iroh/Docs verifies author identity and
-/// signatures before this context reaches managed code.
+/// Structural gate for native verification results. Cryptographic verification
+/// happens in the strict native-envelope decoder; this gate checks that the
+/// resulting evidence still names the exact managed record.
 /// </summary>
 public sealed class FcVerifiedContextVerifier : IFcMeshRecordVerifier
 {

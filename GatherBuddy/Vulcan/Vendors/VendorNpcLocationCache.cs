@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Numerics;
+using System.Threading;
 using System.Threading.Tasks;
 using GatherBuddy.Plugin;
 using Lumina.Data.Files;
@@ -21,6 +22,15 @@ public static class VendorNpcLocationCache
     private const uint OldGridaniaTerritoryId = 133u;
     private const float EulmoreUpperLevelMinY = 60f;
     private readonly record struct VendorNpcLocationOverride(uint? TerritoryId = null, uint? MapRowId = null, Vector3? Position = null);
+    private sealed record BuildInputs(
+        Lumina.GameData GameData,
+        IReadOnlyDictionary<uint, IReadOnlyCollection<Tuple<uint, uint, uint, double, double, bool>>>? DataShareLocations,
+        bool DataShareFirst);
+    private sealed record BackgroundBuildResult(
+        Dictionary<uint, List<VendorNpcLocation>> Locations,
+        Dictionary<uint, string> NpcNames,
+        ExcelSheet<Map> MapSheet,
+        bool HadDataShareLocations);
     private static readonly object SupplementalNpcPlacesLock = new();
     private static readonly TimeSpan RetryCooldown = TimeSpan.FromSeconds(2);
     private static readonly Dictionary<uint, uint> HighestMapIndexMapRowIdsByTerritoryTypeId = new();
@@ -146,100 +156,170 @@ public static class VendorNpcLocationCache
         _initializing = true;
         _lastBuildAttemptUtc = DateTime.UtcNow;
         var npcIds = vendorNpcIds.ToHashSet();
-        Task.Run(() => Build(npcIds));
+        _ = BuildAsync(npcIds);
     }
 
-    private static void Build(IReadOnlySet<uint> vendorNpcIds)
+    private static BuildInputs CaptureBuildInputs()
     {
-        var success = false;
-        HashSet<uint>? nextVendorNpcIds = null;
+        var gameData = Dalamud.GameData.GameData;
+        TryGetDataShareLocations(out var dataShareLocations);
+        var dataShareSnapshot = dataShareLocations?.ToDictionary(
+            pair => pair.Key,
+            pair => (IReadOnlyCollection<Tuple<uint, uint, uint, double, double, bool>>)pair.Value.ToArray());
+        return new BuildInputs(
+            gameData,
+            dataShareSnapshot,
+            GatherBuddy.Config.VendorNpcLocationsDataShareFirst);
+    }
+
+    private static async Task BuildAsync(IReadOnlySet<uint> vendorNpcIds)
+    {
         try
         {
-            var residentSheet = Dalamud.GameData.GetExcelSheet<ENpcResident>();
-            var mapSheet = Dalamud.GameData.GetExcelSheet<Map>();
-            if (residentSheet == null)
-            {
-                GatherBuddy.Log.Warning("[VendorNpcLocationCache] ENpcResident sheet unavailable; deferring location cache build");
-                return;
-            }
-
-            if (mapSheet == null)
-            {
-                GatherBuddy.Log.Warning("[VendorNpcLocationCache] Map sheet unavailable; deferring location cache build");
-                return;
-            }
-
-            var result = new Dictionary<uint, List<VendorNpcLocation>>();
-            var npcNames = new Dictionary<uint, string>();
-            var hadDataShareLocations = false;
-
-            foreach (var npc in residentSheet)
-            {
-                if (!vendorNpcIds.Contains(npc.RowId))
-                    continue;
-
-                var name = npc.Singular.ExtractText();
-                if (!string.IsNullOrWhiteSpace(name))
-                    npcNames[npc.RowId] = name;
-            }
-
-            var dataShareFirst = GatherBuddy.Config.VendorNpcLocationsDataShareFirst;
-
-            if (dataShareFirst)
-            {
-                hadDataShareLocations = ResolveFromDataShare(result, vendorNpcIds, npcNames, mapSheet);
-                ResolveFromLevelSheet(result, vendorNpcIds, npcNames, mapSheet);
-                ResolveFromSupplementalNpcPlaces(result, vendorNpcIds, npcNames, mapSheet);
-                ResolveFromLgb(result, vendorNpcIds, npcNames, mapSheet);
-            }
-            else
-            {
-                ResolveFromLgb(result, vendorNpcIds, npcNames, mapSheet);
-                ResolveFromLevelSheet(result, vendorNpcIds, npcNames, mapSheet);
-                ResolveFromSupplementalNpcPlaces(result, vendorNpcIds, npcNames, mapSheet);
-                hadDataShareLocations = ResolveFromDataShare(result, vendorNpcIds, npcNames, mapSheet);
-            }
-            ResolveFromKnownNpcOverrides(result, vendorNpcIds, npcNames, mapSheet);
-
-            _locations = result;
-            _lastBuildHadDataShareLocations = hadDataShareLocations;
-
-            var resolvedCount = CountResolvedNpcIds(result, vendorNpcIds, mapSheet);
-            GatherBuddy.Log.Debug($"[VendorNpcLocationCache] Final: {resolvedCount}/{vendorNpcIds.Count} vendor NPCs resolved");
-            LogUnresolvedNpcSample(result, vendorNpcIds, npcNames, mapSheet);
-
-            if (!_lastVendorNpcIds.SetEquals(vendorNpcIds))
-                nextVendorNpcIds = _lastVendorNpcIds.ToHashSet();
-            success = true;
+            var inputs = await GatherBuddy.RunOnFrameworkThreadAsync(
+                CaptureBuildInputs,
+                CancellationToken.None).ConfigureAwait(false);
+            var background = await Task.Run(
+                () => BuildBackground(vendorNpcIds, inputs)).ConfigureAwait(false);
+            var nextVendorNpcIds = await GatherBuddy.RunOnFrameworkThreadAsync(
+                () => FinalizeBuild(vendorNpcIds, background),
+                CancellationToken.None).ConfigureAwait(false);
+            if (nextVendorNpcIds is { Count: > 0 })
+                StartBuild(nextVendorNpcIds);
         }
         catch (Exception ex)
         {
-            GatherBuddy.Log.Warning($"[VendorNpcLocationCache] Build failed: {ex.Message}");
-        }
-        finally
-        {
-            _initialized = success;
+            GatherBuddy.Log.Warning($"[VendorNpcLocationCache] Build failed: {ex}");
+            _initialized = false;
             _initializing = false;
-            if (!success)
+            GatherBuddy.Log.Debug("[VendorNpcLocationCache] Vendor NPC location cache is still uninitialized and will retry when requested");
+        }
+    }
+
+    private static BackgroundBuildResult? BuildBackground(
+        IReadOnlySet<uint> vendorNpcIds,
+        BuildInputs inputs)
+    {
+        var gameData = inputs.GameData;
+        var residentSheet = gameData.GetExcelSheet<ENpcResident>();
+        var mapSheet = gameData.GetExcelSheet<Map>();
+        if (residentSheet == null)
+        {
+            GatherBuddy.Log.Warning("[VendorNpcLocationCache] ENpcResident sheet unavailable; deferring location cache build");
+            return null;
+        }
+
+        if (mapSheet == null)
+        {
+            GatherBuddy.Log.Warning("[VendorNpcLocationCache] Map sheet unavailable; deferring location cache build");
+            return null;
+        }
+
+        var result = new Dictionary<uint, List<VendorNpcLocation>>();
+        var npcNames = new Dictionary<uint, string>();
+        var hadDataShareLocations = false;
+
+        foreach (var npc in residentSheet)
+        {
+            if (!vendorNpcIds.Contains(npc.RowId))
+                continue;
+
+            var name = npc.Singular.ExtractText();
+            if (!string.IsNullOrWhiteSpace(name))
+                npcNames[npc.RowId] = name;
+        }
+
+        if (inputs.DataShareFirst)
+        {
+            hadDataShareLocations = ResolveFromDataShare(
+                result,
+                vendorNpcIds,
+                npcNames,
+                inputs.DataShareLocations,
+                mapSheet);
+            ResolveFromLevelSheet(result, vendorNpcIds, npcNames, mapSheet, gameData);
+            ResolveFromSupplementalNpcPlaces(result, vendorNpcIds, npcNames, mapSheet, gameData);
+            ResolveFromLgb(result, vendorNpcIds, npcNames, mapSheet, gameData);
+        }
+        else
+        {
+            ResolveFromLgb(result, vendorNpcIds, npcNames, mapSheet, gameData);
+            ResolveFromLevelSheet(result, vendorNpcIds, npcNames, mapSheet, gameData);
+            ResolveFromSupplementalNpcPlaces(result, vendorNpcIds, npcNames, mapSheet, gameData);
+            hadDataShareLocations = ResolveFromDataShare(
+                result,
+                vendorNpcIds,
+                npcNames,
+                inputs.DataShareLocations,
+                mapSheet);
+        }
+        ResolveFromKnownNpcOverrides(result, vendorNpcIds, npcNames, mapSheet);
+
+        return new BackgroundBuildResult(result, npcNames, mapSheet, hadDataShareLocations);
+    }
+
+    private static HashSet<uint>? FinalizeBuild(
+        IReadOnlySet<uint> vendorNpcIds,
+        BackgroundBuildResult? background)
+    {
+        if (background == null)
+        {
+            _initialized = false;
+            _initializing = false;
+            GatherBuddy.Log.Debug("[VendorNpcLocationCache] Vendor NPC location cache is still uninitialized and will retry when requested");
+            return null;
+        }
+
+        foreach (var entry in background.Locations)
+        {
+            var finalized = new Dictionary<uint, List<VendorNpcLocation>>();
+            foreach (var location in entry.Value)
+                AddLocation(finalized, location, background.MapSheet, includeRoutePriority: true);
+
+            entry.Value.Clear();
+            if (finalized.TryGetValue(entry.Key, out var finalizedLocations))
             {
-                GatherBuddy.Log.Debug("[VendorNpcLocationCache] Vendor NPC location cache is still uninitialized and will retry when requested");
-            }
-            else if (nextVendorNpcIds is { Count: > 0 })
-            {
-                GatherBuddy.Log.Debug($"[VendorNpcLocationCache] Vendor NPC set changed during build ({vendorNpcIds.Count} -> {nextVendorNpcIds.Count}), rebuilding location cache");
-                _initialized = false;
-                StartBuild(nextVendorNpcIds);
+                SortLocations(finalizedLocations, background.MapSheet, includeRoutePriority: true);
+                entry.Value.AddRange(finalizedLocations);
             }
         }
+
+        var resolvedCount = CountResolvedNpcIds(background.Locations, vendorNpcIds, background.MapSheet);
+        GatherBuddy.Log.Debug($"[VendorNpcLocationCache] Final: {resolvedCount}/{vendorNpcIds.Count} vendor NPCs resolved");
+        LogUnresolvedNpcSample(
+            background.Locations,
+            vendorNpcIds,
+            background.NpcNames,
+            background.MapSheet);
+
+        var nextVendorNpcIds = !_lastVendorNpcIds.SetEquals(vendorNpcIds)
+            ? _lastVendorNpcIds.ToHashSet()
+            : null;
+        if (nextVendorNpcIds is { Count: > 0 })
+            GatherBuddy.Log.Debug($"[VendorNpcLocationCache] Vendor NPC set changed during build ({vendorNpcIds.Count} -> {nextVendorNpcIds.Count}), rebuilding location cache");
+
+        _locations = background.Locations;
+        _lastBuildHadDataShareLocations = background.HadDataShareLocations;
+
+        if (nextVendorNpcIds is { Count: > 0 })
+        {
+            _initialized = false;
+            return nextVendorNpcIds;
+        }
+
+        _initialized = true;
+        _initializing = false;
+        return null;
     }
 
     private static bool ResolveFromDataShare(
         Dictionary<uint, List<VendorNpcLocation>> result,
         IReadOnlySet<uint> vendorNpcIds,
         IReadOnlyDictionary<uint, string> npcNames,
+        IReadOnlyDictionary<uint, IReadOnlyCollection<Tuple<uint, uint, uint, double, double, bool>>>? dataShare,
         ExcelSheet<Map> mapSheet)
     {
-        if (!TryGetDataShareLocations(out var dataShare) || dataShare == null)
+        if (dataShare == null)
             return false;
 
         var pendingNpcIds = GetPendingNpcIds(result, vendorNpcIds, npcNames, mapSheet);
@@ -266,7 +346,7 @@ public static class VendorNpcLocationCache
                 if (vendorLocation == null)
                     continue;
 
-                AddLocation(result, vendorLocation, mapSheet);
+                AddLocation(result, vendorLocation, mapSheet, includeRoutePriority: false);
             }
         }
 
@@ -342,14 +422,17 @@ public static class VendorNpcLocationCache
     private static bool HasUsableLocation(IReadOnlyCollection<VendorNpcLocation> locations, ExcelSheet<Map> mapSheet)
         => locations.Any(location => IsUsableLocation(location, mapSheet));
 
-    private static void SortLocations(List<VendorNpcLocation> locations, ExcelSheet<Map> mapSheet)
+    private static void SortLocations(
+        List<VendorNpcLocation> locations,
+        ExcelSheet<Map> mapSheet,
+        bool includeRoutePriority)
     {
         if (locations.Count <= 1)
             return;
 
         var sorted = locations
             .OrderBy(location => IsUsableLocation(location, mapSheet) ? 0 : 1)
-            .ThenBy(GetLocationRoutePriority)
+            .ThenBy(location => includeRoutePriority ? GetLocationRoutePriority(location) : 0)
             .ThenBy(location => GetLocationSourcePriority(location, mapSheet))
             .ThenBy(location => GetLocationOverflow(location, mapSheet))
             .ThenBy(location => location.TerritoryId)
@@ -364,7 +447,8 @@ public static class VendorNpcLocationCache
         Dictionary<uint, List<VendorNpcLocation>> result,
         IReadOnlySet<uint> vendorNpcIds,
         IReadOnlyDictionary<uint, string> npcNames,
-        ExcelSheet<Map> mapSheet)
+        ExcelSheet<Map> mapSheet,
+        Lumina.GameData gameData)
     {
         var candidateNpcIds = vendorNpcIds
             .Where(npcNames.ContainsKey)
@@ -372,7 +456,7 @@ public static class VendorNpcLocationCache
         if (candidateNpcIds.Count == 0)
             return;
 
-        var levelSheet = Dalamud.GameData.GetExcelSheet<Level>();
+        var levelSheet = gameData.GetExcelSheet<Level>();
         if (levelSheet == null)
         {
             GatherBuddy.Log.Debug("[VendorNpcLocationCache] Level sheet unavailable for fallback location lookup");
@@ -394,7 +478,11 @@ public static class VendorNpcLocationCache
                 : level.Territory.ValueNullable?.Map.RowId ?? 0;
             if (mapRowId == 0 && territoryId != 0)
                 mapRowId = GetMapRowIdByTerritoryTypeAndMapIndex(territoryId, (sbyte)0, mapSheet);
-            AddLocation(result, new VendorNpcLocation(npcId, name, territoryId, mapRowId, new Vector3(level.X, level.Y, level.Z), VendorNpcLocationSource.Level), mapSheet);
+            AddLocation(
+                result,
+                new VendorNpcLocation(npcId, name, territoryId, mapRowId, new Vector3(level.X, level.Y, level.Z), VendorNpcLocationSource.Level),
+                mapSheet,
+                includeRoutePriority: false);
         }
 
         GatherBuddy.Log.Debug($"[VendorNpcLocationCache] Level sheet pass resolved {CountResolvedNpcIds(result, vendorNpcIds, mapSheet) - before} NPCs");
@@ -404,13 +492,14 @@ public static class VendorNpcLocationCache
         Dictionary<uint, List<VendorNpcLocation>> result,
         IReadOnlySet<uint> vendorNpcIds,
         IReadOnlyDictionary<uint, string> npcNames,
-        ExcelSheet<Map> mapSheet)
+        ExcelSheet<Map> mapSheet,
+        Lumina.GameData gameData)
     {
         var pendingNpcIds = GetPendingNpcIds(result, vendorNpcIds, npcNames, mapSheet);
         if (pendingNpcIds.Count == 0)
             return;
 
-        if (!TryLoadSupplementalNpcPlaces(out var npcPlaces) || npcPlaces.Count == 0)
+        if (!TryLoadSupplementalNpcPlaces(gameData, out var npcPlaces) || npcPlaces.Count == 0)
         {
             GatherBuddy.Log.Debug("[VendorNpcLocationCache] ENpcPlace supplemental data unavailable for fallback lookup");
             return;
@@ -444,7 +533,7 @@ public static class VendorNpcLocationCache
             if (vendorLocation == null)
                 continue;
 
-            AddLocation(result, vendorLocation, mapSheet);
+            AddLocation(result, vendorLocation, mapSheet, includeRoutePriority: false);
         }
 
         GatherBuddy.Log.Debug($"[VendorNpcLocationCache] ENpcPlace supplemental pass resolved {CountResolvedNpcIds(result, vendorNpcIds, mapSheet) - before} NPCs");
@@ -454,7 +543,8 @@ public static class VendorNpcLocationCache
         Dictionary<uint, List<VendorNpcLocation>> result,
         IReadOnlySet<uint> vendorNpcIds,
         IReadOnlyDictionary<uint, string> npcNames,
-        ExcelSheet<Map> mapSheet)
+        ExcelSheet<Map> mapSheet,
+        Lumina.GameData gameData)
     {
         var candidateNpcIds = vendorNpcIds
             .Where(npcNames.ContainsKey)
@@ -462,7 +552,7 @@ public static class VendorNpcLocationCache
         if (candidateNpcIds.Count == 0)
             return;
 
-        var territorySheet = Dalamud.GameData.GetExcelSheet<TerritoryType>();
+        var territorySheet = gameData.GetExcelSheet<TerritoryType>();
         if (territorySheet == null)
         {
             GatherBuddy.Log.Debug("[VendorNpcLocationCache] TerritoryType sheet unavailable for LGB lookup");
@@ -481,7 +571,7 @@ public static class VendorNpcLocationCache
                 if (levelIdx < 0)
                     continue;
 
-                var lgb = Dalamud.GameData.GetFile<LgbFile>($"bg/{bg.Substring(0, levelIdx + 1)}level/planevent.lgb");
+                var lgb = gameData.GetFile<LgbFile>($"bg/{bg.Substring(0, levelIdx + 1)}level/planevent.lgb");
                 if (lgb == null)
                     continue;
 
@@ -508,12 +598,17 @@ public static class VendorNpcLocationCache
                             obj.Transform.Translation.X,
                             obj.Transform.Translation.Y,
                             obj.Transform.Translation.Z);
-                        AddLocation(result, new VendorNpcLocation(npcId, name, territory.RowId, mapRowId, position, VendorNpcLocationSource.Lgb), mapSheet);
+                        AddLocation(
+                            result,
+                            new VendorNpcLocation(npcId, name, territory.RowId, mapRowId, position, VendorNpcLocationSource.Lgb),
+                            mapSheet,
+                            includeRoutePriority: false);
                     }
                 }
             }
-            catch
+            catch (Exception ex)
             {
+                GatherBuddy.Log.Warning($"[VendorNpcLocationCache] LGB lookup failed for territory {territory.RowId}: {ex}");
             }
         }
 
@@ -536,7 +631,7 @@ public static class VendorNpcLocationCache
             if (vendorLocation == null)
                 continue;
 
-            AddLocation(result, vendorLocation, mapSheet);
+            AddLocation(result, vendorLocation, mapSheet, includeRoutePriority: false);
         }
     }
 
@@ -579,7 +674,8 @@ public static class VendorNpcLocationCache
     private static bool AddLocation(
         Dictionary<uint, List<VendorNpcLocation>> result,
         VendorNpcLocation location,
-        ExcelSheet<Map> mapSheet)
+        ExcelSheet<Map> mapSheet,
+        bool includeRoutePriority)
     {
         location = ApplyKnownLocationOverrides(location, mapSheet);
         if (!result.TryGetValue(location.NpcId, out var list))
@@ -589,10 +685,13 @@ public static class VendorNpcLocationCache
             if (!AreLocationsEquivalent(list[i], location, mapSheet))
                 continue;
 
-            if (ShouldReplaceEquivalentLocation(list[i], location, mapSheet))
+            if (!includeRoutePriority)
+                continue;
+
+            if (ShouldReplaceEquivalentLocation(list[i], location, mapSheet, includeRoutePriority))
             {
                 list[i] = location;
-                SortLocations(list, mapSheet);
+                SortLocations(list, mapSheet, includeRoutePriority);
                 return true;
             }
 
@@ -600,7 +699,7 @@ public static class VendorNpcLocationCache
         }
 
         list.Add(location);
-        SortLocations(list, mapSheet);
+        SortLocations(list, mapSheet, includeRoutePriority);
         return true;
     }
 
@@ -650,8 +749,12 @@ public static class VendorNpcLocationCache
 
     private static uint GetMapRowIdForLayer(TerritoryType territory, uint? layerSetId, uint fallbackLayerIndex, ExcelSheet<Map> mapSheet)
     {
+        var layerIndex = layerSetId is > 0 ? layerSetId.Value : fallbackLayerIndex;
+        if (layerIndex == 0)
+            return territory.Map.RowId != 0
+                ? territory.Map.RowId
+                : GetMapRowIdByTerritoryTypeAndMapIndex(territory.RowId, (sbyte)0, mapSheet);
 
-        var layerIndex = layerSetId ?? fallbackLayerIndex;
         var mapRowId = GetMapRowIdAtLayerIndex(territory.RowId, layerIndex, mapSheet);
         if (mapRowId != 0)
             return mapRowId;
@@ -664,15 +767,19 @@ public static class VendorNpcLocationCache
 
     private static uint GetMapRowIdAtLayerIndex(uint territoryTypeId, uint layerIndex, ExcelSheet<Map> mapSheet)
     {
+        if (layerIndex == 0)
+            return 0;
+
         MapRowIdsByTerritoryAndLayerIndex.TryAdd(territoryTypeId, new Dictionary<uint, uint>());
         var cache = MapRowIdsByTerritoryAndLayerIndex[territoryTypeId];
         if (cache.TryGetValue(layerIndex, out var mapRowId))
             return mapRowId;
 
         mapRowId = GetMapRowIdByTerritoryTypeAndMapIndex(territoryTypeId, (sbyte)layerIndex, mapSheet);
-        if (mapRowId == 0 && cache.Count > 0)
+        var positiveLayerKeys = cache.Keys.Where(key => key > 0).ToArray();
+        if (mapRowId == 0 && positiveLayerKeys.Length > 0)
         {
-            var maxLayer = cache.Keys.Max();
+            var maxLayer = positiveLayerKeys.Max();
             var actualLayer = ((layerIndex - 1) % maxLayer) + 1;
             if (cache.TryGetValue(actualLayer, out var existingMapRowId) && existingMapRowId != 0)
                 mapRowId = existingMapRowId;
@@ -704,8 +811,12 @@ public static class VendorNpcLocationCache
             : 0;
     }
 
-    private static bool ShouldReplaceEquivalentLocation(VendorNpcLocation existing, VendorNpcLocation candidate, ExcelSheet<Map> mapSheet)
-        => CompareLocationQuality(candidate, existing, mapSheet) < 0;
+    private static bool ShouldReplaceEquivalentLocation(
+        VendorNpcLocation existing,
+        VendorNpcLocation candidate,
+        ExcelSheet<Map> mapSheet,
+        bool includeRoutePriority)
+        => CompareLocationQuality(candidate, existing, mapSheet, includeRoutePriority) < 0;
 
     private static VendorNpcLocation ApplyKnownLocationOverrides(VendorNpcLocation location, ExcelSheet<Map> mapSheet)
         => ApplyKnownTerritoryLocationOverrides(ApplyKnownNpcLocationOverrides(location), mapSheet);
@@ -788,14 +899,21 @@ public static class VendorNpcLocationCache
         return mapRowId;
     }
 
-    private static int CompareLocationQuality(VendorNpcLocation left, VendorNpcLocation right, ExcelSheet<Map> mapSheet)
+    private static int CompareLocationQuality(
+        VendorNpcLocation left,
+        VendorNpcLocation right,
+        ExcelSheet<Map> mapSheet,
+        bool includeRoutePriority)
     {
         var usabilityComparison = GetLocationUsabilityPriority(left, mapSheet).CompareTo(GetLocationUsabilityPriority(right, mapSheet));
         if (usabilityComparison != 0)
             return usabilityComparison;
-        var routeComparison = GetLocationRoutePriority(left).CompareTo(GetLocationRoutePriority(right));
-        if (routeComparison != 0)
-            return routeComparison;
+        if (includeRoutePriority)
+        {
+            var routeComparison = GetLocationRoutePriority(left).CompareTo(GetLocationRoutePriority(right));
+            if (routeComparison != 0)
+                return routeComparison;
+        }
 
         var sourceComparison = GetLocationSourcePriority(left, mapSheet).CompareTo(GetLocationSourcePriority(right, mapSheet));
         if (sourceComparison != 0)
@@ -844,7 +962,9 @@ public static class VendorNpcLocationCache
         return _mapRowCountsByTerritoryTypeId.TryGetValue(territoryTypeId, out var count) && count > 1;
     }
 
-    private static bool TryLoadSupplementalNpcPlaces(out List<ENpcPlace> npcPlaces)
+    private static bool TryLoadSupplementalNpcPlaces(
+        Lumina.GameData gameData,
+        out List<ENpcPlace> npcPlaces)
     {
         lock (SupplementalNpcPlacesLock)
         {
@@ -853,7 +973,6 @@ public static class VendorNpcLocationCache
                 _supplementalNpcPlacesLoaded = true;
                 try
                 {
-                    var gameData = Dalamud.GameData.GameData;
                     _supplementalNpcPlaces = CsvLoader.LoadResource<ENpcPlace>(
                         CsvLoader.ENpcPlaceResourceName,
                         true,
@@ -870,7 +989,7 @@ public static class VendorNpcLocationCache
                 catch (Exception ex)
                 {
                     _supplementalNpcPlaces = new List<ENpcPlace>();
-                    GatherBuddy.Log.Warning($"[VendorNpcLocationCache] Failed to load ENpcPlace supplemental data: {ex.Message}");
+                    GatherBuddy.Log.Warning($"[VendorNpcLocationCache] Failed to load ENpcPlace supplemental data: {ex}");
                 }
             }
 

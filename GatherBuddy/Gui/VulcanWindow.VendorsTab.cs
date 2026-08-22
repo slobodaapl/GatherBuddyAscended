@@ -223,9 +223,9 @@ public partial class VulcanWindow
 
         if (GatherBuddy.ControllerSupport != null && !_vendorsTabRequestFocus)
         {
-            var handle = ImRaii.TabItem("Vendors##vendorsTab");
+            var handle = GatherBuddy.ControllerSupport.TabNavigation.TabItem("Vendors##vendorsTab", VendorsTabIndex, VulcanTabCount);
             tabItem = handle;
-            tabOpen = handle.Success;
+            tabOpen = handle;
         }
         else
         {

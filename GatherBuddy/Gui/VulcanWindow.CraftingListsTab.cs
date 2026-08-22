@@ -9,9 +9,6 @@ using ElliLib;
 using ElliLib.Raii;
 using FFXIVClientStructs.FFXIV.Client.Game;
 using GatherBuddy.Crafting;
-using GatherBuddy.FcMesh.Protocol;
-using GatherBuddy.FcMesh.Publication;
-using GatherBuddy.FcMesh.Sessions;
 using GatherBuddy.Plugin;
 using Lumina.Excel.Sheets;
 using ImRaii = ElliLib.Raii.ImRaii;
@@ -22,8 +19,9 @@ public partial class VulcanWindow
 {
     private const string CraftingListDragDropPayload = "GatherBuddyCraftingListDragDrop";
     private int? _draggedCraftingListId = null;
-    private readonly HashSet<Guid> _fcSelectedPublicLists = new();
-    private bool _fcUseOwnStock;
+
+    private static string GetCraftingListUiId(CraftingListDefinition list)
+        => $"{list.ID}_{list.CreatedAt.ToUniversalTime().Ticks}";
     private void DrawCraftingListsTab()
     {
         IDisposable tabItem;
@@ -31,7 +29,7 @@ public partial class VulcanWindow
 
         if (GatherBuddy.ControllerSupport != null && !_craftingListsRequestFocus)
         {
-            var handle = GatherBuddy.ControllerSupport.TabNavigation.TabItem("Crafting Lists##craftingListsTab", 0, 9);
+            var handle = GatherBuddy.ControllerSupport.TabNavigation.TabItem("Crafting Lists##craftingListsTab", CraftingListsTabIndex, VulcanTabCount);
             tabItem = handle;
             tabOpen = handle;
         }
@@ -187,8 +185,6 @@ public partial class VulcanWindow
             ImGui.EndChild();
         }
 
-        DrawFcPublicListsReadOnly();
-
     }
 
     private void DrawListSelectorPanel()
@@ -269,11 +265,14 @@ public partial class VulcanWindow
 
     private void DrawCraftingListSelectorEntry(CraftingListDefinition list)
     {
-        var isHighlighted = _previewList?.ID == list.ID;
+        var isHighlighted = _previewList is { } preview
+            && preview.ID == list.ID
+            && preview.CreatedAt.ToUniversalTime() == list.CreatedAt.ToUniversalTime();
         if (isHighlighted)
             ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.ParsedGold);
 
-        if (ImGui.Selectable($"{list.Name}##list_{list.ID}", isHighlighted))
+        var listUiId = GetCraftingListUiId(list);
+        if (ImGui.Selectable($"{list.Name}##list_{listUiId}", isHighlighted))
             OpenCraftingList(list);
         DrawCraftingListDragDropSource(list);
         DrawCraftingListEntryDropTarget(list);
@@ -288,8 +287,8 @@ public partial class VulcanWindow
         }
 
         var isPopupOpen = GatherBuddy.ControllerSupport != null
-            ? GatherBuddy.ControllerSupport.ContextMenu.BeginPopupContextItemWithGamepad($"ListContextMenu_{list.ID}", Dalamud.GamepadState)
-            : ImGui.BeginPopupContextItem($"ListContextMenu_{list.ID}");
+            ? GatherBuddy.ControllerSupport.ContextMenu.BeginPopupContextItemWithGamepad($"ListContextMenu_{listUiId}", Dalamud.GamepadState)
+            : ImGui.BeginPopupContextItem($"ListContextMenu_{listUiId}");
 
         if (!isPopupOpen)
             return;
@@ -344,6 +343,8 @@ public partial class VulcanWindow
                 GatherBuddy.Log.Warning($"[VulcanWindow] Failed to export '{list.Name}' to TeamCraft: {error}");
             }
         }
+
+        DrawFcListContextActions(list, listUiId);
 
         ImGui.Separator();
         if (ImGui.Selectable("Delete"))
@@ -410,7 +411,8 @@ public partial class VulcanWindow
         var buttonH = VulcanUiScaling.Scaled(22f) * 2 + style.ItemSpacing.Y * 3 + VulcanUiScaling.Scaled(4f);
         var listH   = Math.Max(ImGui.GetContentRegionAvail().Y - buttonH, VulcanUiScaling.Scaled(40f));
 
-        ImGui.BeginChild("##previewRecipeList", new Vector2(-1, listH), false);
+        var listUiId = GetCraftingListUiId(list);
+        ImGui.BeginChild($"##previewRecipeList_{listUiId}", new Vector2(-1, listH), false);
 
         if (list.Recipes.Count == 0)
         {
@@ -462,21 +464,21 @@ public partial class VulcanWindow
         ImGui.Spacing();
 
         var halfW = (ImGui.GetContentRegionAvail().X - style.ItemSpacing.X) / 2f;
-        if (ImGui.Button("Edit List##previewEdit", new Vector2(halfW, VulcanUiScaling.Scaled(22f))))
+        if (ImGui.Button($"Edit List##previewEdit_{listUiId}", new Vector2(halfW, VulcanUiScaling.Scaled(22f))))
             OpenCraftingList(list);
         ImGui.SameLine();
         if (IPCSubscriber.IsReady("Artisan"))
         {
-            ImGuiUtil.DrawDisabledButton("Artisan Detected##previewStart", VulcanUiScaling.Scaled(-1f, 22f),
+            ImGuiUtil.DrawDisabledButton($"Artisan Detected##previewStart_{listUiId}", VulcanUiScaling.Scaled(-1f, 22f),
                 "Artisan plugin is loaded. Please unload Artisan to use Vulcan's crafting system.", true);
         }
-        else if (ImGui.Button("Start Crafting##previewStart", VulcanUiScaling.Scaled(-1f, 22f)))
+        else if (ImGui.Button($"Start Crafting##previewStart_{listUiId}", VulcanUiScaling.Scaled(-1f, 22f)))
         {
             StartCraftingList(list);
             MinimizeWindow();
         }
 
-        if (ImGui.Button("Export##previewExport", new Vector2(halfW, VulcanUiScaling.Scaled(22f))))
+        if (ImGui.Button($"Export##previewExport_{listUiId}", new Vector2(halfW, VulcanUiScaling.Scaled(22f))))
         {
             var exported = GatherBuddy.CraftingListManager.ExportList(list.ID);
             if (exported != null)
@@ -488,185 +490,13 @@ public partial class VulcanWindow
         ImGui.SameLine();
         using (ImRaii.PushColor(ImGuiCol.Button, new Vector4(0.45f, 0.12f, 0.12f, 1f)))
         {
-            if (ImGui.Button("Delete##previewDelete", VulcanUiScaling.Scaled(-1f, 22f)))
+            if (ImGui.Button($"Delete##previewDelete_{listUiId}", VulcanUiScaling.Scaled(-1f, 22f)))
             {
                 GatherBuddy.CraftingListManager.DeleteList(list.ID);
                 _previewList = null;
             }
         }
-
-        DrawFcLocalPublicationControls(list);
     }
-
-    private static void DrawFcLocalPublicationControls(CraftingListDefinition list)
-    {
-        var service = GatherBuddy.FcPublishedLists;
-        if (service is null)
-            return;
-
-        ImGui.Spacing();
-        ImGui.Separator();
-        ImGui.TextColored(ImGuiColors.ParsedGold, "FC public list copy");
-        var state = service.State.Lists.FirstOrDefault(value => value.LocalListId == list.ID
-            && value.CreatedAtUtc == list.CreatedAt.ToUniversalTime());
-        if (state?.Pending is { } pending)
-        {
-            ImGui.TextColored(ImGuiColors.DalamudGrey3,
-                $"Publication revision {pending.Revision}: {pending.Status}");
-            if (pending.Status == FcPublicationCommandStatus.Failed
-                && ImGui.Button("Retry FC publication##retryFcList"))
-                _ = service.RetryPending();
-            return;
-        }
-        var published = state?.LastPublishedSnapshot is { Published: true };
-        if (!published)
-        {
-            if (ImGui.Button("Publish to FC##publishFcList"))
-                _ = service.Publish(list);
-        }
-        else
-        {
-            if (ImGui.Button("Update Published FC Copy##updateFcList"))
-                _ = service.Update(list);
-            ImGui.SameLine();
-            if (ImGui.Button("Unpublish FC Copy##unpublishFcList"))
-                _ = service.Unpublish(list);
-        }
-        var diagnostics = service.Diagnostics;
-        ImGui.TextColored(ImGuiColors.DalamudGrey3,
-            $"State: {diagnostics.State}; writes: {(diagnostics.WritesAllowed ? "ready" : "read-only")}");
-        if (!string.IsNullOrWhiteSpace(diagnostics.LastError))
-            ImGui.TextWrapped(diagnostics.LastError);
-    }
-
-    private void DrawFcPublicListsReadOnly()
-    {
-        var service = GatherBuddy.FcPublishedLists;
-        if (service is null || !ImGui.CollapsingHeader("FC public lists (read-only)"))
-            return;
-
-        var session = GatherBuddy.FcWorkerSessions;
-        var compatible = new List<PublishedListRecord>();
-        var allCompatible = new List<PublishedListRecord>();
-        foreach (var view in service.PublicLists)
-        {
-            var record = view.Record;
-            var selected = _fcSelectedPublicLists.Contains(record.ListId);
-            if (view.Published && view.IsCompatible)
-            {
-                allCompatible.Add(record);
-                if (ImGui.Checkbox($"Subscribe {record.DisplayName}##fcSubscribe_{record.ListId:D}_{view.OwnerAuthorId}", ref selected))
-                {
-                    if (selected)
-                        _fcSelectedPublicLists.Add(record.ListId);
-                    else
-                        _fcSelectedPublicLists.Remove(record.ListId);
-                }
-                if (selected)
-                    compatible.Add(record);
-            }
-            ImGui.Text($"{record.DisplayName}  ·  owner {view.OwnerAuthorId}  ·  revision {view.Revision}");
-            ImGui.Text($"Published: {record.Published}; compatibility: {(view.IsCompatible ? "compatible" : view.CompatibilityReason)}");
-            foreach (var target in record.FinalTargets)
-                ImGui.BulletText($"recipe {target.RecipeId} -> item {target.ItemId} x{target.Quantity} ({target.Quality})");
-            ImGui.Text($"Final quality policy: {FormatQualityPolicy(record.FinalQualityPolicy)}");
-            ImGui.Text($"Precraft quality policy: {FormatQualityPolicy(record.PrecraftQualityPolicy)}");
-            if (view.IsOrphanedLocalMapping && service.IsLocalOwner(record))
-            {
-                if (ImGui.Button($"Unpublish retained copy##orphan_{record.ListId:D}"))
-                    _ = service.Unpublish(record.ListId);
-            }
-        }
-
-        if (session is null)
-            return;
-        var diagnostics = session.Diagnostics;
-        ImGui.Separator();
-        ImGui.TextColored(ImGuiColors.ParsedGold, "FC worker subscription (Phase 6; subscription only)");
-        ImGui.Checkbox("Use own stock##fcWorkerUseOwnStock", ref _fcUseOwnStock);
-        var selectedListsValid = compatible.Count > 0
-            && compatible.Count == _fcSelectedPublicLists.Count;
-        var canStart = diagnostics.WritesAllowed
-            && !diagnostics.Forked
-            && !diagnostics.RecoveryRequired;
-        var canRecover = session.RecoveryReady;
-        if (!canStart)
-            ImGui.TextColored(ImGuiColors.DalamudGrey3, "Start controls disabled: native/persistence/author/recovery gate is not ready.");
-        using (ImRaii.Disabled(!canStart || !selectedListsValid))
-        {
-            if (ImGui.Button("Start Selected##fcWorkerStartSelected"))
-            {
-                var closure = FcWorkerDependencyClosure.Build(compatible);
-                if (!closure.Succeeded)
-                    ImGui.TextWrapped(closure.Error);
-                else
-                {
-                    var physical = FcWorkerPhysicalInventorySnapshot.Capture(closure.Keys);
-                    _ = session.StartSelected(_fcSelectedPublicLists, physical, _fcUseOwnStock, closure.Keys);
-                }
-            }
-        }
-        ImGui.SameLine();
-        using (ImRaii.Disabled(!canStart || allCompatible.Count == 0))
-        {
-            if (ImGui.Button("Start All##fcWorkerStartAll"))
-            {
-                var closure = FcWorkerDependencyClosure.Build(allCompatible);
-                if (!closure.Succeeded)
-                    ImGui.TextWrapped(closure.Error);
-                else
-                {
-                    var physical = FcWorkerPhysicalInventorySnapshot.Capture(closure.Keys);
-                    _ = session.StartAll(physical, _fcUseOwnStock, closure.Keys);
-                }
-            }
-        }
-        ImGui.SameLine();
-        using (ImRaii.Disabled(!canRecover))
-        {
-            if (ImGui.Button("Recover##fcWorkerRecover"))
-            {
-                var desired = session.DesiredWorker;
-                var closure = desired is null
-                    ? FcWorkerDependencyClosureResult.Invalid("Durable worker selection is unavailable.")
-                    : FcWorkerDependencyClosure.Build(service.PublicLists, desired.Selection);
-                if (!closure.Succeeded)
-                    ImGui.TextWrapped(closure.Error);
-                else
-                {
-                    var physical = FcWorkerPhysicalInventorySnapshot.Capture(closure.Keys);
-                    _ = session.Recover(physical);
-                }
-            }
-        }
-        ImGui.SameLine();
-        using (ImRaii.Disabled(!diagnostics.IsSubscribed))
-        {
-            if (ImGui.Button("Waiting##fcWorkerWaiting"))
-                _ = session.SetWaiting();
-        }
-        ImGui.SameLine();
-        using (ImRaii.Disabled(!diagnostics.IsSubscribed))
-        {
-            if (ImGui.Button("Active##fcWorkerActive"))
-                _ = session.SetActive();
-        }
-        ImGui.SameLine();
-        using (ImRaii.Disabled(!diagnostics.IsSubscribed))
-        {
-            if (ImGui.Button("Stop##fcWorkerStop"))
-                _ = session.Stop();
-        }
-        ImGui.Text($"Worker: {diagnostics.WorkerState}; session {diagnostics.SessionId:D}; generation {diagnostics.SessionGeneration}; revision {diagnostics.Revision}");
-        ImGui.Text($"Last communication: {diagnostics.LastCommunicationUnixMilliseconds}; next refresh: {diagnostics.NextRefreshUnixMilliseconds}; recovery: {(diagnostics.RecoveryRequired ? "required" : "none")}");
-        if (!string.IsNullOrWhiteSpace(diagnostics.LastError))
-            ImGui.TextWrapped(diagnostics.LastError);
-    }
-
-    private static string FormatQualityPolicy(FcQualityPolicy policy)
-        => policy.Rules.Length == 0
-            ? "none"
-            : string.Join(", ", policy.Rules.Select(rule => $"{rule.ItemId}/{rule.Quality}={rule.Quantity}"));
 
     private void DrawFolderPreviewPanel(string folderPath)
     {

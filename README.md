@@ -95,6 +95,10 @@ git clone --recurse-submodules git@github.com:slobodaapl/GatherBuddyAscended.git
 Release CI builds the .NET plugin plus the pinned native `donatello_ffi.dll`, then packages
 them as `GatherBuddyAscended.zip`.
 
+The FC mesh native transport, durable storage/recovery rules, relay operation, process harness,
+physical chest semantics, and native dependency notices are documented in
+[`gathermesh/README.md`](gathermesh/README.md) and [`gathermesh/NOTICE.md`](gathermesh/NOTICE.md).
+
 ## Contributing
 
 1. Fork the repository and clone it recursively.

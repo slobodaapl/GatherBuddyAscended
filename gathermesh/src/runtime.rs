@@ -1,5 +1,6 @@
 use std::{
     collections::{BTreeMap, HashMap},
+    future::Future,
     panic::AssertUnwindSafe,
     sync::{
         Arc, Mutex, OnceLock,
@@ -20,6 +21,7 @@ use crate::{
     error::{ErrorCode, NativeError, NativeResult},
     events::{EventKind, EventQueue, NativeEvent, PreparedSnapshot, SnapshotRecord},
     node::{LiveInput, NativeConfig, NativeNode},
+    persistence::PersistentState,
 };
 
 pub const LIFE_CREATED: u32 = 1;
@@ -205,45 +207,10 @@ impl Service {
             config: config.clone(),
         });
         let task_service = service.clone();
-        runtime().spawn(async move {
-            let result = AssertUnwindSafe(run_service(
-                task_service.clone(),
-                command_receiver,
-                live_sender,
-                live_receiver,
-            ))
-            .catch_unwind()
-            .await;
-            if result.is_err() {
-                let error_id = task_service
-                    .errors
-                    .insert("background native supervisor panicked");
-                task_service
-                    .status
-                    .last_error
-                    .store(error_id, Ordering::Release);
-                if task_service.status.lifecycle.load(Ordering::Acquire) != LIFE_DESTROYED {
-                    task_service
-                        .status
-                        .lifecycle
-                        .store(LIFE_CLOSED, Ordering::Release);
-                }
-                emit(
-                    &task_service,
-                    NativeEvent {
-                        protocol_version: crate::document::PROTOCOL_VERSION,
-                        kind: EventKind::Error,
-                        sequence: 0,
-                        world_epoch: 0,
-                        key: Vec::new(),
-                        value: b"background native supervisor panicked".to_vec(),
-                        actual_author: Vec::new(),
-                        content_hash: Vec::new(),
-                        aux: error_id,
-                    },
-                );
-            }
-        });
+        runtime().spawn(supervise_task(
+            task_service.clone(),
+            run_service(task_service, command_receiver, live_sender, live_receiver),
+        ));
         service
     }
 
@@ -279,13 +246,13 @@ impl Service {
             NativeError::new(ErrorCode::Internal, "command admission lock poisoned")
         })?;
         match self.status.lifecycle.load(Ordering::Acquire) {
-            LIFE_CLOSING => {
+            LIFE_CLOSING | LIFE_CLOSED => {
                 return Err(NativeError::new(
                     ErrorCode::Closing,
                     "native service is closing",
                 ));
             }
-            LIFE_CLOSED | LIFE_DESTROYED => {
+            LIFE_DESTROYED => {
                 return Err(NativeError::state("native service is closed"));
             }
             _ => {}
@@ -531,6 +498,43 @@ async fn run_service(
     }
 }
 
+async fn supervise_task<F>(service: Arc<Service>, task: F)
+where
+    F: Future<Output = ()> + Send + 'static,
+{
+    if AssertUnwindSafe(task).catch_unwind().await.is_err() {
+        record_supervisor_panic(&service);
+    }
+}
+
+fn record_supervisor_panic(service: &Arc<Service>) {
+    let error_id = service
+        .errors
+        .insert("background native supervisor panicked");
+    service.status.last_error.store(error_id, Ordering::Release);
+    if service.status.lifecycle.load(Ordering::Acquire) != LIFE_DESTROYED {
+        service
+            .status
+            .lifecycle
+            .store(LIFE_CLOSED, Ordering::Release);
+    }
+    emit(
+        service,
+        NativeEvent {
+            protocol_version: crate::document::PROTOCOL_VERSION,
+            kind: EventKind::Error,
+            sequence: 0,
+            world_epoch: 0,
+            key: Vec::new(),
+            value: b"background native supervisor panicked".to_vec(),
+            actual_author: Vec::new(),
+            content_hash: Vec::new(),
+            aux: error_id,
+        },
+    );
+    persist_runtime_diagnostic(service, ErrorCode::Panic, error_id);
+}
+
 async fn handle_command(service: &Arc<Service>, node: &mut NativeNode, command: Command) -> bool {
     match command {
         Command::Start => match node.start().await {
@@ -694,10 +698,30 @@ fn emit(service: &Arc<Service>, event: NativeEvent) {
 fn emit_error(service: &Arc<Service>, error: NativeError) {
     let error_id = service.errors.insert(error.message.clone());
     service.status.last_error.store(error_id, Ordering::Release);
+    persist_runtime_diagnostic(service, error.code, error_id);
     let mut event = NativeEvent::simple(EventKind::Error);
     event.value = error.message.into_bytes();
     event.aux = ((error.code.as_u32() as u64) << 32) | error_id;
     emit(service, event);
+}
+
+fn persist_runtime_diagnostic(service: &Arc<Service>, code: ErrorCode, error_id: u64) {
+    let root = service.config.storage_directory.clone();
+    let service = service.clone();
+    runtime().spawn(async move {
+        if PersistentState::write_runtime_diagnostic(root, code.as_u32(), error_id)
+            .await
+            .is_err()
+        {
+            let diagnostic_error_id = service
+                .errors
+                .insert("native runtime diagnostic persistence failed");
+            let mut event = NativeEvent::simple(EventKind::Warning);
+            event.value = b"native runtime diagnostic persistence failed".to_vec();
+            event.aux = diagnostic_error_id;
+            emit(&service, event);
+        }
+    });
 }
 
 #[cfg(test)]
@@ -715,6 +739,62 @@ mod tests {
             snapshots: Arc::new(Mutex::new(BTreeMap::new())),
             config: NativeConfig::default(),
         }
+    }
+
+    #[test]
+    fn command_admission_stays_closing_after_shutdown_until_destroyed() {
+        let service = test_service(2);
+
+        service
+            .status
+            .lifecycle
+            .store(LIFE_CLOSING, Ordering::Release);
+        assert_eq!(
+            service
+                .try_send(Command::CreateGroup)
+                .expect_err("closing service must reject commands")
+                .code,
+            ErrorCode::Closing
+        );
+
+        service
+            .status
+            .lifecycle
+            .store(LIFE_CLOSED, Ordering::Release);
+        assert_eq!(
+            service
+                .try_send(Command::CreateGroup)
+                .expect_err("closed service must retain closing admission")
+                .code,
+            ErrorCode::Closing
+        );
+
+        service
+            .status
+            .lifecycle
+            .store(LIFE_DESTROYED, Ordering::Release);
+        assert_eq!(
+            service
+                .try_send(Command::CreateGroup)
+                .expect_err("destroyed service must reject commands as invalid state")
+                .code,
+            ErrorCode::InvalidState
+        );
+    }
+
+    #[test]
+    fn error_registry_is_bounded_and_truncates_utf8_diagnostics() {
+        let registry = ErrorRegistry::new(2);
+        let first = registry.insert("first");
+        let second = registry.insert("second");
+        let third = registry.insert("é".repeat(4097));
+        assert!(registry.get(first).is_none());
+        assert_eq!(registry.get(second).as_deref(), Some(b"second".as_slice()));
+        let diagnostic = registry
+            .get(third)
+            .expect("newest diagnostic should remain");
+        assert!(diagnostic.len() <= 4096);
+        assert!(std::str::from_utf8(&diagnostic).is_ok());
     }
 
     #[test]
@@ -805,5 +885,41 @@ mod tests {
             .expect_err("overflow after open must stale the snapshot cursor");
         assert_eq!(error.code, ErrorCode::SnapshotStale);
         Service::destroy_snapshot(handle);
+    }
+
+    #[tokio::test]
+    async fn supervised_task_panic_closes_service_and_persists_bounded_evidence() {
+        let storage = std::env::temp_dir().join(format!(
+            "gathermesh-runtime-supervisor-{}",
+            std::process::id()
+        ));
+        let mut raw_service = test_service(8);
+        raw_service.config.storage_directory = storage.clone();
+        let service = Arc::new(raw_service);
+        supervise_task(service.clone(), async {
+            panic!("test-only supervised task panic");
+        })
+        .await;
+
+        let status = service.status();
+        assert_eq!(status.lifecycle, LIFE_CLOSED);
+        assert_ne!(status.last_error, 0);
+        assert_eq!(
+            service.errors.get(status.last_error).as_deref(),
+            Some(b"background native supervisor panicked".as_slice())
+        );
+        let event = service
+            .poll_event()
+            .expect("supervisor panic must emit an actionable error event");
+        assert_eq!(event.kind, EventKind::Error);
+        assert_eq!(event.aux, status.last_error);
+        for _ in 0..20 {
+            if storage.join("native-error.json").is_file() {
+                break;
+            }
+            time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(storage.join("native-error.json").is_file());
+        let _ = tokio::fs::remove_dir_all(storage).await;
     }
 }

@@ -6,8 +6,122 @@ on:
       - main
 
 jobs:
+  build-gathermesh-linux:
+    name: Build and test GatherMesh (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Check Rust formatting
+        run: cargo fmt --check --manifest-path gathermesh/Cargo.toml
+
+      - name: Run Rust lint gate
+        run: cargo clippy --locked --all-targets --manifest-path gathermesh/Cargo.toml -- -D warnings
+
+      - name: Run native tests
+        run: cargo test --locked --manifest-path gathermesh/Cargo.toml
+
+      - name: Run bounded multiplayer soak smoke
+        env:
+          GATHERMESH_SOAK_SECONDS: 5
+        run: cargo test --locked --manifest-path gathermesh/Cargo.toml --test soak_process -- --ignored --nocapture
+
+      - name: Build native release
+        run: cargo build --locked --release --manifest-path gathermesh/Cargo.toml
+
+      - name: Compile and run C++ ABI consumer smoke
+        run: |
+          c++ -std=c++20 -Wall -Wextra -Werror \
+            gathermesh/tests/cpp_consumer_smoke.cpp \
+            -L gathermesh/target/release -Wl,-rpath,$PWD/gathermesh/target/release \
+            -Wl,--no-undefined -lgathermesh_ffi \
+            -o gathermesh/target/cpp-consumer-smoke
+          gathermesh/target/cpp-consumer-smoke
+
+      - name: Verify Linux ABI symbol table has no reverse callbacks
+        run: |
+          symbols=$(nm -D --defined-only gathermesh/target/release/libgathermesh_ffi.so | awk '{print $3}')
+          for symbol in \
+            gbm_abi_version gbm_create gbm_start gbm_create_group gbm_join_group \
+            gbm_leave_group gbm_put gbm_poll_event gbm_get_status gbm_shutdown \
+            gbm_destroy gbm_set_character_author gbm_request_snapshot gbm_snapshot_open \
+            gbm_snapshot_poll gbm_snapshot_destroy gbm_error_message gbm_error_free \
+            gbm_buffer_free gbm_event_free; do
+            if ! grep -Fxq "$symbol" <<<"$symbols"; then
+              echo "missing GatherMesh ABI export: $symbol"
+              exit 1
+            fi
+          done
+          if grep -Eiq 'callback|reverse|managed' <<<"$symbols"; then
+            echo 'unexpected reverse callback symbol exported by GatherMesh FFI'
+            exit 1
+          fi
+
+  build-gathermesh-windows:
+    name: Build GatherMesh FFI (Windows)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build native FFI
+        run: cargo build --locked --release --manifest-path gathermesh/Cargo.toml
+
+      - name: Verify GatherMesh ABI exports and architecture
+        shell: pwsh
+        run: |
+          $dll = (Resolve-Path 'gathermesh/target/release/gathermesh_ffi.dll').Path
+          $dumpbinCommand = (Get-Command dumpbin.exe -ErrorAction SilentlyContinue).Source
+          if (-not $dumpbinCommand) {
+            $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
+            $installation = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+            $dumpbinCommand = (Get-ChildItem (Join-Path $installation 'VC/Tools/MSVC/*/bin/Hostx64/x64/dumpbin.exe') | Select-Object -First 1).FullName
+          }
+          if (-not $dumpbinCommand) {
+            throw 'dumpbin.exe is unavailable on the Windows runner.'
+          }
+          $headers = & $dumpbinCommand /headers $dll 2>&1
+          if ($LASTEXITCODE -ne 0 -or $headers -notmatch 'machine \(x64\)') {
+            throw 'GatherMesh FFI is not an x64 PE image.'
+          }
+          $exports = & $dumpbinCommand /exports $dll 2>&1
+          if ($LASTEXITCODE -ne 0) {
+            throw 'dumpbin could not inspect GatherMesh FFI exports.'
+          }
+          foreach ($symbol in @('gbm_abi_version', 'gbm_create', 'gbm_destroy')) {
+            if ($exports -notmatch "\b$symbol\b") {
+              throw "GatherMesh FFI export missing: $symbol"
+            }
+          }
+
+      - name: Upload GatherMesh FFI
+        uses: actions/upload-artifact@v4
+        with:
+          name: gathermesh-native
+          path: gathermesh/target/release/gathermesh_ffi.dll
+          if-no-files-found: error
+
+      - name: Upload GatherMesh symbols
+        uses: actions/upload-artifact@v4
+        with:
+          name: gathermesh-symbols
+          path: gathermesh/target/release/gathermesh_ffi.pdb
+          if-no-files-found: error
+
   build-plugin:
     name: Build .NET plugin
+    needs: build-gathermesh-windows
     runs-on: windows-latest
     steps:
       - name: Checkout repository
@@ -23,6 +137,12 @@ jobs:
       - name: Apply pinned dependency patches
         run: git apply patches/ElliCon-null-safe-hook-status.patch patches/ElliLib-nullable-path-dropped-event.patch
 
+      - name: Download GatherMesh native FFI
+        uses: actions/download-artifact@v4
+        with:
+          name: gathermesh-native
+          path: gathermesh/target/x86_64-pc-windows-msvc/release
+
       - name: Download Dalamud
         run: |
           Invoke-WebRequest -Uri https://goatcorp.github.io/dalamud-distrib/latest.zip -OutFile latest.zip
@@ -33,6 +153,15 @@ jobs:
 
       - name: Build plugin
         run: dotnet build --no-restore -c Release GatherBuddy/GatherBuddy.csproj --output .\build
+
+      - name: Verify plugin native dependencies and notices
+        shell: pwsh
+        run: |
+          foreach ($file in @('gathermesh_ffi.dll', 'BouncyCastle.Cryptography.dll', 'gathermesh-NOTICE.md')) {
+            if (-not (Test-Path ".\build\$file")) {
+              throw "Plugin output is missing $file."
+            }
+          }
 
   build-native:
     name: Build Donatello FFI

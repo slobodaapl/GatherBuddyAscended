@@ -6,15 +6,26 @@ use std::{
 
 use bytes::Bytes;
 use futures_util::FutureExt;
-use iroh::{Endpoint, RelayMode, RelayUrl, Watcher, endpoint::presets, protocol::Router};
-use iroh_blobs::{ALPN as BLOBS_ALPN, BlobsProtocol, store::fs::FsStore};
+use iroh::{
+    Endpoint, RelayMode, RelayUrl, Watcher, address_lookup::AddrFilter, endpoint::presets,
+    protocol::Router,
+};
+#[cfg(test)]
+use iroh_blobs::store::ProtectCb;
+use iroh_blobs::{
+    ALPN as BLOBS_ALPN, BlobsProtocol,
+    store::{
+        GcConfig,
+        fs::{FsStore, options::Options as BlobStoreOptions},
+    },
+};
 use iroh_docs::{
     ALPN as DOCS_ALPN, Author, AuthorId, DocTicket, Entry,
     api::{
         Doc,
         protocol::{AddrInfoOptions, ShareMode},
     },
-    engine::LiveEvent,
+    engine::{LiveEvent, ProtectCallbackHandler},
     protocol::Docs,
     store::Query,
 };
@@ -192,6 +203,8 @@ pub struct NativeNode {
     group_open: bool,
     joined: bool,
     started: bool,
+    #[cfg(test)]
+    protect_callback: Option<ProtectCb>,
 }
 
 impl NativeNode {
@@ -216,6 +229,8 @@ impl NativeNode {
             group_open: false,
             joined: false,
             started: false,
+            #[cfg(test)]
+            protect_callback: None,
         }
     }
 
@@ -265,13 +280,29 @@ impl NativeNode {
         } else {
             Endpoint::builder(presets::N0)
         };
+        let builder = if self.config.relay_mode == 2 {
+            builder.addr_filter(AddrFilter::relay_only())
+        } else {
+            builder
+        };
         let endpoint = builder
             .secret_key(secret_key_from_bytes(&endpoint_secret))
             .bind()
             .await
             .map_err(|error| NativeError::new(ErrorCode::Network, error.to_string()))?;
 
-        let blobs = FsStore::load(self.config.storage_directory.join("blobs"))
+        let blobs_root = self.config.storage_directory.join("blobs");
+        let mut blob_options = BlobStoreOptions::new(&blobs_root);
+        let (protect_handler, protect_callback) = ProtectCallbackHandler::new();
+        #[cfg(test)]
+        let test_protect_callback = protect_callback.clone();
+        blob_options.gc = Some(GcConfig {
+            // Worker refreshes intentionally remain event-driven; this is storage maintenance,
+            // not an application update debounce.
+            interval: Duration::from_secs(15 * 60),
+            add_protected: Some(protect_callback),
+        });
+        let blobs = FsStore::load_with_opts(blobs_root.join("blobs.db"), blob_options)
             .await
             .map_err(|error| NativeError::new(ErrorCode::Storage, error.to_string()))?;
         tokio::fs::create_dir_all(self.config.storage_directory.join("docs"))
@@ -279,6 +310,7 @@ impl NativeNode {
             .map_err(|error| NativeError::new(ErrorCode::Storage, error.to_string()))?;
         let gossip = Gossip::builder().spawn(endpoint.clone());
         let docs = Docs::persistent(self.config.storage_directory.join("docs"))
+            .protect_handler(protect_handler)
             .spawn(endpoint.clone(), (*blobs).clone(), gossip.clone())
             .await
             .map_err(|error| NativeError::new(ErrorCode::Storage, error.to_string()))?;
@@ -316,6 +348,10 @@ impl NativeNode {
         self.blobs = Some(blobs);
         self.docs = Some(docs);
         self.router = Some(router);
+        #[cfg(test)]
+        {
+            self.protect_callback = Some(test_protect_callback);
+        }
         self.hlc = hlc;
         self.started = true;
         self.install_path_watcher(watcher_endpoint);
@@ -326,19 +362,40 @@ impl NativeNode {
             let _ = self.shutdown().await;
             return Err(error);
         }
-        if let Err(error) = self.restore_persisted_group().await {
-            let _ = self.shutdown().await;
-            return Err(error);
-        }
+        let restored_group = match self.restore_persisted_group().await {
+            Ok(restored_group) => restored_group,
+            Err(error) => {
+                let _ = self.shutdown().await;
+                return Err(error);
+            }
+        };
 
         let mut started = NativeEvent::simple(EventKind::Started);
         if let Some(author) = self.author.as_ref() {
             started.actual_author = author.id().as_bytes().to_vec();
         }
-        Ok(vec![started])
+        let mut events = vec![started];
+        if let Some(restored_group) = restored_group {
+            events.push(restored_group);
+        }
+        if !self.config.relay_urls.is_empty() {
+            let mut relay = NativeEvent::simple(EventKind::Warning);
+            relay.value = format!(
+                "custom relay configuration active ({} endpoint(s)); relay URLs are not echoed",
+                self.config.relay_urls.len()
+            )
+            .into_bytes();
+            events.push(relay);
+        }
+        if self.config.relay_mode == 2 {
+            events.push(warning_event(
+                "relay-only address filter active; direct addresses are excluded".to_owned(),
+            ));
+        }
+        Ok(events)
     }
 
-    async fn restore_persisted_group(&mut self) -> NativeResult<()> {
+    async fn restore_persisted_group(&mut self) -> NativeResult<Option<NativeEvent>> {
         let persistence = self
             .persistence
             .as_ref()
@@ -347,13 +404,11 @@ impl NativeNode {
         let namespace = persistence.group_namespace().await?;
         let ticket_bytes = persistence.group_ticket().await?;
         match (namespace, ticket_bytes) {
-            (None, None) => return Ok(()),
-            (Some(_), None) | (None, Some(_)) => {
-                return Err(NativeError::new(
-                    ErrorCode::Storage,
-                    "persisted group namespace and ticket state is incomplete",
-                ));
-            }
+            (None, None) => Ok(None),
+            (Some(_), None) | (None, Some(_)) => Err(NativeError::new(
+                ErrorCode::Storage,
+                "persisted group namespace and ticket state is incomplete",
+            )),
             (Some(namespace), Some(ticket_bytes)) => {
                 let ticket_string = std::str::from_utf8(&ticket_bytes).map_err(|_| {
                     NativeError::new(ErrorCode::Storage, "persisted group ticket is not UTF-8")
@@ -378,27 +433,23 @@ impl NativeNode {
                         )
                     })?;
                 self.install_subscription(&doc).await?;
-                doc.start_sync(ticket.nodes)
+                doc.start_sync(ticket.nodes.clone())
                     .await
                     .map_err(|error| NativeError::new(ErrorCode::Network, error.to_string()))?;
                 self.doc = Some(doc);
                 self.group_open = true;
-                self.joined = false;
-                self.join_progress = Some(JoinProgress {
-                    contacted_peer: None,
-                    sync_finished: false,
-                    compatible_metadata: false,
-                    content_ready: false,
-                    content_error: false,
-                });
+                self.joined = true;
+                self.join_progress = None;
                 self.initial_sync_emitted = false;
                 self.load_existing_records().await?;
-                if let Some(progress) = self.join_progress.as_mut() {
-                    progress.content_ready = self.pending_entries.is_empty();
-                }
+
+                let mut joined = NativeEvent::simple(EventKind::Joined);
+                joined.key = namespace.to_vec();
+                joined.value = ticket_bytes;
+                joined.actual_author = self.current_author()?.id().as_bytes().to_vec();
+                Ok(Some(joined))
             }
         }
-        Ok(())
     }
 
     fn install_path_watcher(&self, endpoint: Endpoint) {
@@ -631,12 +682,12 @@ impl NativeNode {
                     "a different group document is already open",
                 ));
             }
-            if self.joined {
-                return Ok(Vec::new());
-            }
             doc.start_sync(ticket.nodes.clone())
                 .await
                 .map_err(|error| NativeError::new(ErrorCode::Network, error.to_string()))?;
+            if self.joined {
+                return Ok(Vec::new());
+            }
             let mut joining = NativeEvent::simple(EventKind::Joining);
             joining.key = doc.id().as_bytes().to_vec();
             joining.value = ticket.to_string().into_bytes();
@@ -1324,6 +1375,10 @@ impl NativeNode {
         self.docs = None;
         self.endpoint = None;
         self.started = false;
+        #[cfg(test)]
+        {
+            self.protect_callback = None;
+        }
         events.push(NativeEvent::simple(EventKind::Stopped));
         Ok(events)
     }
@@ -1573,5 +1628,182 @@ mod tests {
         assert_eq!(records[0].value, encoded);
         assert_eq!(records[0].content_hash, expected_content_hash);
         assert_ne!(records[0].content_hash, payload_hash.as_slice());
+    }
+
+    #[tokio::test]
+    async fn persisted_group_restores_local_membership_without_peer_sync() {
+        let root = std::env::temp_dir().join(format!(
+            "gathermesh-persisted-group-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock should be after epoch")
+                .as_nanos()
+        ));
+        let character = vec![0x71; 32];
+        let config = NativeConfig {
+            storage_directory: root.clone(),
+            relay_mode: 1,
+            ..NativeConfig::default()
+        };
+        let (namespace, ticket, author, metadata_count) = {
+            let (sender, _receiver) = mpsc::channel(16);
+            let mut node = NativeNode::new(config.clone(), sender);
+            node.set_character_author(character.clone())
+                .await
+                .expect("test character author should be accepted");
+            let start_events = node.start().await.expect("native node should start");
+            assert!(
+                start_events
+                    .iter()
+                    .any(|event| event.kind == EventKind::Started)
+            );
+            let create_events = node
+                .create_group()
+                .await
+                .expect("native node should create a docs group");
+            let created_group = create_events
+                .iter()
+                .find(|event| event.kind == EventKind::Joined)
+                .expect("group creation should emit a Joined event");
+            let records = node
+                .snapshot_records()
+                .expect("created group should expose local snapshot records");
+            let metadata_count = records
+                .iter()
+                .filter(|record| record.record_type == RECORD_TYPE_GROUP_METADATA)
+                .count();
+            assert!(
+                metadata_count > 0,
+                "created group should retain group metadata"
+            );
+            let namespace = created_group.key.clone();
+            let ticket = created_group.value.clone();
+            let author = created_group.actual_author.clone();
+            node.shutdown()
+                .await
+                .expect("native node should shut down without clearing persisted membership");
+            (namespace, ticket, author, metadata_count)
+        };
+
+        let (sender, _receiver) = mpsc::channel(16);
+        let mut restored = NativeNode::new(config, sender);
+        restored
+            .set_character_author(character)
+            .await
+            .expect("restored test character author should be accepted");
+        let events = restored
+            .start()
+            .await
+            .expect("native node should restore the persisted group");
+        assert_eq!(
+            events.iter().map(|event| event.kind).collect::<Vec<_>>(),
+            vec![EventKind::Started, EventKind::Joined]
+        );
+        let restored_group = events
+            .iter()
+            .find(|event| event.kind == EventKind::Joined)
+            .expect("persisted group restore should emit Joined");
+        assert_eq!(restored_group.key, namespace);
+        assert_eq!(restored_group.value, ticket);
+        assert_eq!(restored_group.actual_author, author);
+        assert!(restored.group_open);
+        assert!(restored.joined);
+        assert!(restored.join_progress.is_none());
+        assert!(
+            events
+                .iter()
+                .all(|event| event.kind != EventKind::InitialSyncCompleted)
+        );
+        let restored_records = restored
+            .snapshot_records()
+            .expect("restored group should expose its local records");
+        assert_eq!(
+            restored_records
+                .iter()
+                .filter(|record| record.record_type == RECORD_TYPE_GROUP_METADATA)
+                .count(),
+            metadata_count
+        );
+        restored
+            .shutdown()
+            .await
+            .expect("restored native node should shut down cleanly");
+        tokio::fs::remove_dir_all(root)
+            .await
+            .expect("persisted group test storage should be removable");
+    }
+
+    #[tokio::test]
+    async fn docs_protection_callback_keeps_live_record_blob_referenced() {
+        use std::collections::HashSet;
+
+        use iroh_blobs::store::ProtectOutcome;
+
+        let root = std::env::temp_dir().join(format!(
+            "gathermesh-docs-protection-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock should be after epoch")
+                .as_nanos()
+        ));
+        let (sender, _receiver) = mpsc::channel(16);
+        let config = NativeConfig {
+            storage_directory: root.clone(),
+            relay_mode: 1,
+            ..NativeConfig::default()
+        };
+        let mut node = NativeNode::new(config, sender);
+        node.set_character_author(vec![0x71; 32])
+            .await
+            .expect("test character author should be accepted");
+        node.start().await.expect("native node should start");
+        node.create_group()
+            .await
+            .expect("native node should create a docs group");
+        let owner = hex::encode(
+            node.author
+                .as_ref()
+                .expect("native node should have an authenticated Docs author")
+                .id()
+                .as_bytes(),
+        );
+        let events = node
+            .put(
+                format!("v1/lists/{owner}/11111111-1111-1111-1111-111111111111").into_bytes(),
+                [0x11; RECORD_ID_BYTES],
+                RECORD_TYPE_PUBLISHED_LIST.to_owned(),
+                None,
+                1,
+                b"live-record".to_vec(),
+            )
+            .await
+            .expect("native node should write a live docs record");
+        let hash_bytes: [u8; 32] = events
+            .last()
+            .expect("put should emit an insertion event")
+            .content_hash
+            .as_slice()
+            .try_into()
+            .expect("content hash should be 32 bytes");
+        let hash = iroh_blobs::Hash::from_bytes(hash_bytes);
+        let callback = node
+            .protect_callback
+            .as_ref()
+            .expect("test node should retain the docs protection callback")
+            .clone();
+        let mut live = HashSet::new();
+        let outcome = callback(&mut live).await;
+        assert!(matches!(outcome, ProtectOutcome::Continue));
+        assert!(
+            live.contains(&hash),
+            "docs callback must protect the live record blob"
+        );
+        assert!(node.read_blob(hash).await.is_ok());
+        node.shutdown().await.expect("native node should shut down");
+        tokio::fs::remove_dir_all(root)
+            .await
+            .expect("test docs storage should be removable");
     }
 }

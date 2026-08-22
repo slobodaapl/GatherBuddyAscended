@@ -36,6 +36,7 @@ public sealed class FcChestFeasibilityProbe : IDisposable
     private bool _depositAttempted;
     private bool _disposed;
     private DateTime _reconciliationDeadline;
+    private DateTime _depositNotBefore;
     private FcChestSnapshot? _withdrawBefore;
     private FcChestTransferPlan? _depositPlan;
 
@@ -79,6 +80,7 @@ public sealed class FcChestFeasibilityProbe : IDisposable
         _withdrawAttempted = false;
         _depositAttempted = false;
         _withdrawBefore = null;
+        _depositNotBefore = default;
         _depositPlan = null;
         LastDelta = null;
         LastSnapshot = null;
@@ -92,8 +94,11 @@ public sealed class FcChestFeasibilityProbe : IDisposable
 
     public bool SetArmed(bool armed)
     {
-        if (_disposed || State != FcChestProbeState.Prepared)
-            return false;
+        if (_disposed)
+            return RejectSetArmed("SetArmed rejected: probe is disposed");
+
+        if (State != FcChestProbeState.Prepared)
+            return RejectSetArmed($"SetArmed rejected: probe state is {State}, expected Prepared");
 
         IsArmed = armed;
         StatusText = armed
@@ -102,14 +107,39 @@ public sealed class FcChestFeasibilityProbe : IDisposable
         return true;
     }
 
+    private bool RejectSetArmed(string guardReason)
+    {
+        var diagnostic = $"{guardReason}; state={State}, armed={IsArmed}, prepared={Preparation is not null}.";
+        FailureReason = diagnostic;
+        StatusText = diagnostic;
+        return false;
+    }
+
     public bool RequestExecute()
     {
-        if (_disposed || State != FcChestProbeState.Prepared || !IsArmed || Preparation is null)
-            return false;
+        if (_disposed)
+            return RejectExecuteRequest("Execute rejected: probe is disposed");
+
+        if (State != FcChestProbeState.Prepared)
+            return RejectExecuteRequest($"Execute rejected: probe state is {State}, expected Prepared");
+
+        if (!IsArmed)
+            return RejectExecuteRequest("Execute rejected: probe is not armed");
+
+        if (Preparation is null)
+            return RejectExecuteRequest("Execute rejected: no prepared item selection is available");
 
         _executeRequested = true;
         StatusText = "Execute requested; the framework will reread source and destination before one withdrawal call.";
         return true;
+    }
+
+    private bool RejectExecuteRequest(string guardReason)
+    {
+        var diagnostic = $"{guardReason}; state={State}, armed={IsArmed}, prepared={Preparation is not null}.";
+        FailureReason = diagnostic;
+        StatusText = diagnostic;
+        return false;
     }
 
     public void Cancel()
@@ -122,6 +152,7 @@ public sealed class FcChestFeasibilityProbe : IDisposable
         _prepareRequested = false;
         _executeRequested = false;
         IsArmed = false;
+        _depositNotBefore = default;
 
         if (!_withdrawAttempted && !_depositAttempted)
         {
@@ -310,8 +341,9 @@ public sealed class FcChestFeasibilityProbe : IDisposable
             depositDestination,
             preparation.Withdrawal.Item,
             preparation.Withdrawal.Quantity);
+        _depositNotBefore = DateTime.UtcNow + FcChestTransferTiming.PhysicalInterActionDelay;
         State = FcChestProbeState.Depositing;
-        StatusText = $"Exact withdrawal observed. Revalidating held item before depositing it to {depositDestination}.";
+        StatusText = "Exact withdrawal observed. Waiting for 500 ms inter-action delay before revalidating and depositing the held item.";
     }
 
     private void TryDispatchDeposit()
@@ -328,6 +360,12 @@ public sealed class FcChestFeasibilityProbe : IDisposable
         if (_depositPlan is not { } deposit)
         {
             FailAfterPhysicalAttempt("Deposit has no confirmed held item and destination; manual reconciliation is required.");
+            return;
+        }
+
+        if (!FcChestTransferTiming.IsDispatchReady(DateTime.UtcNow, _depositNotBefore))
+        {
+            StatusText = "Exact withdrawal observed. Waiting for 500 ms inter-action delay before revalidating and depositing the held item.";
             return;
         }
 
@@ -405,6 +443,7 @@ public sealed class FcChestFeasibilityProbe : IDisposable
 
         State = FcChestProbeState.Passed;
         IsArmed = false;
+        _depositNotBefore = default;
         StatusText = "FC chest probe passed: both physical transfers produced exact paired deltas.";
     }
 
@@ -428,6 +467,7 @@ public sealed class FcChestFeasibilityProbe : IDisposable
         _prepareRequested = false;
         _executeRequested = false;
         IsArmed = false;
+        _depositNotBefore = default;
         FailureReason = reason;
         State = FcChestProbeState.Failed;
         StatusText = $"Probe failed: {reason}";
@@ -448,6 +488,7 @@ public sealed class FcChestFeasibilityProbe : IDisposable
         _prepareRequested = false;
         _executeRequested = false;
         IsArmed = false;
+        _depositNotBefore = default;
 
         if ((_withdrawAttempted || _depositAttempted) && State != FcChestProbeState.Passed)
         {

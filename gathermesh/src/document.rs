@@ -266,6 +266,13 @@ impl MeshEnvelope {
         postcard::to_stdvec(&self.unsigned()).map_err(NativeError::from)
     }
 
+    /// Exposes the fixed signing representation to the checked-in
+    /// cross-language golden-vector gate. This is not an FFI surface.
+    #[doc(hidden)]
+    pub fn signing_bytes_for_golden(&self) -> NativeResult<Vec<u8>> {
+        self.signing_bytes()
+    }
+
     pub fn new(author: &Author, input: MeshEnvelopeInput, hlc: &HLC) -> NativeResult<Self> {
         let timestamp = hlc.new_timestamp();
         Self::new_at_timestamp(author, input, &timestamp)

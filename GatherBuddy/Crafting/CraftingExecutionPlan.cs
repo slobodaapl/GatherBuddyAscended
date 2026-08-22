@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using GatherBuddy.FcMesh.Fulfillment;
+using GatherBuddy.FcMesh.Protocol;
 using GatherBuddy.FcMesh.State;
 using GatherBuddy.Plugin;
 using Lumina.Excel.Sheets;
@@ -14,11 +15,17 @@ public sealed class CraftingExecutionPlan
     private readonly bool _useRetainerCraftableAvailability;
     private readonly bool _directCraft;
     private readonly List<CraftingListItem>? _recoveryQueue;
+    private readonly Func<CraftingListDefinition, CraftingListPlan>? _refreshPlanFactory;
     private readonly Dictionary<uint, int> _acquiredDependencyCaps;
     private readonly HashSet<uint> _finalOutputItemIds;
     private readonly Dictionary<uint, AcquiredDependencyAvailability> _acquiredAvailability = new();
     private CraftingPlanningContext _planningContext;
     private CraftingPlanningContext? _pendingWorldRevisionContext;
+    private WorkerSessionRecord[]? _fcIntentWorkers;
+    private WorkerSessionRecord? _fcIntentLocalWorker;
+    private FcIntentTieBreaker.ICraftQueueFactsResolver? _fcIntentFactsResolver;
+    private IFcIntentSnapshotProvider? _fcIntentSnapshotProvider;
+    private uint[]? _fcIntentGatherCandidates;
 
     public int ListId { get; }
     public string ListName { get; }
@@ -37,6 +44,7 @@ public sealed class CraftingExecutionPlan
     public CraftingPlanningContext PlanningContext => _planningContext;
     public ExecutionSource ExecutionSource => _planningContext.Source;
     public FcExecutionContext? FcContext => _planningContext.FcContext;
+    internal bool IsRecoveryPlan => _recoveryQueue is not null;
     public FcWorldRevision? WorldRevision => _planningContext.FcContext?.WorldRevision;
     public FcWorldRevision? CurrentWorldRevision => WorldRevision;
     public bool IsWorldRevisionDirty => _pendingWorldRevisionContext != null;
@@ -62,24 +70,164 @@ public sealed class CraftingExecutionPlan
     public IReadOnlyDictionary<uint, IngredientQualityDemand> IngredientDemandsView => IngredientDemands;
     public IReadOnlyDictionary<uint, AcquiredDependencyAvailability> AcquiredAvailabilityView => _acquiredAvailability;
 
+    /// <summary>
+    /// Applies the FC-only advisory intent order to the already-resolved
+    /// queue.  The existing planner remains the source of queue membership,
+    /// dependency order, material accounting, and quality admission; an
+    /// unknown recipe shape leaves its incumbent queue untouched.
+    /// </summary>
+    internal void ApplyFcIntentQueueOrder(
+        IReadOnlyList<WorkerSessionRecord> activeWorkers,
+        WorkerSessionRecord localWorker,
+        FcIntentTieBreaker.ICraftQueueFactsResolver? factsResolver = null)
+    {
+        if (ExecutionSource != ExecutionSource.FcFulfillment
+            || Queue.Count < 2)
+            return;
+
+        ArgumentNullException.ThrowIfNull(activeWorkers);
+        ArgumentNullException.ThrowIfNull(localWorker);
+        _fcIntentWorkers = activeWorkers.ToArray();
+        _fcIntentLocalWorker = localWorker;
+        _fcIntentFactsResolver = factsResolver
+            ?? FcIntentTieBreaker.ProductionCraftQueueFactsResolver;
+        ReapplyFcIntentQueueOrder();
+    }
+
+    internal void BindFcIntentSnapshotProvider(IFcIntentSnapshotProvider? provider)
+    {
+        if (ExecutionSource == ExecutionSource.FcFulfillment)
+            _fcIntentSnapshotProvider = provider;
+    }
+
+    internal void ClearFcIntentSnapshotProvider()
+        => _fcIntentSnapshotProvider = null;
+
+    internal void SetFcIntentGatherCandidates(IReadOnlyList<uint> candidates)
+    {
+        ArgumentNullException.ThrowIfNull(candidates);
+        if (ExecutionSource != ExecutionSource.FcFulfillment)
+            return;
+        _fcIntentGatherCandidates = candidates
+            .Where(itemId => itemId != 0)
+            .Distinct()
+            .ToArray();
+    }
+
+    internal uint[] GetCurrentFcGatherTargetOrder()
+    {
+        var candidates = _fcIntentGatherCandidates;
+        if (ExecutionSource != ExecutionSource.FcFulfillment
+            || candidates is not { Length: > 0 })
+            return Array.Empty<uint>();
+
+        var provider = _fcIntentSnapshotProvider;
+        if (provider is null
+            || !provider.TryGetCurrent(out var snapshot))
+            return Array.Empty<uint>();
+
+        var preferred = FcIntentTieBreaker.PreferGatherOrder(
+            candidates,
+            snapshot.ActiveWorkers,
+            snapshot.LocalWorker);
+        return preferred;
+    }
+
+    internal bool RefreshFcIntentOrderAtSafeBoundary(int immutablePrefixCount)
+    {
+        if (ExecutionSource != ExecutionSource.FcFulfillment
+            || _fcIntentSnapshotProvider is null
+            || _fcIntentFactsResolver is null
+            || immutablePrefixCount < 0
+            || immutablePrefixCount >= Queue.Count)
+            return false;
+
+        FcIntentSnapshot snapshot;
+        try
+        {
+            if (!_fcIntentSnapshotProvider.TryGetCurrent(out snapshot))
+                return false;
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+        if (snapshot.ActiveWorkers is null || snapshot.LocalWorker is null)
+            return false;
+
+        var suffix = Queue.Skip(immutablePrefixCount).ToArray();
+        if (suffix.Length < 2)
+            return false;
+
+        var candidates = FcIntentTieBreaker.BuildCraftQueueCandidates(
+            suffix,
+            _fcIntentFactsResolver);
+        if (candidates.Length != suffix.Length)
+            return false;
+
+        var reordered = FcIntentTieBreaker.PreferCraftQueue(
+            candidates,
+            snapshot.ActiveWorkers,
+            snapshot.LocalWorker);
+        if (reordered.Length != suffix.Length)
+            return false;
+
+        _fcIntentWorkers = snapshot.ActiveWorkers.ToArray();
+        _fcIntentLocalWorker = snapshot.LocalWorker;
+        Queue = Queue.Take(immutablePrefixCount)
+            .Concat(reordered.Select(candidate => candidate.Item))
+            .ToList();
+        return true;
+    }
+
+    private void ReapplyFcIntentQueueOrder()
+    {
+        var factsResolver = _fcIntentFactsResolver;
+        if (ExecutionSource != ExecutionSource.FcFulfillment
+            || Queue.Count < 2
+            || _fcIntentWorkers is null
+            || _fcIntentLocalWorker is null
+            || factsResolver is null)
+            return;
+
+        var candidates = FcIntentTieBreaker.BuildCraftQueueCandidates(
+            Queue,
+            factsResolver);
+        if (candidates.Length != Queue.Count)
+            return;
+
+        var reordered = FcIntentTieBreaker.PreferCraftQueue(
+            candidates,
+            _fcIntentWorkers,
+            _fcIntentLocalWorker);
+        if (reordered.Length != Queue.Count)
+            return;
+
+        Queue = reordered.Select(candidate => candidate.Item).ToList();
+    }
+
     private CraftingExecutionPlan(
         CraftingListDefinition planningSnapshot,
         bool useRetainerCraftableAvailability,
         CraftingListPlan resolvedPlan,
         bool directCraft = false,
         IReadOnlyList<CraftingListItem>? recoveryQueue = null,
-        CraftingPlanningContext? planningContext = null)
+        CraftingPlanningContext? planningContext = null,
+        Func<CraftingListDefinition, CraftingListPlan>? refreshPlanFactory = null)
     {
         _planningSnapshot = planningSnapshot;
         _planningContext = planningContext ?? CraftingPlanningContext.CreatePrivate();
         _useRetainerCraftableAvailability = useRetainerCraftableAvailability;
         _directCraft = directCraft;
         _recoveryQueue = recoveryQueue?.Select(CloneRecoveryQueueItem).ToList();
+        _refreshPlanFactory = refreshPlanFactory;
         _acquiredDependencyCaps = new Dictionary<uint, int>(resolvedPlan.Precrafts);
-        _finalOutputItemIds = resolvedPlan.OriginalRecipes
-            .Select(item => RecipeManager.GetRecipe(item.RecipeId)?.ItemResult.RowId ?? 0u)
-            .Where(itemId => itemId != 0)
-            .ToHashSet();
+        _finalOutputItemIds = recoveryQueue is not null
+            ? []
+            : resolvedPlan.OriginalRecipes
+                .Select(item => RecipeManager.GetRecipe(item.RecipeId)?.ItemResult.RowId ?? 0u)
+                .Where(itemId => itemId != 0)
+                .ToHashSet();
         ListId = planningSnapshot.ID;
         ListName = planningSnapshot.Name;
         SkipIfEnough = planningSnapshot.SkipIfEnough;
@@ -156,6 +304,12 @@ public sealed class CraftingExecutionPlan
     }
 
     internal static CraftingExecutionPlan CreateRecovery(IReadOnlyList<CraftingListItem> remainingQueue)
+        => CreateRecovery(remainingQueue, null, null);
+
+    internal static CraftingExecutionPlan CreateRecovery(
+        IReadOnlyList<CraftingListItem> remainingQueue,
+        FcExecutionContext? fcContext,
+        Func<CraftingListDefinition, CraftingListPlan>? recoveryPlanFactory = null)
     {
         ArgumentNullException.ThrowIfNull(remainingQueue);
         if (remainingQueue.Count == 0)
@@ -175,15 +329,43 @@ public sealed class CraftingExecutionPlan
             Recipes = remainingQueue.Skip(1).Select(CloneRecoveryQueueItem).ToList(),
         };
         var planningSnapshot = list.CreateRetainerPlanningSnapshot();
-        var resolvedPlan = CraftingListPlanner.BuildDirect(planningSnapshot);
+        var resolvedPlan = (recoveryPlanFactory ?? CraftingListPlanner.BuildDirect)(planningSnapshot);
+        if (!HasCompleteRecoveryPlan(resolvedPlan, remainingQueue))
+            throw new InvalidOperationException("Recovery plan does not resolve every queued recipe after the active craft.");
+        var planningContext = fcContext is null
+            ? CraftingPlanningContext.CreatePrivate()
+            : CraftingPlanningContext.CreateFc(
+                new FcRepresentedInventorySource(FcItemQuantityMap.Empty),
+                new CraftingPhysicalInventorySource(),
+                fcContext);
         var plan = new CraftingExecutionPlan(
             planningSnapshot,
             useRetainerCraftableAvailability: false,
             resolvedPlan,
             directCraft: true,
             recoveryQueue: remainingQueue,
-            planningContext: CraftingPlanningContext.CreatePrivate());
+            planningContext: planningContext,
+            refreshPlanFactory: recoveryPlanFactory);
         return plan;
+    }
+
+    private static bool HasCompleteRecoveryPlan(
+        CraftingListPlan resolvedPlan,
+        IReadOnlyList<CraftingListItem> remainingQueue)
+    {
+        if (resolvedPlan is null)
+            return false;
+        var expected = remainingQueue
+            .Skip(1)
+            .Where(item => !item.Options.Skipping && item.Quantity > 0)
+            .GroupBy(item => item.RecipeId)
+            .ToDictionary(group => group.Key, group => group.Sum(item => item.Quantity));
+        var actual = resolvedPlan.Recipes
+            .Where(item => !item.Options.Skipping && item.Quantity > 0)
+            .GroupBy(item => item.RecipeId)
+            .ToDictionary(group => group.Key, group => group.Sum(item => item.Quantity));
+        return expected.Count == actual.Count
+            && expected.All(pair => actual.TryGetValue(pair.Key, out var quantity) && quantity == pair.Value);
     }
 
     private static CraftingListItem CloneRecoveryQueueItem(CraftingListItem item)
@@ -222,7 +404,12 @@ public sealed class CraftingExecutionPlan
         if (_directCraft)
         {
             var freshPlanningContext = GetRefreshPlanningContext();
-            ApplyResolvedPlan(CraftingListPlanner.BuildDirect(_planningSnapshot));
+            var refreshedPlan = _refreshPlanFactory is { } factory
+                ? factory(_planningSnapshot)
+                : CraftingListPlanner.BuildDirect(_planningSnapshot);
+            if (refreshedPlan is null)
+                return;
+            ApplyResolvedPlan(refreshedPlan);
             _planningContext = freshPlanningContext;
             return;
         }
@@ -441,5 +628,7 @@ public sealed class CraftingExecutionPlan
                 .ToList();
             Queue = CraftingListQueueBuilder.CreateExpandedQueue(_planningSnapshot, resolvedPlan);
         }
+        if (_fcIntentSnapshotProvider is null)
+            ReapplyFcIntentQueueOrder();
     }
 }

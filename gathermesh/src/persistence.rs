@@ -1,7 +1,7 @@
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use iroh::SecretKey;
@@ -23,6 +23,8 @@ const MAX_MANIFEST_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_MANIFEST_REVISIONS: usize = 1_000_000;
 const MAX_CHARACTER_BYTES: usize = 4096;
 const MAX_TICKET_BYTES: usize = 64 * 1024;
+const MAX_TEMP_FILES_PER_CLEANUP: usize = 512;
+const RUNTIME_DIAGNOSTIC_FILE: &str = "native-error.json";
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct Manifest {
@@ -57,11 +59,29 @@ pub struct PersistentState {
     root: PathBuf,
 }
 
+/// Bounded cleanup result for crash leftovers produced by [`atomic_write`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StorageCleanupReport {
+    pub removed_files: u32,
+    pub reclaimed_bytes: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct RuntimeDiagnostic<'a> {
+    unix_ms: u128,
+    error_code: u32,
+    error_id: u64,
+    category: &'a str,
+}
+
 impl PersistentState {
     pub async fn open(root: impl Into<PathBuf>) -> NativeResult<Self> {
         let root = root.into();
         fs::create_dir_all(root.join(AUTHORS_DIRECTORY)).await?;
         let state = Self { root };
+        state
+            .cleanup_temporary_files(Duration::from_secs(24 * 60 * 60))
+            .await?;
         match fs::metadata(state.manifest_path()).await {
             Ok(_) => {
                 let manifest = state.read_manifest().await?;
@@ -88,6 +108,80 @@ impl PersistentState {
             Err(error) => return Err(error.into()),
         }
         Ok(state)
+    }
+
+    /// Remove only stale temporary files created by this module's atomic writes.
+    ///
+    /// Current manifests, endpoint secrets, author keys, tickets, and backend directories are
+    /// deliberately outside this set. A cleanup failure is returned to the caller so it remains
+    /// visible rather than silently risking unbounded crash-leftover growth.
+    pub async fn cleanup_temporary_files(
+        &self,
+        max_age: Duration,
+    ) -> NativeResult<StorageCleanupReport> {
+        let now = SystemTime::now();
+        let directories = [self.root.clone(), self.root.join(AUTHORS_DIRECTORY)];
+        let mut report = StorageCleanupReport::default();
+        let mut inspected = 0usize;
+        for directory in directories {
+            let mut entries = fs::read_dir(&directory).await?;
+            while let Some(entry) = entries.next_entry().await? {
+                inspected = inspected.saturating_add(1);
+                if inspected > MAX_TEMP_FILES_PER_CLEANUP {
+                    return Err(NativeError::new(
+                        ErrorCode::LimitExceeded,
+                        "persistent cleanup found too many directory entries",
+                    ));
+                }
+                let file_type = entry.file_type().await?;
+                if !file_type.is_file() || !is_atomic_temp_name(&directory, entry.file_name()) {
+                    continue;
+                }
+                let metadata = entry.metadata().await?;
+                let age = now
+                    .duration_since(metadata.modified().unwrap_or(now))
+                    .unwrap_or_default();
+                if age < max_age {
+                    continue;
+                }
+                fs::remove_file(entry.path()).await.map_err(|error| {
+                    NativeError::new(
+                        ErrorCode::Storage,
+                        format!("cannot remove stale native temporary file: {error}"),
+                    )
+                })?;
+                report.removed_files = report.removed_files.saturating_add(1);
+                report.reclaimed_bytes = report.reclaimed_bytes.saturating_add(metadata.len());
+            }
+        }
+        Ok(report)
+    }
+
+    /// Persist one bounded, secret-free supervisor/command diagnostic for restart inspection.
+    /// Payloads, tickets, endpoint keys, error messages, and record contents are never included.
+    pub(crate) async fn write_runtime_diagnostic(
+        root: impl AsRef<Path>,
+        error_code: u32,
+        error_id: u64,
+    ) -> NativeResult<()> {
+        let diagnostic = RuntimeDiagnostic {
+            unix_ms: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis(),
+            error_code,
+            error_id,
+            category: diagnostic_category(error_code),
+        };
+        let bytes = serde_json::to_vec(&diagnostic).map_err(|error| {
+            NativeError::new(
+                ErrorCode::Storage,
+                format!("cannot encode native runtime diagnostic: {error}"),
+            )
+        })?;
+        let root = root.as_ref();
+        fs::create_dir_all(root).await?;
+        atomic_write(&root.join(RUNTIME_DIAGNOSTIC_FILE), &bytes).await
     }
 
     fn manifest_path(&self) -> PathBuf {
@@ -270,6 +364,51 @@ impl PersistentState {
     }
 }
 
+fn diagnostic_category(error_code: u32) -> &'static str {
+    match error_code {
+        1 => "invalid-argument",
+        2 => "abi-mismatch",
+        3 => "invalid-handle",
+        4 => "invalid-state",
+        5 => "queue-full",
+        6 => "no-event",
+        7 => "not-ready",
+        8 => "closing",
+        9 => "already-destroyed",
+        10 => "not-found",
+        11 => "limit-exceeded",
+        12 => "invalid-record",
+        13 => "clock-drift",
+        14 => "storage",
+        15 => "network",
+        16 => "panic",
+        17 => "internal",
+        18 => "snapshot-stale",
+        _ => "unknown",
+    }
+}
+
+fn is_atomic_temp_name(directory: &Path, name: std::ffi::OsString) -> bool {
+    let Some(name) = name.to_str() else {
+        return false;
+    };
+    if name.starts_with("native-state.tmp-") || name.starts_with("endpoint-secret.tmp-") {
+        return true;
+    }
+    if directory.file_name().and_then(|value| value.to_str()) != Some(AUTHORS_DIRECTORY) {
+        return false;
+    }
+    let Some((prefix, suffix)) = name.split_once(".tmp-") else {
+        return false;
+    };
+    prefix.len() == 64
+        && prefix.bytes().all(|byte| byte.is_ascii_hexdigit())
+        && !suffix.is_empty()
+        && suffix
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || byte == b'-')
+}
+
 async fn atomic_write(path: &Path, bytes: &[u8]) -> NativeResult<()> {
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -356,6 +495,76 @@ mod tests {
                 .expect("reopened revision high-water should advance"),
             8
         );
+        tokio::fs::remove_dir_all(root)
+            .await
+            .expect("test persistence directory should be removable");
+    }
+
+    #[tokio::test]
+    async fn cleanup_removes_only_owned_atomic_write_leftovers() {
+        let root = std::env::temp_dir().join(format!(
+            "gathermesh-persistence-cleanup-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let state = PersistentState::open(&root)
+            .await
+            .expect("persistent state should open");
+        let owned_temp = root.join("native-state.tmp-test-1");
+        let unrelated_temp = root.join("foreign.tmp-test-1");
+        tokio::fs::write(&owned_temp, b"crash-leftover")
+            .await
+            .expect("owned temporary file should be writable");
+        tokio::fs::write(&unrelated_temp, b"unrelated")
+            .await
+            .expect("unrelated temporary file should be writable");
+
+        let report = state
+            .cleanup_temporary_files(Duration::ZERO)
+            .await
+            .expect("cleanup should report owned leftovers");
+        assert_eq!(report.removed_files, 1);
+        assert_eq!(report.reclaimed_bytes, b"crash-leftover".len() as u64);
+        assert!(!owned_temp.exists());
+        assert!(unrelated_temp.exists());
+        assert!(root.join(MANIFEST_FILE).exists());
+
+        tokio::fs::remove_dir_all(root)
+            .await
+            .expect("test persistence directory should be removable");
+    }
+
+    #[tokio::test]
+    async fn runtime_diagnostic_is_bounded_and_excludes_record_secrets() {
+        let root = std::env::temp_dir().join(format!(
+            "gathermesh-persistence-diagnostic-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        PersistentState::open(&root)
+            .await
+            .expect("persistent state should open");
+        let secret = "ticket=SECRET-123 payload=secret-payload endpoint=https://secret.example";
+        PersistentState::write_runtime_diagnostic(&root, 15, 9)
+            .await
+            .expect("runtime diagnostic should persist");
+        let bytes = tokio::fs::read(root.join(RUNTIME_DIAGNOSTIC_FILE))
+            .await
+            .expect("runtime diagnostic should be readable");
+        let value: serde_json::Value =
+            serde_json::from_slice(&bytes).expect("runtime diagnostic should be JSON");
+        assert_eq!(value["error_code"], 15);
+        assert_eq!(value["error_id"], 9);
+        assert_eq!(value["category"], "network");
+        assert!(!String::from_utf8_lossy(&bytes).contains(secret));
+        assert!(!String::from_utf8_lossy(&bytes).contains("SECRET-123"));
+
         tokio::fs::remove_dir_all(root)
             .await
             .expect("test persistence directory should be removable");

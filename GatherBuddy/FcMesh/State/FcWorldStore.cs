@@ -91,6 +91,7 @@ public sealed class FcWorldStore
     private readonly Dictionary<string, CapabilityRequestRecord> _requests = new(StringComparer.Ordinal);
     private readonly Dictionary<string, CapabilityResponseRecord> _responses = new(StringComparer.Ordinal);
     private readonly Dictionary<string, FcInventoryTransferRecord> _transfers = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, FcEstateChestLocationRecord> _chestLocations = new(StringComparer.Ordinal);
     private readonly Dictionary<string, FcHlcTimestamp> _registerHlcs = new(StringComparer.Ordinal);
     private readonly Dictionary<string, ulong> _revisionHighWater = new(StringComparer.Ordinal);
     private readonly Dictionary<string, ulong> _workerGenerationHighWater = new(StringComparer.Ordinal);
@@ -183,6 +184,7 @@ public sealed class FcWorldStore
     public IReadOnlyDictionary<string, CapabilityRequestRecord> CapabilityRequests => _requests;
     public IReadOnlyDictionary<string, CapabilityResponseRecord> CapabilityResponses => _responses;
     public IReadOnlyDictionary<string, FcInventoryTransferRecord> Transfers => _transfers;
+    public IReadOnlyDictionary<string, FcEstateChestLocationRecord> ChestLocations => _chestLocations;
     public IReadOnlyDictionary<string, IReadOnlyList<FcForkVariant>> ForkVariants
         => _forkVariants.ToDictionary(
             pair => pair.Key,
@@ -211,6 +213,26 @@ public sealed class FcWorldStore
     }
 
     /// <summary>
+    /// Applies a published-list payload decoded by the forward-compatible public
+    /// list schema. The native envelope and raw payload hash remain authoritative;
+    /// only unknown optional members are omitted from the typed projection.
+    /// </summary>
+    internal FcApplyResult ApplyPublishedListWithUnknownOptionalMembers(
+        FcMeshRecord envelope,
+        PublishedListRecord payload,
+        FcVerifiedMeshContext? verifiedContext = null)
+    {
+        var validation = ValidateEnvelopePayload(
+            envelope,
+            payload,
+            verifiedContext,
+            allowUnknownOptionalPublishedListMembers: true);
+        if (!validation.IsValid)
+            return FcApplyResult.Reject(_revision, validation.Error);
+        return ApplyPayload(payload, envelope);
+    }
+
+    /// <summary>
     /// Applies an inventory transfer while reconstructing a native bootstrap snapshot.
     /// The signed transfer contains both after-states, but the snapshot may not contain
     /// the physical pre-transfer state. Validate all structural and authoritative
@@ -232,7 +254,8 @@ public sealed class FcWorldStore
     private FcValidationResult ValidateEnvelopePayload<T>(
         FcMeshRecord envelope,
         T payload,
-        FcVerifiedMeshContext? verifiedContext)
+        FcVerifiedMeshContext? verifiedContext,
+        bool allowUnknownOptionalPublishedListMembers = false)
     {
         if (envelope is null)
             return FcValidationResult.Invalid("Envelope is null.");
@@ -251,7 +274,11 @@ public sealed class FcWorldStore
             return payloadFuture;
         try
         {
-            return _validator.Validate(envelope, payload, verifiedContext);
+            return _validator.Validate(
+                envelope,
+                payload,
+                verifiedContext,
+                allowUnknownOptionalPublishedListMembers);
         }
         catch (Exception exception)
         {
@@ -290,6 +317,19 @@ public sealed class FcWorldStore
     public FcHlcTimestamp? GetChestHlc(string ownerAuthorId)
         => _registerHlcs.TryGetValue(ownerAuthorId + "/chest", out var value) ? value : null;
 
+    public FcHlcTimestamp? GetChestLocationHlc(string ownerAuthorId)
+        => _registerHlcs.TryGetValue(ownerAuthorId + "/fc-chest-location", out var value) ? value : null;
+
+    public FcHlcTimestamp? GetCapabilityRequestHlc(string ownerAuthorId, Guid requestId)
+        => _registerHlcs.TryGetValue(ownerAuthorId + "/request/" + requestId.ToString("D"), out var value)
+            ? value
+            : null;
+
+    public FcHlcTimestamp? GetCapabilityResponseHlc(string ownerAuthorId, Guid requestId)
+        => _registerHlcs.TryGetValue(ownerAuthorId + "/response/" + requestId.ToString("D"), out var value)
+            ? value
+            : null;
+
     public IEnumerable<PublishedListRecord> PublishedListsFor(string ownerAuthorId)
         => _lists.Values.Where(value => value.Header.OwnerAuthorId == ownerAuthorId);
 
@@ -302,6 +342,7 @@ public sealed class FcWorldStore
             .Concat(_chests.Values)
             .Concat(_requests.Values)
             .Concat(_responses.Values)
+            .Concat(_chestLocations.Values)
             .Concat(_transfers.Values);
 
     private FcValidationResult CheckFutureDelta(FcHlcTimestamp hlc)
@@ -370,6 +411,7 @@ public sealed class FcWorldStore
             ChestSnapshotRecord value => ApplyRegister(value, ChestKey(value), _chests, envelope),
             CapabilityRequestRecord value => ApplyRegister(value, RequestKey(value), _requests, envelope),
             CapabilityResponseRecord value => ApplyRegister(value, ResponseKey(value), _responses, envelope),
+            FcEstateChestLocationRecord value => ApplyRegister(value, ChestLocationKey(value), _chestLocations, envelope),
             FcInventoryTransferRecord value => ApplyTransfer(value, envelope),
             _ => FcApplyResult.Reject(_revision, "Unsupported record type.")
         };
@@ -824,6 +866,8 @@ public sealed class FcWorldStore
             return response;
         if (_transfers.TryGetValue(key, out var transfer))
             return transfer;
+        if (_chestLocations.TryGetValue(key, out var location))
+            return location;
         return null;
     }
 
@@ -903,6 +947,7 @@ public sealed class FcWorldStore
             CapabilityRequestRecord value => value.Header,
             CapabilityResponseRecord value => value.Header,
             FcInventoryTransferRecord value => value.Header,
+            FcEstateChestLocationRecord value => value.Header,
             _ => null,
         };
 
@@ -928,6 +973,7 @@ public sealed class FcWorldStore
             CapabilityRequestRecord request => IsForked(RequestKey(request)),
             CapabilityResponseRecord response => IsForked(ResponseKey(response)),
             FcInventoryTransferRecord transfer => IsForked(TransferKey(transfer)),
+            FcEstateChestLocationRecord location => IsForked(ChestLocationKey(location)),
             _ => false,
         };
 
@@ -937,6 +983,7 @@ public sealed class FcWorldStore
     private static string RequestKey(CapabilityRequestRecord value) => value.Header.OwnerAuthorId + "/request/" + value.RequestId.ToString("D");
     private static string ResponseKey(CapabilityResponseRecord value) => value.Header.OwnerAuthorId + "/response/" + value.RequestId.ToString("D");
     private static string TransferKey(FcInventoryTransferRecord value) => value.Header.OwnerAuthorId + "/transfer/" + value.OperationId.ToString("D");
+    private static string ChestLocationKey(FcEstateChestLocationRecord value) => value.Header.OwnerAuthorId + "/fc-chest-location";
 
     private static string HashBytes(byte[] bytes)
         => Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();

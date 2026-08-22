@@ -909,12 +909,64 @@ public partial class Interface
 
             if (probe.State == FcChestProbeState.Prepared)
             {
-                var armed = probe.IsArmed;
-                if (ImGui.Checkbox("Arm physical transfer", ref armed))
-                    probe.SetArmed(armed);
+                if (!probe.IsArmed)
+                {
+                    if (ImGui.Button("Arm physical transfer"))
+                    {
+                        GatherBuddy.Log.Information(
+                            $"[FcChestProbe] Arm button activated: requested=true, state={probe.State}, armed={probe.IsArmed}, prepared={probe.Preparation is not null}.");
+                        var accepted = probe.SetArmed(true);
+                        if (accepted)
+                        {
+                            GatherBuddy.Log.Debug(
+                                $"[FcChestProbe] Arm request accepted: state={probe.State}, armed={probe.IsArmed}, prepared={probe.Preparation is not null}.");
+                        }
+                        else
+                        {
+                            GatherBuddy.Log.Warning(
+                                $"[FcChestProbe] Arm request rejected: state={probe.State}, armed={probe.IsArmed}, prepared={probe.Preparation is not null}.");
+                        }
+                    }
+                }
+                else
+                {
+                    ImGui.TextColored(new Vector4(1f, 0.25f, 0.1f, 1f),
+                        "ARMED: one withdrawal and return deposit authorized");
 
-                if (ImGui.Button("Execute withdrawal + deposit"))
-                    probe.RequestExecute();
+                    if (ImGui.Button("Disarm physical transfer"))
+                    {
+                        GatherBuddy.Log.Information(
+                            $"[FcChestProbe] Disarm button activated: requested=false, state={probe.State}, armed={probe.IsArmed}, prepared={probe.Preparation is not null}.");
+                        var accepted = probe.SetArmed(false);
+                        if (accepted)
+                        {
+                            GatherBuddy.Log.Debug(
+                                $"[FcChestProbe] Disarm request accepted: state={probe.State}, armed={probe.IsArmed}, prepared={probe.Preparation is not null}.");
+                        }
+                        else
+                        {
+                            GatherBuddy.Log.Warning(
+                                $"[FcChestProbe] Disarm request rejected: state={probe.State}, armed={probe.IsArmed}, prepared={probe.Preparation is not null}.");
+                        }
+                    }
+
+                    if (ImGui.Button("Execute withdrawal + deposit"))
+                    {
+                        GatherBuddy.Log.Information(
+                            $"[FcChestProbe] Execute button activated: state={probe.State}, armed={probe.IsArmed}, prepared={probe.Preparation is not null}.");
+                        var accepted = probe.RequestExecute();
+                        if (accepted)
+                        {
+                            GatherBuddy.Log.Debug(
+                                $"[FcChestProbe] Execute request accepted: state={probe.State}, armed={probe.IsArmed}, prepared={probe.Preparation is not null}.");
+                        }
+                        else
+                        {
+                            GatherBuddy.Log.Warning(
+                                $"[FcChestProbe] Execute request rejected: state={probe.State}, armed={probe.IsArmed}, prepared={probe.Preparation is not null}.");
+                        }
+                    }
+                }
             }
 
             if (probe.State is FcChestProbeState.Withdrawing

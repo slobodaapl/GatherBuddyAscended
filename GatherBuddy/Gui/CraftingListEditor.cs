@@ -93,6 +93,10 @@ public class CraftingListEditor
     private DateTime _lastAcquisitionRefresh = DateTime.MinValue;
     private bool _acquisitionEstimateDirty = true;
     private bool _acquisitionEstimateLoading;
+    private Task<CraftingAcquisitionService.Evaluation>? _acquisitionEstimateTask;
+    private CancellationTokenSource? _acquisitionEstimateCancellationSource;
+    private long _acquisitionEstimateGeneration;
+    private long _acquisitionEstimateTaskGeneration;
     private string _acquisitionStatus = string.Empty;
     private static readonly TimeSpan AcquisitionEstimateTtl = TimeSpan.FromMinutes(15);
     private const double InventoryRefreshIntervalSeconds = 0.5;
@@ -213,7 +217,7 @@ public class CraftingListEditor
     {
         Volatile.Write(ref _queueCache, null);
         Interlocked.Increment(ref _queueGenerationVersion);
-        _acquisitionEstimateDirty = true;
+        InvalidateAcquisitionEstimate();
     }
 
     private void PublishMaterialCache(MaterialCacheSnapshot snapshot)
@@ -250,6 +254,7 @@ public class CraftingListEditor
     public void Dispose()
     {
         Dalamud.GameInventory.InventoryChanged -= OnInventoryChanged;
+        DisposeAcquisitionEstimate();
         _queueCancellationSource?.Cancel();
         _queueCancellationSource?.Dispose();
         _materialsCancellationSource?.Cancel();
@@ -261,7 +266,7 @@ public class CraftingListEditor
         _cachedInventorySplitCounts.Clear();
         _inventoryRefreshTimes.Clear();
         InvalidateRetainerSnapshot();
-        _acquisitionEstimateDirty = true;
+        InvalidateAcquisitionEstimate();
     }
 
     internal void RefreshFromExternalListChange()
@@ -397,7 +402,7 @@ public class CraftingListEditor
         // Inventory changes alter dependency deficits even when the changed
         // item is a leaf material rather than a final or precraft result.
         // Keep acquisition estimates synchronized with manual purchases.
-        _acquisitionEstimateDirty = true;
+        InvalidateAcquisitionEstimate();
 
         if (!graphAffected && !planningList.SkipIfEnough)
             return;
@@ -931,14 +936,170 @@ public class CraftingListEditor
 
     private void SaveAcquisitionSettings()
     {
-        _acquisitionEstimateDirty = true;
+        InvalidateAcquisitionEstimate();
         GatherBuddy.CraftingListManager.SaveList(_list);
+    }
+
+    private void InvalidateAcquisitionEstimate()
+    {
+        _acquisitionEstimateDirty = true;
+        Interlocked.Increment(ref _acquisitionEstimateGeneration);
+        _acquisitionEstimateCancellationSource?.Cancel();
+    }
+
+    private static void ObserveAcquisitionEstimateTask(Task task)
+    {
+        if (task.IsFaulted)
+            _ = task.Exception;
+    }
+
+    private void DisposeAcquisitionEstimate()
+    {
+        var task = _acquisitionEstimateTask;
+        var cancellationSource = _acquisitionEstimateCancellationSource;
+        _acquisitionEstimateTask = null;
+        _acquisitionEstimateCancellationSource = null;
+
+        cancellationSource?.Cancel();
+        if (task == null || task.IsCompleted)
+        {
+            if (task != null)
+                ObserveAcquisitionEstimateTask(task);
+            cancellationSource?.Dispose();
+            return;
+        }
+
+        _ = task.ContinueWith(
+            completed =>
+            {
+                ObserveAcquisitionEstimateTask(completed);
+                cancellationSource?.Dispose();
+            },
+            CancellationToken.None,
+            TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
+    }
+
+    private void ApplyAcquisitionEstimateFailure(Exception exception)
+    {
+        if (exception is OperationCanceledException)
+        {
+            _acquisitionEstimateLoading = false;
+            return;
+        }
+
+        _acquisitionEstimateDirty = false;
+        _acquisitionEstimateLoading = false;
+        _acquisitionStatus = $"Acquisition estimate unavailable: {exception.Message}";
+        _acquisitionPlanningResult = null;
+        _managedMarketplaceProjection = null;
+        _marketplacePurchaseReasons = new Dictionary<uint, MarketplacePurchaseReason>();
+        GatherBuddy.Log.Warning($"[CraftingListEditor] Acquisition estimate failed: {exception}");
+    }
+
+    private void ConsumeAcquisitionEstimate()
+    {
+        var task = _acquisitionEstimateTask;
+        if (task == null || !task.IsCompleted)
+            return;
+
+        var taskGeneration = _acquisitionEstimateTaskGeneration;
+        var cancellationSource = _acquisitionEstimateCancellationSource;
+        _acquisitionEstimateTask = null;
+        _acquisitionEstimateCancellationSource = null;
+
+        try
+        {
+            if (task.IsCanceled)
+            {
+                _acquisitionEstimateLoading = false;
+                return;
+            }
+
+            if (task.IsFaulted)
+            {
+                var exception = task.Exception?.GetBaseException();
+                if (taskGeneration == Volatile.Read(ref _acquisitionEstimateGeneration))
+                    ApplyAcquisitionEstimateFailure(exception ?? new InvalidOperationException("Acquisition estimate task failed."));
+                else
+                    _acquisitionEstimateLoading = false;
+                return;
+            }
+
+            var evaluation = task.GetAwaiter().GetResult();
+            if (taskGeneration != Volatile.Read(ref _acquisitionEstimateGeneration))
+            {
+                _acquisitionEstimateLoading = false;
+                return;
+            }
+
+            try
+            {
+                _acquisitionEstimateDirty = false;
+                _acquisitionEstimateLoading = evaluation.IsLoading;
+                _acquisitionStatus = evaluation.Status;
+                _acquisitionPlanningResult = evaluation.Planning;
+                _marketplacePurchaseReasons = BuildMarketplacePurchaseReasons(
+                    evaluation,
+                    _list.PreferMarketForSpecialCurrency);
+                _managedMarketplaceProjection = evaluation.Planning == null
+                    ? null
+                    : GatherBuddy.MarketplaceBuyListManager?.CreateManagedList(
+                        evaluation.Planning,
+                        new LiveAcquisitionOptions
+                        {
+                            CurrentWorldOnly = _list.CurrentWorldOnly,
+                            PreferHQ = _list.PreferHQ,
+                            PreferVendors = _list.PreferVendors,
+                            PreferMarketForSpecialCurrency = _list.PreferMarketForSpecialCurrency,
+                            MaximumGilSpend = _list.MaximumGilSpend,
+                        });
+            }
+            catch (Exception exception)
+            {
+                ApplyAcquisitionEstimateFailure(exception);
+            }
+        }
+        finally
+        {
+            ObserveAcquisitionEstimateTask(task);
+            cancellationSource?.Dispose();
+        }
+    }
+
+    private void StartAcquisitionEstimate(long generation)
+    {
+        CancellationTokenSource? cancellationSource = null;
+        try
+        {
+            var planningSnapshot = CreatePlanningSnapshot();
+            cancellationSource = new CancellationTokenSource();
+            var token = cancellationSource.Token;
+            var task = GatherBuddy.RunOnFrameworkThreadAsync(
+                () => CraftingAcquisitionService.Evaluate(
+                    CraftingExecutionPlan.Create(planningSnapshot)),
+                token);
+
+            _acquisitionEstimateTask = task;
+            _acquisitionEstimateCancellationSource = cancellationSource;
+            _acquisitionEstimateTaskGeneration = generation;
+            _acquisitionEstimateLoading = true;
+            cancellationSource = null;
+        }
+        catch (Exception exception)
+        {
+            cancellationSource?.Dispose();
+            ApplyAcquisitionEstimateFailure(exception);
+        }
     }
 
     private void RefreshAcquisitionEstimate()
     {
+        ConsumeAcquisitionEstimate();
+
         if (!_list.AutoPurchaseBlockedDependencies)
         {
+            _acquisitionEstimateCancellationSource?.Cancel();
             _acquisitionPlanningResult = null;
             _managedMarketplaceProjection = null;
             _marketplacePurchaseReasons = new Dictionary<uint, MarketplacePurchaseReason>();
@@ -952,43 +1113,13 @@ public class CraftingListEditor
             && !_acquisitionEstimateLoading
             && now - _lastAcquisitionRefresh < AcquisitionEstimateTtl)
             return;
+        if (_acquisitionEstimateTask != null)
+            return;
         if ((now - _lastAcquisitionRefresh).TotalSeconds < 1)
             return;
         _lastAcquisitionRefresh = now;
 
-        try
-        {
-            var evaluation = CraftingAcquisitionService.Evaluate(CraftingExecutionPlan.Create(_list));
-            _acquisitionEstimateDirty = false;
-            _acquisitionEstimateLoading = evaluation.IsLoading;
-            _acquisitionStatus = evaluation.Status;
-            _acquisitionPlanningResult = evaluation.Planning;
-            _marketplacePurchaseReasons = BuildMarketplacePurchaseReasons(
-                evaluation,
-                _list.PreferMarketForSpecialCurrency);
-            _managedMarketplaceProjection = evaluation.Planning == null
-                ? null
-                : GatherBuddy.MarketplaceBuyListManager?.CreateManagedList(
-                    evaluation.Planning,
-                    new LiveAcquisitionOptions
-                    {
-                        CurrentWorldOnly = _list.CurrentWorldOnly,
-                        PreferHQ = _list.PreferHQ,
-                        PreferVendors = _list.PreferVendors,
-                        PreferMarketForSpecialCurrency = _list.PreferMarketForSpecialCurrency,
-                        MaximumGilSpend = _list.MaximumGilSpend,
-                    });
-        }
-        catch (Exception ex)
-        {
-            _acquisitionEstimateDirty = false;
-            _acquisitionEstimateLoading = false;
-            _acquisitionStatus = $"Acquisition estimate unavailable: {ex.Message}";
-            _acquisitionPlanningResult = null;
-            _managedMarketplaceProjection = null;
-            _marketplacePurchaseReasons = new Dictionary<uint, MarketplacePurchaseReason>();
-            GatherBuddy.Log.Warning($"[CraftingListEditor] Acquisition estimate failed: {ex.Message}");
-        }
+        StartAcquisitionEstimate(Volatile.Read(ref _acquisitionEstimateGeneration));
     }
 
     private void DrawAcquisitionEstimates()

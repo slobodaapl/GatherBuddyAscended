@@ -5,6 +5,7 @@ using System.Text;
 using System.Threading;
 using System.Threading.Channels;
 using System.Threading.Tasks;
+using GatherBuddy.FcMesh.Chest;
 using GatherBuddy.FcMesh.Fulfillment;
 using GatherBuddy.FcMesh.Native;
 using GatherBuddy.FcMesh.Protocol;
@@ -416,6 +417,7 @@ public sealed class FcWorkerSessionService : IDisposable
                     Selection = selection,
                     DependencyClosure = closure.OrderBy(key => key).ToArray(),
                     LedgerRecovery = _ledger.ExportRecovery(selection),
+                    ObservedAtomicTransfers = Array.Empty<FcObservedAtomicTransfer>(),
                     CleanShutdown = false,
                     ExplicitUnsubscribed = false,
                     LastError = string.Empty,
@@ -651,6 +653,25 @@ public sealed class FcWorkerSessionService : IDisposable
                 || transfer.SessionId != _state.SessionId
                 || transfer.SessionGeneration != _state.SessionGeneration)
                 return FcWorkerSessionResult.Blocked("Atomic transfer does not belong to the local worker session.");
+            var transferHash = FcCanonical.SemanticHash(transfer);
+            var priorObservation = (_state.ObservedAtomicTransfers ?? Array.Empty<FcObservedAtomicTransfer>())
+                .FirstOrDefault(observation => observation.OperationId == transfer.OperationId);
+            if (priorObservation is not null)
+            {
+                if (!string.Equals(priorObservation.TransferSemanticHash, transferHash, StringComparison.Ordinal))
+                    return FcWorkerSessionResult.Blocked(
+                        "Atomic transfer operation ID was previously observed with conflicting evidence.");
+                return new(
+                    true,
+                    "Atomic transfer observation was already applied locally.",
+                    FcWorkerSessionCommandStatus.AcceptedByNative,
+                    transfer.WorkerAfter.Header.Revision,
+                    transfer.SessionId,
+                    transfer.SessionGeneration);
+            }
+            if ((_state.ObservedAtomicTransfers?.Length ?? 0) >= MaxLogicalEntries)
+                return FcWorkerSessionResult.Blocked(
+                    "Atomic transfer observation ledger is exhausted for this worker session.");
             if (_accepted is { } previous
                 && transfer.WorkerAfter.Header.Revision < previous.Header.Revision)
                 return FcWorkerSessionResult.Blocked("Older atomic worker-after state was already accepted.");
@@ -694,6 +715,9 @@ public sealed class FcWorkerSessionService : IDisposable
                 UseOwnStock = desired.UseOwnStock,
                 Selection = desired.Selection,
                 DependencyClosure = _dependencyClosure.OrderBy(key => key).ToArray(),
+                ObservedAtomicTransfers = (_state.ObservedAtomicTransfers ?? Array.Empty<FcObservedAtomicTransfer>())
+                    .Append(new FcObservedAtomicTransfer(transfer.OperationId, transferHash))
+                    .ToArray(),
                 LastCommunicationUnixMilliseconds = _clock.UnixMilliseconds,
                 NextRefreshUnixMilliseconds = desired.State == FcWorkerState.Unsubscribed
                     ? 0
@@ -721,6 +745,191 @@ public sealed class FcWorkerSessionService : IDisposable
                 transfer.WorkerAfter.Header.Revision,
                 transfer.SessionId,
                 transfer.SessionGeneration);
+        }
+    }
+
+    /// <summary>
+    /// Validates a duplicate transfer against the complete nested worker-after
+    /// evidence. If this operation was observed before, its durable semantic
+    /// hash is authoritative. Otherwise derive the expected worker-after from
+    /// the still-pending pre-operation session and compare the complete
+    /// transfer, including both nested registers and all their headers, before
+    /// allowing the publication fast path to continue.
+    /// </summary>
+    public bool MatchesExistingAtomicTransfer(
+        FcInventoryTransferRecord existing,
+        FcAtomicTransferCommit commit)
+    {
+        if (existing is null || commit is null || existing.WorkerAfter is null)
+            return false;
+        var existingHash = FcCanonical.SemanticHash(existing);
+        lock (_gate)
+        {
+            var priorObservation = (_state.ObservedAtomicTransfers ?? Array.Empty<FcObservedAtomicTransfer>())
+                .FirstOrDefault(observation => observation.OperationId == existing.OperationId);
+            if (priorObservation is not null)
+                return string.Equals(priorObservation.TransferSemanticHash, existingHash, StringComparison.Ordinal);
+        }
+
+        var derived = BuildAtomicTransferRecord(
+            commit,
+            existing.Header.Revision,
+            out var expected,
+            existing.ChestAfter.Header.Revision);
+        return derived.Accepted
+            && FcCanonical.SemanticHash(expected) == existingHash;
+    }
+
+    /// <summary>
+    /// Builds the nested worker-after state for one already-reconciled
+    /// physical transfer. The caller must reserve/persist the outer transfer
+    /// operation before dispatch; this method only derives an absolute
+    /// worker-after candidate and does not enqueue a second worker Put.
+    /// </summary>
+    public FcWorkerSessionResult BuildAtomicTransferRecord(
+        FcAtomicTransferCommit commit,
+        ulong transferRevision,
+        out FcInventoryTransferRecord transfer,
+        ulong? chestAfterRevision = null)
+    {
+        transfer = null!;
+        if (commit is null || commit.OperationId == Guid.Empty || commit.SessionId == Guid.Empty
+            || commit.SessionGeneration == 0 || transferRevision == 0
+            || commit.ActualTransferred is null || commit.ChestAfter is null)
+            return FcWorkerSessionResult.Blocked("Atomic transfer commit evidence is incomplete.");
+        lock (_gate)
+        {
+            if (_forked || IsWorkerForkedLocked())
+                return FcWorkerSessionResult.Blocked("Worker register is forked; atomic transfer construction is blocked.");
+            if (_desired is not { State: FcWorkerState.Active or FcWorkerState.Waiting } desired
+                || desired.SessionId != commit.SessionId
+                || desired.SessionGeneration != commit.SessionGeneration)
+                return FcWorkerSessionResult.Blocked("Atomic transfer does not belong to the current subscribed worker session.");
+
+            // A recovered operation carries the complete worker register that
+            // was reserved before the game boundary.  The current desired
+            // register may have advanced while the process was down; never
+            // copy those later fields into a recovery record or silently
+            // overwrite them with a stale physical delta.
+            var workerBefore = commit.WorkerBefore;
+            if (workerBefore is not null)
+            {
+                if (workerBefore.SessionId != commit.SessionId
+                    || workerBefore.SessionGeneration != commit.SessionGeneration
+                    || workerBefore.State is not (FcWorkerState.Active or FcWorkerState.Waiting)
+                    || !IsOwnWorkerLocked(workerBefore)
+                    || FcCanonical.SemanticHash(workerBefore) != FcCanonical.SemanticHash(desired))
+                    return BlockRecoveryLocked(
+                        "Atomic transfer worker baseline conflicts with the current logical worker register.");
+                if (commit.WorkerHeldBefore is not null
+                    && !workerBefore.HeldInventoryMap.Equals(commit.WorkerHeldBefore))
+                    return BlockRecoveryLocked(
+                        "Atomic transfer worker baseline held map conflicts with its complete worker prestate.");
+            }
+            else if (commit.WorkerHeldBefore is not null
+                && !desired.HeldInventoryMap.Equals(commit.WorkerHeldBefore))
+            {
+                return BlockRecoveryLocked(
+                    "Atomic transfer worker held baseline conflicts with the current logical worker register.");
+            }
+
+            if (workerBefore is not null
+                && _accepted is { } accepted
+                && accepted.Header.Revision >= workerBefore.Header.Revision
+                && FcCanonical.SemanticHash(accepted) != FcCanonical.SemanticHash(workerBefore))
+                return BlockRecoveryLocked(
+                    "Atomic transfer worker baseline was superseded by an accepted logical publish.");
+
+            var baseline = workerBefore ?? desired;
+            var previous = workerBefore?.HeldInventoryMap
+                ?? commit.WorkerHeldBefore
+                ?? desired.HeldInventoryMap;
+            if (commit.Kind == FcInventoryTransferKind.Deposit
+                && commit.ActualTransferred.Entries.Any(entry => previous.Get(entry.Key) < entry.Quantity))
+                return workerBefore is not null
+                    ? BlockRecoveryLocked("Atomic deposit exceeds the journaled worker held contribution.")
+                    : FcWorkerSessionResult.Blocked("Atomic deposit exceeds the worker's represented held contribution.");
+            FcItemQuantityMap held;
+            try
+            {
+                held = commit.Kind == FcInventoryTransferKind.Withdraw
+                    ? previous.Add(commit.ActualTransferred)
+                    : previous.SubtractClamped(commit.ActualTransferred);
+            }
+            catch (Exception exception)
+            {
+                return FcWorkerSessionResult.Blocked(
+                    $"Atomic transfer worker held map could not be derived: {exception.Message}");
+            }
+            var workerRevision = Math.Max(
+                Math.Max(_state.LastReservedRevision, ReplicaRevisionLocked()),
+                Math.Max(
+                    baseline.Header.Revision,
+                    Math.Max(
+                        _accepted?.Header.Revision ?? 0,
+                        _state.PendingWorker?.Header.Revision ?? 0)));
+            if (workerRevision == ulong.MaxValue)
+                return BlockRevisionLocked("Worker revision is exhausted; atomic transfer construction is blocked.");
+            workerRevision++;
+            var author = _state.AuthorId;
+            var chestRevision = chestAfterRevision
+                ?? (_transport.WorldStore?.RevisionHighWater
+                    .GetValueOrDefault(author + "/chest") ?? 0);
+            if (chestAfterRevision is null)
+            {
+                if (chestRevision == ulong.MaxValue)
+                    return BlockRevisionLocked("Chest revision is exhausted; atomic transfer construction is blocked.");
+                chestRevision++;
+            }
+            else if (chestRevision == 0)
+                return FcWorkerSessionResult.Blocked("Chest revision is unavailable; atomic transfer construction is blocked.");
+            var chestAfter = commit.ChestAfter with
+            {
+                Header = commit.ChestAfter.Header with
+                {
+                    ProtocolVersion = FcProtocolVersion.Current,
+                    SchemaVersion = FcProtocolVersion.CurrentSchema,
+                    RecordType = FcRecordTypes.ChestSnapshot,
+                    OwnerAuthorId = author,
+                    Revision = chestRevision,
+                },
+            };
+            var workerAfter = baseline with
+            {
+                Header = baseline.Header with
+                {
+                    ProtocolVersion = FcProtocolVersion.Current,
+                    SchemaVersion = FcProtocolVersion.CurrentSchema,
+                    RecordType = FcRecordTypes.WorkerSession,
+                    OwnerAuthorId = author,
+                    Revision = workerRevision,
+                },
+                HeldInventory = held.Entries,
+            };
+            transfer = new FcInventoryTransferRecord(
+                new FcRecordHeader(
+                    FcProtocolVersion.Current,
+                    FcProtocolVersion.CurrentSchema,
+                    FcRecordTypes.InventoryTransfer,
+                    commit.OperationId,
+                    author,
+                    transferRevision),
+                commit.OperationId,
+                commit.SessionId,
+                commit.SessionGeneration,
+                commit.PurposeListId,
+                commit.Kind,
+                commit.Outcome,
+                commit.ActualTransferred.Entries,
+                chestAfter,
+                workerAfter);
+            return new(
+                true,
+                "Atomic transfer record derived from the current worker register.",
+                FcWorkerSessionCommandStatus.Pending,
+                transferRevision,
+                commit.SessionId,
+                commit.SessionGeneration);
         }
     }
 

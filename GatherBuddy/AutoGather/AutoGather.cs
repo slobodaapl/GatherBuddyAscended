@@ -312,6 +312,15 @@ namespace GatherBuddy.AutoGather
 
         public bool CraftOwnedGathering { get; private set; }
 
+        internal bool HasCurrentGatherTarget
+            => _currentGatherTarget.HasValue;
+
+        internal void SetFcGatherTargetOrder(IReadOnlyList<uint>? itemOrder)
+            => _activeItemList.SetFcIntentOrder(itemOrder);
+
+        internal void SetFcGatherIntentProvider(Func<IReadOnlyList<uint>?>? provider)
+            => _activeItemList.SetFcIntentOrderProvider(provider);
+
         public void SetCraftOwnedGathering(bool enabled)
         {
             CraftOwnedGathering = enabled;

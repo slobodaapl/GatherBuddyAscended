@@ -178,6 +178,19 @@ namespace GatherBuddy.AutoGather
         internal IEnumerable<GatherTarget> ItemsToGather
             => _activeItemList;
 
+        internal bool TryGetActiveGatherTarget(out GatherTarget target)
+        {
+            if (_currentGatherTarget is { } current
+                && current.Item is { ItemId: not 0 })
+            {
+                target = current;
+                return true;
+            }
+
+            target = _activeItemList.CurrentOrDefault;
+            return target.Item is { ItemId: not 0 };
+        }
+
         internal bool TryGetCurrentGatherTarget(IGatherable item, uint completionItemId, out GatherTarget target)
             => _activeItemList.TryGetCurrentTarget(item, completionItemId, out target);
 

@@ -6,8 +6,65 @@ on:
       - '*.*.*.*'
 
 jobs:
+  build-gathermesh:
+    name: Build GatherMesh FFI
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build GatherMesh native FFI
+        run: cargo build --locked --release --manifest-path gathermesh/Cargo.toml
+
+      - name: Verify GatherMesh ABI exports and architecture
+        shell: pwsh
+        run: |
+          $dll = (Resolve-Path 'gathermesh/target/release/gathermesh_ffi.dll').Path
+          $dumpbinCommand = (Get-Command dumpbin.exe -ErrorAction SilentlyContinue).Source
+          if (-not $dumpbinCommand) {
+            $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
+            $installation = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+            $dumpbinCommand = (Get-ChildItem (Join-Path $installation 'VC/Tools/MSVC/*/bin/Hostx64/x64/dumpbin.exe') | Select-Object -First 1).FullName
+          }
+          if (-not $dumpbinCommand) {
+            throw 'dumpbin.exe is unavailable on the Windows runner.'
+          }
+          $headers = & $dumpbinCommand /headers $dll 2>&1
+          if ($LASTEXITCODE -ne 0 -or $headers -notmatch 'machine \(x64\)') {
+            throw 'GatherMesh FFI is not an x64 PE image.'
+          }
+          $exports = & $dumpbinCommand /exports $dll 2>&1
+          if ($LASTEXITCODE -ne 0) {
+            throw 'dumpbin could not inspect GatherMesh FFI exports.'
+          }
+          foreach ($symbol in @('gbm_abi_version', 'gbm_create', 'gbm_destroy')) {
+            if ($exports -notmatch "\b$symbol\b") {
+              throw "GatherMesh FFI export missing: $symbol"
+            }
+          }
+
+      - name: Upload GatherMesh FFI
+        uses: actions/upload-artifact@v4
+        with:
+          name: gathermesh-native
+          path: gathermesh/target/release/gathermesh_ffi.dll
+          if-no-files-found: error
+
+      - name: Upload GatherMesh symbols
+        uses: actions/upload-artifact@v4
+        with:
+          name: gathermesh-symbols
+          path: gathermesh/target/release/gathermesh_ffi.pdb
+          if-no-files-found: error
+
   build-plugin:
     name: Build .NET plugin
+    needs: build-gathermesh
     runs-on: windows-latest
     steps:
       - name: Checkout repository
@@ -23,6 +80,12 @@ jobs:
       - name: Apply pinned dependency patches
         run: git apply patches/ElliCon-null-safe-hook-status.patch patches/ElliLib-nullable-path-dropped-event.patch
 
+      - name: Download GatherMesh native FFI
+        uses: actions/download-artifact@v4
+        with:
+          name: gathermesh-native
+          path: gathermesh/target/x86_64-pc-windows-msvc/release
+
       - name: Download Dalamud
         run: |
           Invoke-WebRequest -Uri https://goatcorp.github.io/dalamud-distrib/latest.zip -OutFile latest.zip
@@ -33,6 +96,15 @@ jobs:
 
       - name: Build plugin
         run: dotnet build --no-restore -c Release GatherBuddy/GatherBuddy.csproj -p:AssemblyVersion=${{ github.ref_name }} -p:FileVersion=${{ github.ref_name }} -p:PackageVersion=${{ github.ref_name }} -p:InformationalVersion=${{ github.ref_name }} --output .\build
+
+      - name: Verify plugin native dependencies and notices
+        shell: pwsh
+        run: |
+          foreach ($file in @('gathermesh_ffi.dll', 'BouncyCastle.Cryptography.dll', 'gathermesh-NOTICE.md')) {
+            if (-not (Test-Path ".\build\$file")) {
+              throw "Plugin output is missing $file."
+            }
+          }
 
       - name: Upload plugin build
         uses: actions/upload-artifact@v4
@@ -65,7 +137,7 @@ jobs:
 
   package:
     name: Package plugin
-    needs: [build-plugin, build-native]
+    needs: [build-plugin, build-native, build-gathermesh]
     runs-on: windows-latest
     steps:
       - name: Download plugin build
@@ -80,10 +152,40 @@ jobs:
           name: native-build
           path: build
 
+      - name: Download GatherMesh native FFI
+        uses: actions/download-artifact@v4
+        with:
+          name: gathermesh-native
+          path: build
+
+      - name: Verify release dependency and notice inputs
+        shell: pwsh
+        run: |
+          foreach ($file in @('gathermesh_ffi.dll', 'BouncyCastle.Cryptography.dll', 'gathermesh-NOTICE.md')) {
+            if (-not (Test-Path ".\build\$file")) {
+              throw "Release package input is missing $file."
+            }
+          }
+
       - name: Create release archive
         run: |
           New-Item -ItemType Directory -Force package | Out-Null
           Compress-Archive -Path .\build\* -DestinationPath .\package\GatherBuddyAscended.zip
+
+      - name: Verify release archive dependencies and notice
+        shell: pwsh
+        run: |
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $archive = [System.IO.Compression.ZipFile]::OpenRead('.\package\GatherBuddyAscended.zip')
+          try {
+            foreach ($file in @('gathermesh_ffi.dll', 'BouncyCastle.Cryptography.dll', 'gathermesh-NOTICE.md')) {
+              if (-not ($archive.Entries | Where-Object { $_.FullName -eq $file })) {
+                throw "Release archive is missing $file."
+              }
+            }
+          } finally {
+            $archive.Dispose()
+          }
 
       - name: Upload release package
         uses: actions/upload-artifact@v4

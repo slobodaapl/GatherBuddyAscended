@@ -31,12 +31,14 @@ using GatherBuddy.Plugin;
 using GatherBuddy.SeFunctions;
 using GatherBuddy.Spearfishing;
 using GatherBuddy.Weather;
+using Lumina.Excel.Sheets;
 using SigScannerWrapper = GatherBuddy.SeFunctions.SigScannerWrapper;
 using ElliLib;
 using ElliLib.Classes;
 using ElliLib.Log;
 using GatherBuddy.AutoGather;
 using GatherBuddy.FcMesh.Chest;
+using GatherBuddy.FcMesh.Capabilities;
 using GatherBuddy.FcMesh.Fulfillment;
 using GatherBuddy.FcMesh.Native;
 using GatherBuddy.FcMesh.Protocol;
@@ -97,6 +99,43 @@ public partial class GatherBuddy : IDalamudPlugin
     public static FcPublishedListService? FcPublishedLists { get; private set; }
     public static FcWorkerSessionService? FcWorkerSessions { get; private set; }
     public static FcChestPublicationService? FcChestPublication { get; private set; }
+    public static FcChestLocationPublicationService? FcChestLocationPublication { get; private set; }
+    public static FcChestCoordinator? FcChestCoordinator { get; private set; }
+    public static FcAtomicTransferPublicationService? FcAtomicTransferPublication { get; private set; }
+    public static FcCapabilityService? FcCapabilities { get; private set; }
+    public static FcFulfillmentController? FcFulfillment { get; private set; }
+    public static FcFulfillmentController? FcFulfillmentController => FcFulfillment;
+
+    /// <summary>
+    /// Narrow test seam for exercising the production FC queue boundary. The
+    /// previous per-character provider is restored when the scope ends.
+    /// </summary>
+    internal static IDisposable PushFcCapabilityServiceForTesting(FcCapabilityService? service)
+    {
+        var previous = FcCapabilities;
+        FcCapabilities = service;
+        return new FcCapabilityServiceTestScope(previous);
+    }
+
+    private sealed class FcCapabilityServiceTestScope : IDisposable
+    {
+        private readonly FcCapabilityService? _previous;
+        private bool _disposed;
+
+        public FcCapabilityServiceTestScope(FcCapabilityService? previous)
+            => _previous = previous;
+
+        public void Dispose()
+        {
+            if (_disposed)
+                return;
+            _disposed = true;
+            FcCapabilities = _previous;
+        }
+    }
+
+    public static FcLiveChestEvidenceProvider FcLiveChestEvidence { get; } = new();
+    public static FcPublicChestNavigator? FcPublicChestNavigation { get; private set; }
     /// <summary>
     /// Developer-only in-memory FC world. It never reaches native mesh,
     /// physical chest interaction, travel, or player inventory.
@@ -142,6 +181,15 @@ public partial class GatherBuddy : IDalamudPlugin
     private string? _fcMeshRuntimeScope;
     private long _fcMeshRuntimeGeneration;
     private Task<FcMeshRuntimeServices?>? _fcMeshServicesTask;
+    private FcMeshNativeCoordinator? _fcReadinessErrorCoordinator;
+    private string? _fcReadinessErrorKey;
+    private FcWorldRevision? _fcLastFulfillmentWorldRevision;
+    private bool? _fcLastFulfillmentConnectivity;
+    private static int _fcLocationRegistrationRequested;
+    private static FcChestLocationPublicationResult? _fcLastLocationRegistrationResult;
+    private static FcPublicChestDestination? _fcPublicRouteRequested;
+    private static int _fcPublicRouteStopRequested;
+    private static FcFulfillmentSessionStartOptions? _fcFulfillmentStartOptions;
 
     internal readonly GatherBuddyIpc Ipc;
     //    internal readonly WotsitIpc Wotsit;
@@ -151,6 +199,7 @@ public partial class GatherBuddy : IDalamudPlugin
         try
         {
             Dalamud.Initialize(pluginInterface);
+            FcPublicChestNavigation = new FcPublicChestNavigator();
             _fcGameVersionProvider = new FcGameVersionProvider(
                 Dalamud.PluginInterface.GetType().Assembly.Location);
             Icons.Init(Dalamud.GameData, Dalamud.Textures);
@@ -201,7 +250,9 @@ public partial class GatherBuddy : IDalamudPlugin
             LiveAcquisitionExecutor = null;
             CraftingGameInterop.Initialize();
             CraftingGatherBridge.Initialize(this);
+            CraftingGatherBridge.FcGatherYieldObserved += OnFcGatherYieldObserved;
             CraftingGameInterop.CraftFinished += (recipe, cancelled) => CraftingGatherBridge.OnCraftFinished(recipe, cancelled);
+            CraftingGameInterop.CraftFinished += OnFcCraftFinished;
             
             Task.Run(() =>
             {
@@ -489,7 +540,9 @@ public partial class GatherBuddy : IDalamudPlugin
         var scope = CurrentFcCharacterScope();
         if (scope is null)
         {
-            if (FcMeshNative is not null || FcPublishedLists is not null || FcWorkerSessions is not null)
+            if (FcMeshNative is not null || FcPublishedLists is not null || FcWorkerSessions is not null
+                || FcChestLocationPublication is not null || FcChestCoordinator is not null
+                || FcFulfillment is not null || FcCapabilities is not null)
                 DisposeFcMeshRuntime();
             return;
         }
@@ -507,8 +560,11 @@ public partial class GatherBuddy : IDalamudPlugin
                     Encoding.UTF8.GetBytes(scope));
                 if (!result.Succeeded)
                 {
+                    var startupReason = coordinator.Diagnostics.LastError;
                     coordinator.Dispose();
-                    Log.Warning($"Failed to initialize FC mesh service for character scope: {result.ErrorCode}.");
+                    if (string.IsNullOrWhiteSpace(startupReason))
+                        startupReason = result.ErrorCode.ToString();
+                    Log.Warning($"Failed to initialize FC mesh service for character scope: {result.ErrorCode}: {startupReason}.");
                     return;
                 }
                 FcMeshNative = coordinator;
@@ -522,7 +578,39 @@ public partial class GatherBuddy : IDalamudPlugin
         }
 
         FcMeshNative?.Tick(TimeSpan.FromMilliseconds(2));
+        LogFcMeshReadinessErrorIfNeeded();
         TryInstallFcMeshServices();
+    }
+
+    private void LogFcMeshReadinessErrorIfNeeded()
+    {
+        var coordinator = FcMeshNative;
+        if (coordinator is null)
+        {
+            _fcReadinessErrorCoordinator = null;
+            _fcReadinessErrorKey = null;
+            return;
+        }
+
+        var diagnostics = coordinator.Diagnostics;
+        if (diagnostics.ReadinessState != FcMeshReadinessState.Error)
+        {
+            _fcReadinessErrorCoordinator = null;
+            _fcReadinessErrorKey = null;
+            return;
+        }
+
+        var error = diagnostics.LastError;
+        var key = string.IsNullOrWhiteSpace(error) ? string.Empty : error;
+        if (ReferenceEquals(_fcReadinessErrorCoordinator, coordinator)
+            && string.Equals(_fcReadinessErrorKey, key, StringComparison.Ordinal))
+            return;
+
+        _fcReadinessErrorCoordinator = coordinator;
+        _fcReadinessErrorKey = key;
+        Log.Warning(string.IsNullOrWhiteSpace(error)
+            ? "FC mesh entered a readiness error state."
+            : $"FC mesh entered a readiness error state: {error}");
     }
 
     private void TryInstallFcMeshServices()
@@ -547,7 +635,43 @@ public partial class GatherBuddy : IDalamudPlugin
                 {
                     FcPublishedLists = services.PublishedLists;
                     FcChestPublication = services.ChestPublication;
+                    FcChestLocationPublication = services.ChestLocationPublication;
                     FcWorkerSessions = services.WorkerSessions;
+                    FcCapabilities = services.Capabilities;
+                    FcAtomicTransferPublication = new FcAtomicTransferPublicationService(
+                        new FcMeshNativePublicationTransport(services.Native),
+                        services.WorkerSessions,
+                        () => services.Scope,
+                        () => services.Native.LocalAuthorId,
+                        () => new FcCompatibilityContext(
+                            FcPublishedListMapper.CurrentPlannerSemanticsVersion,
+                            CurrentFcGameVersion() ?? string.Empty));
+                    FcChestCoordinator = CreateFcChestCoordinator(services);
+                    var projection = new FcWorldProjection(services.Native.WorldStore);
+                    var installedServices = services;
+                    FcFulfillment = new FcFulfillmentController(
+                        installedServices.WorkerSessions,
+                        FcChestCoordinator,
+                        new FcLiveFulfillmentRuntime(),
+                        () =>
+                        {
+                            var projected = projection.Build(
+                                FcSystemClock.Instance,
+                                new FcCompatibilityContext(
+                                    FcPublishedListMapper.CurrentPlannerSemanticsVersion,
+                                    CurrentFcGameVersion() ?? string.Empty));
+                            return FcChestCoordinator?.LastSnapshotRecord is { } localChest
+                                ? projection.OverlayChestSnapshot(projected, localChest)
+                                : projected;
+                        },
+                        world => FcFulfillmentPlanner.Build(
+                            world,
+                            installedServices.WorkerSessions.Status,
+                            installedServices.Capabilities),
+                        onCompleted: OnFcFulfillmentCompleted,
+                        sessionStarter: StartFcFulfillmentSession,
+                        sessionRecovery: () => RecoverFcWorkerSession(installedServices),
+                        capabilities: installedServices.Capabilities);
                     services = null;
                 }
                 services?.Dispose();
@@ -572,6 +696,29 @@ public partial class GatherBuddy : IDalamudPlugin
         }
     }
 
+    private unsafe FcChestCoordinator CreateFcChestCoordinator(FcMeshRuntimeServices services)
+    {
+        var projection = new FcWorldProjection(services.Native.WorldStore);
+        var compatibility = new Func<FcCompatibilityContext>(() => new FcCompatibilityContext(
+            FcPublishedListMapper.CurrentPlannerSemanticsVersion,
+            CurrentFcGameVersion() ?? string.Empty));
+        var location = new Func<FcChestLocationProjection>(() =>
+            projection.Build(FcSystemClock.Instance, compatibility()).ChestLocation);
+        var journalStore = new FcFilePendingTransferJournalStore(services.Storage, services.Scope);
+        var atomic = FcAtomicTransferPublication
+            ?? throw new InvalidOperationException("Atomic FC transfer publication was not initialized.");
+        return new FcChestCoordinator(
+            new FcLiveChestAdapter(),
+            new FcLifestreamHousingRouteAdapter(
+                new FcDalamudChestObjectResolver(),
+                FcPublicChestNavigation),
+            new FcPendingTransferJournal(),
+            _ => { FcChestPublication?.PublishCurrentCompleteObservation(); },
+            atomic.Commit,
+            location,
+            journalStore: journalStore);
+    }
+
     private FcMeshRuntimeServices CreateFcMeshServices(
         FcMeshNativeCoordinator coordinator,
         string scope,
@@ -582,7 +729,9 @@ public partial class GatherBuddy : IDalamudPlugin
         var fcPublicationTransport = new FcMeshNativePublicationTransport(coordinator);
         FcPublishedListService? publishedLists = null;
         FcChestPublicationService? chestPublication = null;
+        FcChestLocationPublicationService? chestLocationPublication = null;
         FcWorkerSessionService? workerSessions = null;
+        FcCapabilityService? capabilities = null;
         try
         {
             publishedLists = new FcPublishedListService(
@@ -601,6 +750,14 @@ public partial class GatherBuddy : IDalamudPlugin
                 new FcCompleteChestReader(new FcChestSnapshotReader()),
                 () => scope,
                 () => coordinator.LocalAuthorId);
+            chestLocationPublication = new FcChestLocationPublicationService(
+                new FcFileChestLocationStateStore(storage),
+                fcPublicationTransport,
+                () => scope,
+                () => coordinator.LocalAuthorId,
+                () => new FcCompatibilityContext(
+                    FcPublishedListMapper.CurrentPlannerSemanticsVersion,
+                    CurrentFcGameVersion() ?? string.Empty));
             workerSessions = new FcWorkerSessionService(
                 new FcFileWorkerSessionStateStore(storage),
                 fcPublicationTransport,
@@ -615,17 +772,43 @@ public partial class GatherBuddy : IDalamudPlugin
                 FcSystemClock.Instance,
                 physicalSnapshotProvider: physicalClosure =>
                     FcWorkerPhysicalInventorySnapshot.Capture(physicalClosure));
+            var workerService = workerSessions
+                ?? throw new InvalidOperationException("FC worker session service was not initialized.");
+            var capabilityPublication = new FcCapabilityPublicationService(
+                new FcFileCapabilityPublicationStateStore(storage),
+                fcPublicationTransport,
+                () => scope,
+                () => coordinator.LocalAuthorId,
+                () => new FcCompatibilityContext(
+                    FcPublishedListMapper.CurrentPlannerSemanticsVersion,
+                    CurrentFcGameVersion() ?? string.Empty),
+                () => workerService.Status.Desired?.WorldFingerprint,
+                () => workerService.Status.Desired,
+                RecipeManager.GetCraftingJobIdOrZero);
+            capabilities = new FcCapabilityService(
+                capabilityPublication,
+                () => workerService.Status.Desired,
+                () => new FcCompatibilityContext(
+                    FcPublishedListMapper.CurrentPlannerSemanticsVersion,
+                    CurrentFcGameVersion() ?? string.Empty),
+                () => workerService.Status.Desired?.WorldFingerprint,
+                RecipeManager.GetCraftingJobIdOrZero);
             return new FcMeshRuntimeServices(
                 coordinator,
                 scope,
+                storage,
                 generation,
                 publishedLists,
                 chestPublication,
-                workerSessions);
+                chestLocationPublication,
+                workerService,
+                capabilities);
         }
         catch
         {
             workerSessions?.Dispose();
+            capabilities?.Dispose();
+            chestLocationPublication?.Dispose();
             chestPublication?.Dispose();
             publishedLists?.Dispose();
             throw;
@@ -649,15 +832,43 @@ public partial class GatherBuddy : IDalamudPlugin
                 },
                 TaskScheduler.Default);
         }
+        FcFulfillment?.Dispose();
+        FcFulfillment = null;
         FcWorkerSessions?.Dispose();
         FcWorkerSessions = null;
+        var capabilities = FcCapabilities;
+        FcCapabilities = null;
+        capabilities?.Dispose();
+        FcChestCoordinator?.Dispose();
+        FcChestCoordinator = null;
+        FcAtomicTransferPublication = null;
+        FcChestLocationPublication?.Dispose();
+        FcChestLocationPublication = null;
         FcChestPublication?.Dispose();
         FcChestPublication = null;
         FcPublishedLists?.Dispose();
         FcPublishedLists = null;
         FcMeshNative?.Dispose();
         FcMeshNative = null;
+        _fcReadinessErrorCoordinator = null;
+        _fcReadinessErrorKey = null;
         _fcMeshRuntimeScope = null;
+        _fcLastFulfillmentWorldRevision = null;
+        _fcLastFulfillmentConnectivity = null;
+    }
+
+    private static FcWorkerSessionResult RecoverFcWorkerSession(FcMeshRuntimeServices services)
+    {
+        var worker = services.WorkerSessions.DesiredWorker;
+        if (worker is null)
+            return FcWorkerSessionResult.Blocked("FC worker recovery has no retained worker selection.");
+        var closure = FcWorkerDependencyClosure.Build(
+            services.PublishedLists.PublicLists,
+            worker.Selection);
+        if (!closure.Succeeded)
+            return FcWorkerSessionResult.Blocked(closure.Error);
+        var physical = FcWorkerPhysicalInventorySnapshot.Capture(closure.Keys);
+        return services.WorkerSessions.Recover(physical);
     }
 
     private sealed class FcMeshRuntimeServices : IDisposable
@@ -665,29 +876,40 @@ public partial class GatherBuddy : IDalamudPlugin
         public FcMeshRuntimeServices(
             FcMeshNativeCoordinator native,
             string scope,
+            string storage,
             long generation,
             FcPublishedListService publishedLists,
             FcChestPublicationService chestPublication,
-            FcWorkerSessionService workerSessions)
+            FcChestLocationPublicationService chestLocationPublication,
+            FcWorkerSessionService workerSessions,
+            FcCapabilityService capabilities)
         {
             Native = native;
             Scope = scope;
             Generation = generation;
+            Storage = storage;
             PublishedLists = publishedLists;
             ChestPublication = chestPublication;
+            ChestLocationPublication = chestLocationPublication;
             WorkerSessions = workerSessions;
+            Capabilities = capabilities;
         }
 
         public FcMeshNativeCoordinator Native { get; }
         public string Scope { get; }
+        public string Storage { get; }
         public long Generation { get; }
         public FcPublishedListService PublishedLists { get; }
         public FcChestPublicationService ChestPublication { get; }
+        public FcChestLocationPublicationService ChestLocationPublication { get; }
         public FcWorkerSessionService WorkerSessions { get; }
+        public FcCapabilityService Capabilities { get; }
 
         public void Dispose()
         {
             WorkerSessions.Dispose();
+            Capabilities.Dispose();
+            ChestLocationPublication.Dispose();
             ChestPublication.Dispose();
             PublishedLists.Dispose();
         }
@@ -702,6 +924,136 @@ public partial class GatherBuddy : IDalamudPlugin
             return new FcNativeCallResult((uint)FcNativeErrorCode.InvalidState, 0, 0);
         return FcMeshNative.SetCharacterAuthor(Encoding.UTF8.GetBytes(scope));
     }
+
+    public static FcChestLocationPublicationResult RegisterCurrentFcChestLocation()
+    {
+        if (Dalamud.Framework is null || !Dalamud.Framework.IsInFrameworkUpdateThread)
+            return FcChestLocationPublicationResult.Blocked(
+                "FC chest location evidence must be captured on the Dalamud framework thread; queue a registration request instead.");
+        var publication = FcChestLocationPublication;
+        if (publication is null)
+            return FcChestLocationPublicationResult.Blocked("FC chest location publication is unavailable.");
+        var liveObject = FcLiveChestEvidence.ResolveCurrentTarget();
+        if (!liveObject.Succeeded || liveObject.Object is not { } currentObject)
+            return FcChestLocationPublicationResult.Blocked(liveObject.Error);
+        if (!FcLiveChestEvidence.TryResolveCurrentEnvironment(
+                currentObject,
+                out var environment,
+                out var environmentError))
+            return FcChestLocationPublicationResult.Blocked(environmentError);
+        if (!FcLiveChestEvidence.TryResolveReadyChestAddon(out var addonError))
+            return FcChestLocationPublicationResult.Blocked(addonError);
+        if (!FcLiveChestEvidence.TryResolveCurrentHousingAddress(
+                out var housing,
+                out var originalHouseTerritory,
+                out var housingError))
+            return FcChestLocationPublicationResult.Blocked(housingError);
+        var liveEvidence = new FcCurrentEstateChestEvidence(
+            CurrentFcCharacterScope() is not null,
+            true,
+            housing,
+            environment,
+            currentObject,
+            CurrentFcGameVersion() ?? string.Empty,
+            true,
+            true,
+            true,
+            originalHouseTerritory);
+        var liveCapture = FcChestLocationCapture.Capture(liveEvidence);
+        return liveCapture.Succeeded && liveCapture.Observation is { } liveObservation
+            ? publication.Register(liveObservation)
+            : FcChestLocationPublicationResult.Blocked(liveCapture.Error);
+    }
+
+    public static FcChestLocationPublicationResult? LastFcLocationRegistrationResult
+        => _fcLastLocationRegistrationResult;
+
+    public static bool QueueRegisterCurrentFcChestLocation()
+    {
+        if (FcChestLocationPublication is null)
+        {
+            _fcLastLocationRegistrationResult = FcChestLocationPublicationResult.Blocked(
+                "FC chest location publication is unavailable.");
+            return false;
+        }
+        _fcLastLocationRegistrationResult = new(
+            true,
+            "FC chest location registration queued for the next framework tick.",
+            0,
+            FcChestLocationPublicationStatus.Pending);
+        Interlocked.Exchange(ref _fcLocationRegistrationRequested, 1);
+        return true;
+    }
+
+    public static bool QueueFcPublicChestRoute(FcPublicChestDestination destination)
+    {
+        if (destination is null || FcPublicChestNavigation is null)
+            return false;
+        _fcPublicRouteRequested = destination;
+        Interlocked.Exchange(ref _fcPublicRouteStopRequested, 0);
+        return true;
+    }
+
+    public static void QueueStopFcPublicChestRoute()
+        => Interlocked.Exchange(ref _fcPublicRouteStopRequested, 1);
+
+    public static FcChestLocationPublicationResult UnregisterCurrentFcChestLocation()
+        => FcChestLocationPublication?.Unregister()
+            ?? FcChestLocationPublicationResult.Blocked("FC chest location publication is unavailable.");
+
+    public static bool StartFcFulfillment(
+        IEnumerable<Guid>? selectedListIds = null,
+        bool useOwnStock = false,
+        bool allPublishedLists = true)
+    {
+        if (FcFulfillment is null || FcWorkerSessions is null)
+            return false;
+        var options = new FcFulfillmentSessionStartOptions(
+            allPublishedLists,
+            (selectedListIds ?? Array.Empty<Guid>()).Distinct().OrderBy(id => id).ToArray(),
+            useOwnStock);
+        var status = FcWorkerSessions.Status;
+        if (status.IsSubscribed)
+        {
+            if (status.Desired is not { } desired
+                || !SameFulfillmentSelection(desired.Selection, options.Selection))
+                return false;
+        }
+        else
+            _fcFulfillmentStartOptions = options;
+        return FcFulfillment.Start();
+    }
+
+    public static void StopFcFulfillment()
+        => FcFulfillment?.RequestStop();
+
+    private static FcWorkerSessionResult StartFcFulfillmentSession()
+    {
+        if (FcWorkerSessions is null || FcPublishedLists is null)
+            return FcWorkerSessionResult.Blocked("FC worker/list services are unavailable.");
+        var options = _fcFulfillmentStartOptions
+            ?? new FcFulfillmentSessionStartOptions(true, Array.Empty<Guid>(), false);
+        var closure = FcWorkerDependencyClosure.Build(
+            FcPublishedLists.PublicLists,
+            options.Selection);
+        if (!closure.Succeeded)
+            return FcWorkerSessionResult.Blocked(closure.Error);
+        var physical = FcWorkerPhysicalInventorySnapshot.Capture(closure.Keys);
+        return options.AllPublishedLists
+            ? FcWorkerSessions.StartAll(physical, options.UseOwnStock, closure.Keys)
+            : FcWorkerSessions.StartSelected(options.ListIds, physical, options.UseOwnStock, closure.Keys);
+    }
+
+    private static void OnFcFulfillmentCompleted()
+        => _fcFulfillmentStartOptions = null;
+
+    private static bool SameFulfillmentSelection(
+        FcFulfillmentSelection left,
+        FcFulfillmentSelection right)
+        => left is not null
+            && right is not null
+            && left.AllPublishedLists == right.AllPublishedLists
+            && (left.ListIds ?? Array.Empty<Guid>()).SequenceEqual(right.ListIds ?? Array.Empty<Guid>());
 
     internal static async Task InvalidateMarketplaceMarketDataOnFrameworkThreadAsync(
         uint itemId,
@@ -862,10 +1214,19 @@ public partial class GatherBuddy : IDalamudPlugin
         try
         {
             UpdateFcMeshRuntime();
+            ProcessFcLocationRegistrationRequest();
+            ProcessFcPublicChestRouteRequest();
             FcChestPublication?.ProcessFrameworkCommands();
             FcPublishedLists?.ReconcileAuthoritativeState();
             FcWorkerSessions?.ReconcileAuthoritativeState();
+            FcCapabilities?.Publication.ReconcileAuthoritativeState();
+            if (FcChestCoordinator is null)
+                FcPublicChestNavigation?.Tick();
+            FcChestCoordinator?.Tick();
             FcWorkerSessions?.Tick();
+            FcCapabilities?.Tick();
+            NotifyFcFulfillmentWorldChanges();
+            FcFulfillment?.Tick();
         }
         catch (Exception exception)
         {
@@ -933,6 +1294,78 @@ public partial class GatherBuddy : IDalamudPlugin
         {
             Log.Error($"Error while running auto gather: {e}");
         }
+    }
+
+    private static void ProcessFcLocationRegistrationRequest()
+    {
+        if (Interlocked.Exchange(ref _fcLocationRegistrationRequested, 0) == 0)
+            return;
+        _fcLastLocationRegistrationResult = RegisterCurrentFcChestLocation();
+    }
+
+    private static void ProcessFcPublicChestRouteRequest()
+    {
+        if (Interlocked.Exchange(ref _fcPublicRouteStopRequested, 0) != 0)
+        {
+            if (FcChestCoordinator is not null)
+                FcChestCoordinator.StopSelectedRoute();
+            else
+                FcPublicChestNavigation?.Stop();
+        }
+
+        var destination = _fcPublicRouteRequested;
+        _fcPublicRouteRequested = null;
+        if (destination is null)
+            return;
+        if (FcChestCoordinator is not null)
+        {
+            if (FcChestCoordinator.SelectPublicChestDestination(destination))
+                FcFulfillment?.NotifyWorldChanged(FcFulfillmentReplanReason.ChestSnapshot);
+            return;
+        }
+        FcPublicChestNavigation?.TryStart(destination, out _);
+    }
+
+    private void NotifyFcFulfillmentWorldChanges()
+    {
+        if (FcFulfillment is null || FcMeshNative is null)
+            return;
+        var connectivity = FcMeshNative.Readiness.IsReady;
+        if (_fcLastFulfillmentConnectivity is { } previousConnectivity
+            && previousConnectivity != connectivity)
+            FcFulfillment.NotifyWorldChanged(FcFulfillmentReplanReason.Connectivity);
+        _fcLastFulfillmentConnectivity = connectivity;
+        var revision = FcMeshNative.WorldStore.Revision;
+        if (_fcLastFulfillmentWorldRevision is { } previous
+            && previous.Number == revision.Number
+            && string.Equals(previous.Fingerprint, revision.Fingerprint, StringComparison.Ordinal))
+            return;
+
+        _fcLastFulfillmentWorldRevision = revision;
+        FcFulfillment.NotifyWorldChanged(
+            FcFulfillmentReplanReason.ChestSnapshot
+            | FcFulfillmentReplanReason.Held
+            | FcFulfillmentReplanReason.ExpiryOrUnsubscribe
+            | FcFulfillmentReplanReason.PublishedList
+            | FcFulfillmentReplanReason.Capability
+            | FcFulfillmentReplanReason.Transfer
+            | FcFulfillmentReplanReason.WorkerIntent);
+    }
+
+    private static void OnFcCraftFinished(Recipe? recipe, bool cancelled)
+    {
+        if (!cancelled)
+            FcFulfillment?.NotifyWorldChanged(FcFulfillmentReplanReason.LocalContribution);
+    }
+
+    private static void OnFcGatherYieldObserved(GatherYieldObserved observed)
+    {
+        var sessions = FcWorkerSessions
+            ?? throw new InvalidOperationException("FC gather yield arrived without a worker session service.");
+        var result = new FcGatherYieldPublicationBinding(sessions).Publish(observed);
+        if (!result.Accepted)
+            throw new InvalidOperationException($"FC gather yield was rejected: {result.Message}");
+        FcFulfillment?.NotifyWorldChanged(FcFulfillmentReplanReason.LocalContribution);
     }
 
     void IDisposable.Dispose()
@@ -1029,7 +1462,15 @@ public partial class GatherBuddy : IDalamudPlugin
         ArtisanShim?.Dispose();
         ArtisanShim = null;
         ExpertConditionSampler.Dispose();
+        CraftingGatherBridge.FcGatherYieldObserved -= OnFcGatherYieldObserved;
+        CraftingGameInterop.CraftFinished -= OnFcCraftFinished;
         CraftingGameInterop.Dispose();
+        FcPublicChestNavigation?.Stop();
+        FcPublicChestNavigation = null;
+        Interlocked.Exchange(ref _fcLocationRegistrationRequested, 0);
+        _fcLastLocationRegistrationResult = null;
+        _fcPublicRouteRequested = null;
+        Interlocked.Exchange(ref _fcPublicRouteStopRequested, 0);
         FcChestProbe?.Dispose();
         FcChestProbe = null;
         DisposeFcMeshRuntime();

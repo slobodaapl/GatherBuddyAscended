@@ -6,6 +6,7 @@ using System.Threading.Tasks;
 using Dalamud.Game.ClientState.Conditions;
 using GatherBuddy.Crafting.Acquisition;
 using GatherBuddy.Automation;
+using GatherBuddy.FcMesh.Capabilities;
 using GatherBuddy.Helpers;
 using GatherBuddy.Plugin;
 using GatherBuddy.Vulcan;
@@ -39,6 +40,12 @@ public class CraftingQueueProcessor : IDisposable
         Crafting,
         Failed,
         Complete
+    }
+
+    internal enum FcCraftQueueAdmissionDecision : byte
+    {
+        Admitted,
+        AwaitingCapability,
     }
 
     private QueueState _currentState = QueueState.Idle;
@@ -84,6 +91,7 @@ public class CraftingQueueProcessor : IDisposable
     private string? _jobSwitchFailure;
     private Dictionary<uint, int> _missingIngredientFailures = new();
     private string _pauseReason = string.Empty;
+    private Func<bool>? _fcSynthesisWindowOpenProvider;
 
     private List<CraftingListItem> QueueItems => _executionPlan?.Queue ?? EmptyQueue;
     private Dictionary<uint, int> MaterialTargets => _executionPlan?.Materials ?? EmptyCounts;
@@ -1209,6 +1217,42 @@ public class CraftingQueueProcessor : IDisposable
             return;
         }
 
+        if (_executionPlan?.ExecutionSource == ExecutionSource.FcFulfillment)
+            // The processor index is the immutable completed/in-progress
+            // prefix; only the next unstarted suffix may be advisory-reordered.
+            _ = RefreshFcIntentAtStartBoundary(
+                _executionPlan,
+                _currentQueueIndex,
+                IsSynthesisWindowOpenForQueue);
+
+        // FC recovery may adopt the already-open synthesis without a cached
+        // proof. Every subsequent craft must pass the current capability
+        // service immediately before any consumable, inventory, or game-queue
+        // side effect. Private-list queues retain their existing path.
+        if (_executionPlan?.ExecutionSource == ExecutionSource.FcFulfillment
+            && !IsSynthesisWindowOpenForQueue())
+        {
+            var capabilityDecision = EvaluateFcCraftQueueAdmission(
+                _executionPlan,
+                _currentQueueIndex,
+                proof =>
+                {
+                    if (CraftingGatherBridge.TryPreflightFcQueueAdmission(
+                            ExecutionSource.FcFulfillment,
+                            proof,
+                            global::GatherBuddy.GatherBuddy.FcCapabilities,
+                            out var failure))
+                        return (true, string.Empty);
+                    return (false, failure);
+                },
+                out var capabilityFailure);
+            if (capabilityDecision != FcCraftQueueAdmissionDecision.Admitted)
+            {
+                Pause($"FC capability admission blocked the next craft: {capabilityFailure}");
+                return;
+            }
+        }
+
         if (_consumableDelayUntil != DateTime.MinValue)
         {
             if (DateTime.Now < _consumableDelayUntil)
@@ -1356,6 +1400,96 @@ public class CraftingQueueProcessor : IDisposable
         CraftingGameInterop.StartCraft(recipe.Value, craftQuantity, useQuickSynthesis);
         _currentState = QueueState.Crafting;
         StateChanged?.Invoke(_currentState);
+    }
+
+    /// <summary>
+    /// Managed boundary fixture for the production <see cref="StartNextCraft"/>
+    /// path. It seeds only the queue plan/index; all normal admission guards
+    /// and side-effect ordering remain in <see cref="StartNextCraft"/>.
+    /// </summary>
+    internal void StartNextCraftAtBoundaryForTest(
+        CraftingExecutionPlan executionPlan,
+        int immutablePrefixCount)
+    {
+        ArgumentNullException.ThrowIfNull(executionPlan);
+        _executionPlan = executionPlan;
+        _currentQueueIndex = immutablePrefixCount;
+        _fcSynthesisWindowOpenProvider = static () => false;
+        try
+        {
+            unsafe
+            {
+                StartNextCraft();
+            }
+        }
+        finally
+        {
+            _fcSynthesisWindowOpenProvider = null;
+        }
+    }
+
+    private bool IsSynthesisWindowOpenForQueue()
+        => _fcSynthesisWindowOpenProvider?.Invoke()
+            ?? SynthesisReader.IsSynthesisWindowOpen();
+
+    /// <summary>
+    /// Exact FC intent boundary used by <see cref="StartNextCraft"/>. The
+    /// optional framework-state seam keeps the production method injectable
+    /// for managed boundary tests without changing private-list behavior.
+    /// </summary>
+    internal static bool RefreshFcIntentAtStartBoundary(
+        CraftingExecutionPlan? executionPlan,
+        int immutablePrefixCount,
+        Func<bool>? synthesisWindowOpen = null)
+    {
+        var isSynthesisWindowOpen = synthesisWindowOpen?.Invoke()
+            ?? SynthesisReader.IsSynthesisWindowOpen();
+        if (executionPlan?.ExecutionSource != ExecutionSource.FcFulfillment
+            || isSynthesisWindowOpen)
+            return false;
+        return executionPlan.RefreshFcIntentOrderAtSafeBoundary(immutablePrefixCount);
+    }
+
+    /// <summary>
+    /// Side-effect-free FC admission decision used immediately before the
+    /// queue processor applies consumables or touches the game queue. The
+    /// caller supplies the current capability preflight so tests exercise this
+    /// exact runtime boundary without requiring Dalamud game state.
+    /// </summary>
+    internal static FcCraftQueueAdmissionDecision EvaluateFcCraftQueueAdmission(
+        CraftingExecutionPlan? executionPlan,
+        int queueIndex,
+        Func<FcCapabilityExecutionProof?, (bool Accepted, string Reason)>? preflight,
+        out string reason)
+    {
+        reason = string.Empty;
+        if (executionPlan is null)
+        {
+            reason = "FC execution plan is unavailable.";
+            return FcCraftQueueAdmissionDecision.AwaitingCapability;
+        }
+        if (queueIndex < 0 || queueIndex >= executionPlan.QueueView.Count)
+        {
+            reason = "FC queue entry is outside the execution plan.";
+            return FcCraftQueueAdmissionDecision.AwaitingCapability;
+        }
+        if (executionPlan.ExecutionSource != ExecutionSource.FcFulfillment)
+            return FcCraftQueueAdmissionDecision.Admitted;
+        if (preflight is null)
+        {
+            reason = "FC capability preflight is unavailable.";
+            return FcCraftQueueAdmissionDecision.AwaitingCapability;
+        }
+
+        var result = preflight(executionPlan.FcContext?.CapabilityProof);
+        if (!result.Accepted)
+        {
+            reason = string.IsNullOrWhiteSpace(result.Reason)
+                ? "FC capability admission is unavailable."
+                : result.Reason;
+            return FcCraftQueueAdmissionDecision.AwaitingCapability;
+        }
+        return FcCraftQueueAdmissionDecision.Admitted;
     }
 
     private bool CanBatchQuickSynth(

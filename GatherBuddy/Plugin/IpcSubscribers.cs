@@ -3,6 +3,8 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Numerics;
+using System.Globalization;
+using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -318,6 +320,146 @@ namespace GatherBuddy.Plugin
             catch (Exception exception)
             {
                 error = exception.Message;
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Builds and submits the installed Lifestream address-book tuple.
+        /// BuildAddressBookEntry is the typed housing route boundary: the
+        /// apartment flag is false, so the resulting PropertyType is the
+        /// estate/house value (0), while the subdivision flag remains part of
+        /// the tuple instead of being encoded in a command string.
+        /// </summary>
+        internal static bool TryEnterHousing(
+            string world,
+            string district,
+            uint ward,
+            uint plot,
+            bool subdivision,
+            out string error)
+        {
+            if (!Enabled)
+            {
+                error = "Lifestream is unavailable.";
+                return false;
+            }
+            if (string.IsNullOrWhiteSpace(world)
+                || string.IsNullOrWhiteSpace(district)
+                || ward == 0
+                || plot == 0)
+            {
+                error = "Housing world, district, ward, and plot are required.";
+                return false;
+            }
+            try
+            {
+                if (IsBusy())
+                {
+                    error = "Lifestream is already busy.";
+                    return false;
+                }
+
+                var address = Dalamud.PluginInterface
+                    .GetIpcSubscriber<
+                        string,
+                        string,
+                        string,
+                        string,
+                        bool,
+                        bool,
+                        (string Name, int World, int City, int Ward, int PropertyType, int Plot, int Apartment, bool ApartmentSubdivision, bool AliasEnabled, string Alias)>(
+                            "Lifestream.BuildAddressBookEntry")
+                    .InvokeFunc(
+                        world,
+                        district,
+                        ward.ToString(CultureInfo.InvariantCulture),
+                        plot.ToString(CultureInfo.InvariantCulture),
+                        false,
+                        subdivision);
+
+                Dalamud.PluginInterface
+                    .GetIpcSubscriber<
+                        (string Name, int World, int City, int Ward, int PropertyType, int Plot, int Apartment, bool ApartmentSubdivision, bool AliasEnabled, string Alias),
+                        object>("Lifestream.GoToHousingAddress")
+                    .InvokeAction(address);
+                error = string.Empty;
+                return true;
+            }
+            catch (Exception exception)
+            {
+                error = exception.Message;
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Reads the installed Lifestream current-plot IPC. Lifestream's
+        /// provider returns a nullable tuple whose first field is its own
+        /// ResidentialAetheryteKind enum; consuming the value as ITuple keeps
+        /// this plugin independent of Lifestream's assembly while retaining
+        /// the exact three-field IPC contract.
+        /// </summary>
+        internal static bool TryGetCurrentPlotInfo(
+            out int residentialKind,
+            out int zeroBasedWard,
+            out int zeroBasedPlot,
+            out string error)
+        {
+            residentialKind = 0;
+            zeroBasedWard = 0;
+            zeroBasedPlot = 0;
+            if (!Enabled)
+            {
+                error = "Lifestream is unavailable.";
+                return false;
+            }
+
+            try
+            {
+                var value = Dalamud.PluginInterface
+                    .GetIpcSubscriber<object?>("Lifestream.GetCurrentPlotInfo")
+                    .InvokeFunc();
+                if (value is not ITuple tuple || tuple.Length != 3
+                    || !TryConvertPlotField(tuple[0], out residentialKind)
+                    || !TryConvertPlotField(tuple[1], out zeroBasedWard)
+                    || !TryConvertPlotField(tuple[2], out zeroBasedPlot)
+                    || residentialKind <= 0
+                    || zeroBasedWard < 0
+                    || zeroBasedPlot < 0)
+                {
+                    residentialKind = 0;
+                    zeroBasedWard = 0;
+                    zeroBasedPlot = 0;
+                    error = "Lifestream returned no valid current housing plot tuple.";
+                    return false;
+                }
+
+                error = string.Empty;
+                return true;
+            }
+            catch (Exception exception)
+            {
+                residentialKind = 0;
+                zeroBasedWard = 0;
+                zeroBasedPlot = 0;
+                error = $"Lifestream current housing plot IPC failed: {exception.Message}";
+                return false;
+            }
+        }
+
+        private static bool TryConvertPlotField(object? value, out int result)
+        {
+            result = 0;
+            if (value is null)
+                return false;
+            try
+            {
+                result = Convert.ToInt32(value, CultureInfo.InvariantCulture);
+                return true;
+            }
+            catch (Exception)
+            {
                 return false;
             }
         }

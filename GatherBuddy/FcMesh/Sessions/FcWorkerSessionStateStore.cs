@@ -134,6 +134,16 @@ public sealed class FcInMemoryWorkerSessionStateStore : IFcWorkerSessionStateSto
         }
         if (state.Selection is null)
             throw new InvalidDataException("Worker selection is missing.");
+        if (state.ObservedAtomicTransfers is null
+            || state.ObservedAtomicTransfers.Length > FcWorkerSessionService.MaxLogicalEntries
+            || state.ObservedAtomicTransfers.Any(observation =>
+                observation is null
+                || observation.OperationId == Guid.Empty
+                || string.IsNullOrWhiteSpace(observation.TransferSemanticHash)
+                || observation.TransferSemanticHash.Length != 64)
+            || state.ObservedAtomicTransfers.Select(observation => observation.OperationId).Distinct().Count()
+                != state.ObservedAtomicTransfers.Length)
+            throw new InvalidDataException("Atomic transfer observation ledger is invalid.");
         if (state.DependencyClosure is null
             || state.DependencyClosure.Length > FcWorkerSessionService.MaxLogicalEntries
             || state.DependencyClosure.Any(key => key.ItemId == 0 || !Enum.IsDefined(key.Quality))
@@ -166,6 +176,9 @@ public sealed class FcInMemoryWorkerSessionStateStore : IFcWorkerSessionStateSto
                 ? FcFulfillmentSelection.Specific()
                 : state.Selection with { ListIds = (state.Selection.ListIds ?? Array.Empty<Guid>()).ToArray() },
             DependencyClosure = (state.DependencyClosure ?? Array.Empty<FcQuantityKey>()).ToArray(),
+            ObservedAtomicTransfers = (state.ObservedAtomicTransfers ?? Array.Empty<FcObservedAtomicTransfer>())
+                .Select(observation => observation with { })
+                .ToArray(),
             LastAcceptedWorker = Clone(state.LastAcceptedWorker),
             PendingWorker = Clone(state.PendingWorker),
             LedgerRecovery = Clone(state.LedgerRecovery),

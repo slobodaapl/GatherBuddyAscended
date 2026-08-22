@@ -95,16 +95,87 @@ public sealed record ChestSnapshotRecord(
     public FcItemQuantityMap ItemMap => new(Items ?? Array.Empty<ItemQuantityEntry>());
 }
 
+/// <summary>
+/// Stable housing identity captured while the character is physically at an
+/// FC estate.  The address is a route selector, not a navigation target.
+/// </summary>
+public sealed record FcHousingAddress(
+    string World,
+    string Region,
+    uint Ward,
+    uint Plot,
+    bool IsSubdivision,
+    string HousingDistrict = "");
+
+/// <summary>
+/// Environment/search information for an FC chest.  Coordinates are an
+/// approximate map anchor only; execution must resolve a live object and use
+/// that object's current runtime position.
+/// </summary>
+public sealed record FcChestLocationEnvironment(
+    uint TerritoryId,
+    uint MapId,
+    string TerritoryName,
+    float ApproximateMapX,
+    float ApproximateMapY);
+
+/// <summary>
+/// Stable object identity.  GameObjectId is deliberately absent: it is a
+/// transient instance identity and cannot be shared or persisted. DataId is a
+/// legacy compatibility field and is non-authoritative; new records set it to
+/// zero and all resolution uses BaseId.
+/// </summary>
+public sealed record FcChestObjectIdentity(
+    uint BaseId,
+    uint DataId,
+    string ObjectKind);
+
+public sealed record FcEstateChestLocationRecord(
+    FcRecordHeader Header,
+    Guid LocationId,
+    bool Published,
+    FcHousingAddress Housing,
+    FcChestLocationEnvironment Environment,
+    FcChestObjectIdentity Chest,
+    string CompatibilityFingerprint);
+
 public sealed record RequiredCraftCapability(
     uint RecipeId,
-    FcQualityPolicy QualityPolicy);
+    FcQualityPolicy QualityPolicy)
+{
+    /// <summary>
+    /// The policy used when this recipe is a final product.  QualityPolicy is
+    /// retained as the compact/legacy alias so old records remain readable.
+    /// </summary>
+    public FcQualityPolicy FinalQualityPolicy { get; init; } = QualityPolicy ?? FcQualityPolicy.Empty;
+
+    /// <summary>Policy used when this recipe is a precraft dependency.</summary>
+    public FcQualityPolicy PrecraftQualityPolicy { get; init; } = FcQualityPolicy.Empty;
+
+    /// <summary>Distinguishes a precraft capability from a final capability.</summary>
+    public bool IsPrecraft { get; init; }
+
+    [JsonIgnore]
+    public FcQualityPolicy EffectiveQualityPolicy
+        => IsPrecraft ? PrecraftQualityPolicy : FinalQualityPolicy;
+}
 
 public sealed record CapabilityRequestRecord(
     FcRecordHeader Header,
     Guid RequestId,
     string WorldFingerprint,
     FcHlcTimestamp ExpiresAt,
-    RequiredCraftCapability[] Recipes);
+    RequiredCraftCapability[] Recipes)
+{
+    /// <summary>
+    /// Optional explicit compatibility metadata. Header ownership remains the
+    /// requester identity; these fields make the compatibility contract
+    /// inspectable without trusting an arrival-time observation.
+    /// </summary>
+    public string RequesterAuthorId { get; init; } = string.Empty;
+    public string GameVersion { get; init; } = string.Empty;
+    public string PlannerFingerprint { get; init; } = string.Empty;
+}
 
 public enum FcRaphaelAssessmentOutcome : byte
 {
@@ -140,6 +211,18 @@ public sealed record CapabilityResponseRecord(
     string SolverFingerprint,
     CraftCapabilityResult[] Results)
 {
+    /// <summary>
+    /// The exact requested recipe set assessed by this response. Older
+    /// records may omit it; new responses always carry it and validators
+    /// compare it against the request, including separate quality policies.
+    /// </summary>
+    public RequiredCraftCapability[]? RequestedRecipes { get; init; }
+
+    /// <summary>Responder session proof used for liveness-bound eligibility.</summary>
+    public Guid SessionId { get; init; }
+    public ulong SessionGeneration { get; init; }
+    public string ResponderAuthorId { get; init; } = string.Empty;
+
     [JsonIgnore]
     public string PlannerSemanticsFingerprint
     {

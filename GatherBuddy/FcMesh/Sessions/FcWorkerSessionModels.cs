@@ -64,6 +64,12 @@ public sealed record FcWorkerSessionState
     public FcFulfillmentSelection Selection { get; init; } = FcFulfillmentSelection.Specific();
     public FcQuantityKey[] DependencyClosure { get; init; } = Array.Empty<FcQuantityKey>();
     public FcContributionLedgerRecovery? LedgerRecovery { get; init; }
+    /// <summary>
+    /// Durable idempotence ledger for atomic transfer observations. The full
+    /// transfer hash is retained so a reused operation ID with changed nested
+    /// worker-after evidence is rejected rather than fast-accepted.
+    /// </summary>
+    public FcObservedAtomicTransfer[] ObservedAtomicTransfers { get; init; } = Array.Empty<FcObservedAtomicTransfer>();
     public bool CleanShutdown { get; init; }
     public bool ExplicitUnsubscribed { get; init; }
     public string LastError { get; init; } = string.Empty;
@@ -86,6 +92,8 @@ public sealed record FcWorkerSessionState
         return new Guid(hash.AsSpan(0, 16));
     }
 }
+
+public sealed record FcObservedAtomicTransfer(Guid OperationId, string TransferSemanticHash);
 
 public sealed record FcWorkerSessionLoadResult(
     FcWorkerSessionLoadStatus Status,

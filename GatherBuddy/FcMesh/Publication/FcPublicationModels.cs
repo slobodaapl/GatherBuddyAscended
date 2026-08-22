@@ -76,12 +76,6 @@ public static class FcPublishedListMapper
                 continue;
             if (item.RecipeId == 0 || item.Quantity <= 0)
                 return FcPublishedListMapResult.Invalid("Final recipe quantities must be positive.");
-            if (list.UseAllHQ && item.Options.NQOnly)
-                return FcPublishedListMapResult.Invalid(
-                    $"Final recipe {item.RecipeId} requests both HQ and NQ-only output.");
-            if (!list.UseAllHQ && !item.Options.NQOnly)
-                return FcPublishedListMapResult.Invalid(
-                    $"Final recipe {item.RecipeId} has ambiguous NQ/HQ output quality.");
 
             var output = recipeLookup(item.RecipeId);
             if (output is null || output.ItemId == 0 || output.Amount == 0)
@@ -96,10 +90,9 @@ public static class FcPublishedListMapper
                 return FcPublishedListMapResult.Invalid($"Final recipe {item.RecipeId} quantity overflows the protocol range.");
             }
 
-            var quality = list.UseAllHQ ? FcItemQuality.Hq : FcItemQuality.Nq;
-            if (quality == FcItemQuality.Hq && !output.CanBeHq)
-                return FcPublishedListMapResult.Invalid(
-                    $"Final recipe {item.RecipeId} requests HQ output for an item that cannot be HQ.");
+            var quality = item.Options.NQOnly || !output.CanBeHq
+                ? FcItemQuality.Nq
+                : FcItemQuality.Hq;
             if (!recipeIds.Add(item.RecipeId)
                 || !itemKeys.Add((output.ItemId, quality)))
                 return FcPublishedListMapResult.Invalid("Final recipes and quality-keyed output items must be unique.");

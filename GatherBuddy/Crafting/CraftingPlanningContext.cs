@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using GatherBuddy.FcMesh.Capabilities;
 using GatherBuddy.FcMesh.Fulfillment;
 using GatherBuddy.FcMesh.Protocol;
 using GatherBuddy.FcMesh.State;
@@ -19,12 +20,14 @@ public sealed record FcExecutionContext
     public IReadOnlyList<Guid> Lists { get; }
     public string WorldFingerprint { get; }
     public FcWorldRevision WorldRevision { get; }
+    public FcCapabilityExecutionProof? CapabilityProof { get; }
 
     public FcExecutionContext(
         Guid sessionId,
         IReadOnlyList<Guid> lists,
         string worldFingerprint,
-        FcWorldRevision worldRevision)
+        FcWorldRevision worldRevision,
+        FcCapabilityExecutionProof? capabilityProof = null)
     {
         if (sessionId == Guid.Empty)
             throw new ArgumentException("FC execution session must be non-empty.", nameof(sessionId));
@@ -44,10 +47,16 @@ public sealed record FcExecutionContext
         if (worldRevision.Number < 0)
             throw new ArgumentOutOfRangeException(nameof(worldRevision), "World revision cannot be negative.");
         _ = ValidateFingerprint(worldRevision.Fingerprint, nameof(worldRevision));
+        if (capabilityProof is not null
+            && (capabilityProof.SessionId != sessionId
+                || capabilityProof.SessionGeneration == 0
+                || !string.Equals(capabilityProof.WorldFingerprint, worldFingerprint, StringComparison.Ordinal)))
+            throw new ArgumentException("FC capability proof does not match the execution session or world.", nameof(capabilityProof));
 
         SessionId = sessionId;
         Lists = lists.ToArray();
         WorldRevision = worldRevision;
+        CapabilityProof = capabilityProof;
     }
 
     internal bool MatchesScope(FcExecutionContext other)

@@ -14,6 +14,7 @@ public static class FcRecordTypes
     public const string CapabilityRequest = "capability-request";
     public const string CapabilityResponse = "capability-response";
     public const string InventoryTransfer = "inventory-transfer";
+    public const string FcChestLocation = "fc-chest-location";
 }
 
 public sealed record FcValidationResult(bool IsValid, string Error)
@@ -50,6 +51,7 @@ public sealed class FcRecordValidator
             CapabilityRequestRecord value => ValidateRequest(value, transportAuthorId),
             CapabilityResponseRecord value => ValidateResponse(value, transportAuthorId),
             FcInventoryTransferRecord value => ValidateTransfer(value, transportAuthorId),
+            FcEstateChestLocationRecord value => ValidateChestLocation(value, transportAuthorId),
             _ => FcValidationResult.Invalid($"Unsupported record type {record.GetType().FullName}.")
         };
     }
@@ -57,7 +59,8 @@ public sealed class FcRecordValidator
     public FcValidationResult Validate(
         FcMeshRecord envelope,
         object? payload,
-        FcVerifiedMeshContext? verifiedContext = null)
+        FcVerifiedMeshContext? verifiedContext = null,
+        bool allowUnknownOptionalPublishedListMembers = false)
     {
         if (envelope is null || payload is null)
             return FcValidationResult.Invalid("Envelope or payload is null.");
@@ -86,7 +89,8 @@ public sealed class FcRecordValidator
             return FcValidationResult.Invalid("Verified document key does not match envelope author and record identity.");
         if (!string.Equals(envelope.PayloadHash, FcMeshSignature.HashPayload(envelope.Payload), StringComparison.Ordinal))
             return FcValidationResult.Invalid("Envelope payload hash is invalid.");
-        if (!FcCanonical.SerializeUtf8(payload).SequenceEqual(envelope.Payload))
+        if (!FcCanonical.SerializeUtf8(payload).SequenceEqual(envelope.Payload)
+            && !(allowUnknownOptionalPublishedListMembers && payload is PublishedListRecord))
             return FcValidationResult.Invalid("Envelope payload does not match typed payload.");
 
         if (verifiedContext is null)
@@ -135,6 +139,7 @@ public sealed class FcRecordValidator
             CapabilityRequestRecord value => value.Header,
             CapabilityResponseRecord value => value.Header,
             FcInventoryTransferRecord value => value.Header,
+            FcEstateChestLocationRecord value => value.Header,
             _ => null,
         };
 
@@ -254,6 +259,12 @@ public sealed class FcRecordValidator
             return FcValidationResult.Invalid("Capability request payload is invalid.");
         if (record.Header.RecordId != record.RequestId)
             return FcValidationResult.Invalid("Capability request record ID does not match request ID.");
+        if (!string.IsNullOrWhiteSpace(record.RequesterAuthorId)
+            && !string.Equals(record.RequesterAuthorId, record.Header.OwnerAuthorId, StringComparison.Ordinal))
+            return FcValidationResult.Invalid("Capability request requester does not match its author.");
+        if (!IsSafeCapabilityText(record.GameVersion, 128)
+            || !IsSafeCapabilityText(record.PlannerFingerprint, 256))
+            return FcValidationResult.Invalid("Capability request compatibility metadata is invalid.");
         var recipes = new HashSet<uint>();
         foreach (var recipe in record.Recipes)
         {
@@ -263,6 +274,20 @@ public sealed class FcRecordValidator
             var quality = ValidateQualityPolicy(recipe.QualityPolicy);
             if (!quality.IsValid)
                 return quality;
+            quality = ValidateQualityPolicy(recipe.FinalQualityPolicy);
+            if (!quality.IsValid)
+                return quality;
+            quality = ValidateQualityPolicy(recipe.PrecraftQualityPolicy);
+            if (!quality.IsValid)
+                return quality;
+            var effectivePolicy = recipe.IsPrecraft
+                ? recipe.PrecraftQualityPolicy
+                : recipe.FinalQualityPolicy;
+            if (recipe.IsPrecraft && recipe.PrecraftQualityPolicy is null)
+                return FcValidationResult.Invalid("Precraft capability policy is missing.");
+            if (effectivePolicy is null
+                || FcCanonical.Hash(recipe.QualityPolicy) != FcCanonical.Hash(effectivePolicy))
+                return FcValidationResult.Invalid("Capability quality-policy alias is inconsistent with its effective policy.");
         }
         return FcValidationResult.Valid;
     }
@@ -283,13 +308,49 @@ public sealed class FcRecordValidator
             return FcValidationResult.Invalid("Capability response payload is invalid.");
         if (record.Header.RecordId != record.RequestId)
             return FcValidationResult.Invalid("Capability response record ID does not match request ID.");
+        if (!string.IsNullOrWhiteSpace(record.ResponderAuthorId)
+            && !string.Equals(record.ResponderAuthorId, record.Header.OwnerAuthorId, StringComparison.Ordinal))
+            return FcValidationResult.Invalid("Capability response responder does not match its author.");
+        if (record.SessionId != Guid.Empty && record.SessionGeneration == 0)
+            return FcValidationResult.Invalid("Capability response session generation is invalid.");
         var recipes = new HashSet<uint>();
         foreach (var result in record.Results)
         {
             if (result is null || result.RecipeId == 0 || !Enum.IsDefined(result.Assessment)
                 || (result.CanCraft && (result.SelectedJobId is null || result.SelectedJobId == 0))
+                || (!result.CanCraft && result.SelectedJobId is not null)
+                || (result.GuaranteesRequiredQuality
+                    && (!result.CanCraft || result.Assessment != FcRaphaelAssessmentOutcome.FullQuality))
                 || !recipes.Add(result.RecipeId))
                 return FcValidationResult.Invalid("Capability response contains duplicate or invalid recipes.");
+        }
+        if (record.RequestedRecipes is not null)
+        {
+            if (record.RequestedRecipes.Length > MaxArrayEntries)
+                return FcValidationResult.Invalid("Capability response requested recipe set is too large.");
+            var requested = new HashSet<uint>();
+            foreach (var recipe in record.RequestedRecipes)
+            {
+                if (recipe is null || recipe.RecipeId == 0 || !requested.Add(recipe.RecipeId))
+                    return FcValidationResult.Invalid("Capability response requested recipe set is invalid.");
+                var quality = ValidateQualityPolicy(recipe.QualityPolicy);
+                if (!quality.IsValid)
+                    return quality;
+                quality = ValidateQualityPolicy(recipe.FinalQualityPolicy);
+                if (!quality.IsValid)
+                    return quality;
+                quality = ValidateQualityPolicy(recipe.PrecraftQualityPolicy);
+                if (!quality.IsValid)
+                    return quality;
+                var effectivePolicy = recipe.IsPrecraft
+                    ? recipe.PrecraftQualityPolicy
+                    : recipe.FinalQualityPolicy;
+                if (effectivePolicy is null
+                    || FcCanonical.Hash(recipe.QualityPolicy) != FcCanonical.Hash(effectivePolicy))
+                    return FcValidationResult.Invalid("Capability response quality-policy alias is inconsistent with its effective policy.");
+            }
+            if (!requested.SetEquals(recipes))
+                return FcValidationResult.Invalid("Capability response does not cover exactly its requested recipe set.");
         }
         return FcValidationResult.Valid;
     }
@@ -327,6 +388,38 @@ public sealed class FcRecordValidator
         return FcValidationResult.Valid;
     }
 
+    private static FcValidationResult ValidateChestLocation(
+        FcEstateChestLocationRecord record,
+        string transportAuthorId)
+    {
+        var header = ValidateHeader(record.Header, transportAuthorId, FcRecordTypes.FcChestLocation);
+        if (!header.IsValid)
+            return header;
+        if (record.LocationId == Guid.Empty || record.Header.RecordId != record.LocationId
+            || record.Housing is null || record.Environment is null || record.Chest is null
+            || !IsSafeLocationText(record.CompatibilityFingerprint, 256))
+            return FcValidationResult.Invalid("FC chest location identity or compatibility is incomplete.");
+        if (!IsSafeLocationText(record.Housing.World, 128)
+            || !IsSafeLocationText(record.Housing.Region, 128)
+            || !IsSafeHousingDistrict(record.Housing.HousingDistrict)
+            || record.Housing.Ward == 0 || record.Housing.Ward > 30
+            || record.Housing.Plot == 0 || record.Housing.Plot > 60)
+            return FcValidationResult.Invalid("FC housing address is invalid.");
+        if (record.Environment.TerritoryId == 0 || record.Environment.MapId == 0
+            || !IsSafeLocationText(record.Environment.TerritoryName, 128)
+            || !float.IsFinite(record.Environment.ApproximateMapX)
+            || !float.IsFinite(record.Environment.ApproximateMapY)
+            || record.Environment.ApproximateMapX < 0
+            || record.Environment.ApproximateMapY < 0
+            || record.Environment.ApproximateMapX > 1000
+            || record.Environment.ApproximateMapY > 1000)
+            return FcValidationResult.Invalid("FC chest location environment anchor is invalid.");
+        if (record.Chest.BaseId == 0
+            || !IsSafeLocationText(record.Chest.ObjectKind, 64))
+            return FcValidationResult.Invalid("FC chest stable object identity is invalid.");
+        return FcValidationResult.Valid;
+    }
+
     private static FcValidationResult ValidateItems(ItemQuantityEntry[]? entries)
     {
         if (entries is null || entries.Length > MaxArrayEntries)
@@ -355,9 +448,9 @@ public sealed class FcRecordValidator
         return FcValidationResult.Valid;
     }
 
-    private static FcValidationResult ValidateQualityPolicy(FcQualityPolicy policy)
+    private static FcValidationResult ValidateQualityPolicy(FcQualityPolicy? policy)
     {
-        if (policy.Rules is null || policy.Rules.Length > MaxArrayEntries)
+        if (policy is null || policy.Rules is null || policy.Rules.Length > MaxArrayEntries)
             return FcValidationResult.Invalid("Quality policy is missing or too large.");
         var keys = new HashSet<(uint, FcItemQuality)>();
         foreach (var rule in policy.Rules)
@@ -376,4 +469,26 @@ public sealed class FcRecordValidator
             && !value.Contains('\0')
             && !value.Contains('\r')
             && !value.Contains('\n');
+
+    private static bool IsSafeLocationText(string? value, int maxLength)
+        => !string.IsNullOrWhiteSpace(value)
+            && value.Length <= maxLength
+            && !value.Contains('\0')
+            && !value.Contains('\r')
+            && !value.Contains('\n');
+
+    private static bool IsSafeCapabilityText(string? value, int maxLength)
+        => string.IsNullOrEmpty(value)
+            || value.Length <= maxLength
+            && !value.Contains('\0')
+            && !value.Contains('\r')
+            && !value.Contains('\n');
+
+    private static bool IsSafeHousingDistrict(string? value)
+        => value switch
+        {
+            "Lavender Beds" or "Mist" or "Goblet" or "Empyreum" or "Shirogane"
+                => true,
+            _ => false,
+        };
 }

@@ -206,11 +206,27 @@ internal static class FcMeshChestTests
         require(FcChestProbeRules.IsReconciliationTimedOut(DateTime.UtcNow, deadline),
             "reconciliation must become timed out at or after its bounded deadline");
 
+        var withdrawalAt = new DateTime(2026, 8, 21, 12, 0, 0, DateTimeKind.Utc);
+        var depositNotBefore = withdrawalAt.AddMilliseconds(500);
+        require(!FcChestTransferTiming.IsDispatchReady(
+                    withdrawalAt.AddMilliseconds(499),
+                    depositNotBefore),
+            "deposit dispatch must remain blocked before the fixed 500 ms inter-action delay");
+        require(FcChestTransferTiming.IsDispatchReady(
+                    withdrawalAt.AddMilliseconds(500),
+                    depositNotBefore),
+            "deposit dispatch must become ready at the fixed 500 ms inter-action boundary");
+
         require(FcChestProbeRules.ShouldSuppressFurtherTransfer(
                     FcChestProbeState.ReconcilingWithdraw,
                     cancellationRequested: true,
                     physicalTransferAttempted: true),
             "cancellation after withdrawal must suppress the assumed deposit");
+        require(FcChestProbeRules.ShouldSuppressFurtherTransfer(
+                    FcChestProbeState.Depositing,
+                    cancellationRequested: true,
+                    physicalTransferAttempted: false),
+            "cancellation during the inter-action delay must suppress deposit dispatch");
         require(!FcChestProbeRules.ShouldSuppressFurtherTransfer(
                     FcChestProbeState.Prepared,
                     cancellationRequested: false,

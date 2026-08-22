@@ -57,7 +57,12 @@ public static class FcCanonical
             {
                 Recipes = (request.Recipes ?? Array.Empty<RequiredCraftCapability>())
                     .OrderBy(recipe => recipe.RecipeId)
-                    .Select(recipe => recipe with { QualityPolicy = NormalizePolicy(recipe.QualityPolicy) })
+                    .Select(recipe => recipe with
+                    {
+                        QualityPolicy = NormalizePolicy(recipe.QualityPolicy),
+                        FinalQualityPolicy = NormalizePolicy(recipe.FinalQualityPolicy),
+                        PrecraftQualityPolicy = NormalizePolicy(recipe.PrecraftQualityPolicy),
+                    })
                     .ToArray(),
             },
             CapabilityResponseRecord response => response with
@@ -65,6 +70,17 @@ public static class FcCanonical
                 Results = (response.Results ?? Array.Empty<CraftCapabilityResult>())
                     .OrderBy(result => result.RecipeId)
                     .ToArray(),
+                RequestedRecipes = response.RequestedRecipes is null
+                    ? null
+                    : response.RequestedRecipes
+                        .OrderBy(recipe => recipe.RecipeId)
+                        .Select(recipe => recipe with
+                        {
+                            QualityPolicy = NormalizePolicy(recipe.QualityPolicy),
+                            FinalQualityPolicy = NormalizePolicy(recipe.FinalQualityPolicy),
+                            PrecraftQualityPolicy = NormalizePolicy(recipe.PrecraftQualityPolicy),
+                        })
+                        .ToArray(),
             },
             FcInventoryTransferRecord transfer => transfer with
             {

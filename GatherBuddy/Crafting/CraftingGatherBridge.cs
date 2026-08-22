@@ -4,14 +4,18 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Dalamud.Game.ClientState.Conditions;
+using Dalamud.Game.Inventory;
+using Dalamud.Game.Inventory.InventoryEventArgTypes;
 using FFXIVClientStructs.FFXIV.Client.Game;
 using FFXIVClientStructs.FFXIV.Component.GUI;
 using GatherBuddy.Automation;
 using GatherBuddy.AutoGather.Lists;
 using GatherBuddy.AutoGather.Collectables;
 using GatherBuddy.Crafting.Acquisition;
+using GatherBuddy.FcMesh.Capabilities;
 using GatherBuddy.FcMesh.Fulfillment;
 using GatherBuddy.FcMesh.Protocol;
+using GatherBuddy.FcMesh.State;
 using GatherBuddy.Helpers;
 using GatherBuddy.Interfaces;
 using Lumina.Excel.Sheets;
@@ -53,13 +57,19 @@ public static class CraftingGatherBridge
     private static bool _startupRecoveryResolved;
     private static DateTime _startupRecoveryProbeStartedUtc;
     private static DateTime _nextStartupRecoveryAttemptUtc;
+    private static FcGatherYieldBoundary? _fcGatherYieldBoundary;
+    private static bool _fcGatherWasInProgress;
+    private static uint[] _fcGatherTargetOrder = Array.Empty<uint>();
+
+    public static event Action<GatherYieldObserved>? FcGatherYieldObserved;
 
     private sealed record PendingQueueStart(
         CraftingExecutionPlan ExecutionPlan,
         CraftingListConsumableSettings? ListConsumables,
         int? EphemeralListId,
         CraftingAutomationOwner Owner,
-        bool RestoringPersistedCraft);
+        bool RestoringPersistedCraft,
+        uint[] FcGatherTargetOrder);
     
     public static bool PreserveListOnDisable { get; set; } = false;
 
@@ -70,6 +80,7 @@ public static class CraftingGatherBridge
         _startupRecoveryProbeStartedUtc = DateTime.UtcNow;
         _nextStartupRecoveryAttemptUtc = DateTime.MinValue;
         CraftingGameInterop.CraftFinished += OnOwnedCraftFinished;
+        Dalamud.GameInventory.InventoryChanged += OnInventoryChanged;
     }
 
     private static int RoundUpToBatchSize(int quantity, int batchSize)
@@ -133,6 +144,25 @@ public static class CraftingGatherBridge
             ? _activeExecutionPlan
             : null;
 
+    private static void SetFcGatherTargetOrder(IReadOnlyList<uint>? itemOrder)
+    {
+        _fcGatherTargetOrder = itemOrder is null
+            ? Array.Empty<uint>()
+            : itemOrder
+                .Where(itemId => itemId != 0)
+                .Distinct()
+                .ToArray();
+        global::GatherBuddy.GatherBuddy.AutoGather?.SetFcGatherTargetOrder(_fcGatherTargetOrder);
+    }
+
+    private static void SetFcGatherIntentProvider(CraftingExecutionPlan? plan)
+    {
+        Func<IReadOnlyList<uint>?>? provider = null;
+        if (plan?.ExecutionSource == ExecutionSource.FcFulfillment)
+            provider = plan.GetCurrentFcGatherTargetOrder;
+        global::GatherBuddy.GatherBuddy.AutoGather?.SetFcGatherIntentProvider(provider);
+    }
+
     /// <summary>
     /// Invalidates market data before a stale-listing replan. A zero item ID
     /// refreshes every dependency in the active plan; a nonzero ID refreshes
@@ -164,6 +194,7 @@ public static class CraftingGatherBridge
     
     public static void DeleteTemporaryGatherList()
     {
+        SetFcGatherIntentProvider(null);
         if (_gatherList != null && _plugin != null)
         {
             try
@@ -373,13 +404,35 @@ public static class CraftingGatherBridge
             if (!_queueProcessorDrain.IsCompleted)
                 return;
 
+            if (pendingQueueStart.ExecutionPlan.ExecutionSource == ExecutionSource.FcFulfillment
+                && !(pendingQueueStart.RestoringPersistedCraft
+                    && pendingQueueStart.ExecutionPlan.IsRecoveryPlan
+                    && SynthesisReader.IsSynthesisWindowOpen())
+                && !TryPreflightFcQueueAdmission(
+                    pendingQueueStart.ExecutionPlan.ExecutionSource,
+                    pendingQueueStart.ExecutionPlan.FcContext?.CapabilityProof,
+                    global::GatherBuddy.GatherBuddy.FcCapabilities,
+                    out var pendingCapabilityFailure))
+            {
+                GatherBuddy.Log.Warning(
+                    $"[CraftingGatherBridge] Deferred FC queue entry remains blocked by capability proof: {pendingCapabilityFailure}");
+                if (pendingQueueStart.RestoringPersistedCraft)
+                {
+                    _pendingQueueStart = null;
+                    _startupRecoveryResolved = false;
+                    _startupRecoveryProbeStartedUtc = DateTime.UtcNow;
+                }
+                return;
+            }
+
             _pendingQueueStart = null;
             StartQueueCore(
                 pendingQueueStart.ExecutionPlan,
                 pendingQueueStart.ListConsumables,
                 pendingQueueStart.EphemeralListId,
                 pendingQueueStart.Owner,
-                pendingQueueStart.RestoringPersistedCraft);
+                pendingQueueStart.RestoringPersistedCraft,
+                pendingQueueStart.FcGatherTargetOrder);
         }
 
         if (_isQueueMode && _queueProcessor != null)
@@ -390,6 +443,7 @@ public static class CraftingGatherBridge
                 UpdateCollectablesHomeReturnBeforeResume();
                 TryStartCollectablesInterruption();
                 processor.Update();
+                TrackFcGatherInteractionBoundary(processor);
             }
             catch (Exception ex)
             {
@@ -415,9 +469,13 @@ public static class CraftingGatherBridge
                 }
                 QueueProcessorForDeferredDisposal(completedProcessor);
                 RestoreQueueOwnedState();
+                _activeExecutionPlan?.ClearFcIntentSnapshotProvider();
                 _queueProcessor = null;
                 _activeExecutionPlan = null;
                 _isQueueMode = false;
+                SetFcGatherTargetOrder(null);
+                SetFcGatherIntentProvider(null);
+                AbortFcGatherYieldBoundary();
                 _waitingForGatherComplete = false;
                 _waitingForJobSwitch = false;
                 _jobSwitchTime = DateTime.MinValue;
@@ -450,6 +508,8 @@ public static class CraftingGatherBridge
     public static void StartGatherAndCraft(uint recipeId, Dictionary<uint, int> missing)
     {
         _isQueueMode = false;
+        SetFcGatherTargetOrder(null);
+        SetFcGatherIntentProvider(null);
         _recipeIdToCraft = recipeId;
         _waitingForGatherComplete = true;
         CreateGatherListForMissingIngredients(missing);
@@ -460,8 +520,27 @@ public static class CraftingGatherBridge
         CraftingListConsumableSettings? listConsumables = null,
         int? ephemeralListId = null,
         CraftingAutomationOwner owner = CraftingAutomationOwner.GatherBuddy,
-        bool restoringPersistedCraft = false)
+        bool restoringPersistedCraft = false,
+        IReadOnlyList<uint>? fcGatherTargetOrder = null)
     {
+        // A generic queue entry must not turn an FC plan into private
+        // automation. Recovery may adopt only the already-open indivisible
+        // synthesis; the next craft is gated again by CraftingQueueProcessor.
+        if (executionPlan.ExecutionSource == ExecutionSource.FcFulfillment
+            && !(restoringPersistedCraft
+                && executionPlan.IsRecoveryPlan
+                && SynthesisReader.IsSynthesisWindowOpen())
+            && !TryPreflightFcQueueAdmission(
+                executionPlan.ExecutionSource,
+                executionPlan.FcContext?.CapabilityProof,
+                global::GatherBuddy.GatherBuddy.FcCapabilities,
+                out var capabilityFailure))
+        {
+            GatherBuddy.Log.Warning(
+                $"[CraftingGatherBridge] FC queue entry blocked by capability proof: {capabilityFailure}");
+            return;
+        }
+
         if (!CraftingQueuePreflight.TryValidate(
                 executionPlan,
                 out var preflightFailure,
@@ -484,6 +563,11 @@ public static class CraftingGatherBridge
         if (!restoringPersistedCraft)
             ClearRecoveryTicket();
         CleanupPreviousQueueBeforeStart();
+        var requestedFcGatherOrder = executionPlan.ExecutionSource == ExecutionSource.FcFulfillment
+            ? fcGatherTargetOrder?.Where(itemId => itemId != 0).Distinct().ToArray()
+                ?? Array.Empty<uint>()
+            : Array.Empty<uint>();
+        SetFcGatherTargetOrder(requestedFcGatherOrder);
         if (!_queueProcessorDrain.IsCompleted)
         {
             _pendingQueueStart = new PendingQueueStart(
@@ -491,14 +575,82 @@ public static class CraftingGatherBridge
                 listConsumables,
                 ephemeralListId,
                 owner,
-                restoringPersistedCraft);
+                restoringPersistedCraft,
+                requestedFcGatherOrder);
             GatherBuddy.Log.Information("[CraftingGatherBridge] Waiting for the previous queue's acquisition cleanup before starting the replacement queue");
             return;
         }
 
         TryFinalizePendingProcessorDisposal();
         _pendingQueueStart = null;
-        StartQueueCore(executionPlan, listConsumables, ephemeralListId, owner, restoringPersistedCraft);
+        StartQueueCore(
+            executionPlan,
+            listConsumables,
+            ephemeralListId,
+            owner,
+            restoringPersistedCraft,
+            requestedFcGatherOrder);
+    }
+
+    /// <summary>
+    /// Framework-thread FC entry point. It retains the normal queue processor
+    /// and solver admission path while exposing the one-frame acceptance
+    /// result required by the fulfillment controller.
+    /// </summary>
+    public static bool TryStartFcQueue(CraftingExecutionPlan executionPlan)
+        => TryStartFcQueue(executionPlan, null);
+
+    public static bool TryStartFcQueue(
+        CraftingExecutionPlan executionPlan,
+        IReadOnlyList<uint>? gatherTargetOrder)
+    {
+        if (executionPlan is null
+            || executionPlan.ExecutionSource != ExecutionSource.FcFulfillment
+            || HasActiveQueue)
+            return false;
+
+        var capabilities = global::GatherBuddy.GatherBuddy.FcCapabilities;
+        if (!TryPreflightFcQueueAdmission(
+                executionPlan.ExecutionSource,
+                executionPlan.FcContext?.CapabilityProof,
+                capabilities,
+                out var capabilityFailure))
+        {
+            global::GatherBuddy.GatherBuddy.Log.Warning(
+                $"[CraftingGatherBridge] FC queue admission blocked by capability proof: {capabilityFailure}");
+            return false;
+        }
+
+        StartQueueCraftAndGather(
+            executionPlan,
+            owner: CraftingAutomationOwner.FcFulfillment,
+            fcGatherTargetOrder: gatherTargetOrder);
+        return HasActiveQueue || _pendingQueueStart is not null;
+    }
+
+    /// <summary>
+    /// Shared side-effect-free admission boundary used immediately before the
+    /// FC queue starts. Tests use this exact boundary with a fake service; the
+    /// real queue entry above supplies the current per-character service.
+    /// </summary>
+    internal static bool TryPreflightFcQueueAdmission(
+        ExecutionSource source,
+        FcCapabilityExecutionProof? proof,
+        FcCapabilityService? capabilities,
+        out string reason)
+    {
+        reason = string.Empty;
+        if (source != ExecutionSource.FcFulfillment)
+        {
+            reason = "The execution source is not FC fulfillment.";
+            return false;
+        }
+        if (capabilities is null)
+        {
+            reason = "FC capability service is unavailable.";
+            return false;
+        }
+        return capabilities.TryPreflightExecution(proof, out reason);
     }
 
     private static void StartQueueCore(
@@ -506,13 +658,20 @@ public static class CraftingGatherBridge
         CraftingListConsumableSettings? listConsumables,
         int? ephemeralListId,
         CraftingAutomationOwner owner,
-        bool restoringPersistedCraft)
+        bool restoringPersistedCraft,
+        IReadOnlyList<uint>? fcGatherTargetOrder)
     {
         _queueProcessorDrain = Task.CompletedTask;
         _isQueueMode = true;
         _ephemeralListId = ephemeralListId;
         _activeExecutionPlan = executionPlan;
         _activeAutomationOwner = owner;
+        SetFcGatherTargetOrder(
+            executionPlan.ExecutionSource == ExecutionSource.FcFulfillment
+                ? fcGatherTargetOrder
+                : null);
+        SetFcGatherIntentProvider(executionPlan);
+        _fcGatherWasInProgress = false;
         _restoringPersistedCraft = restoringPersistedCraft;
         _restoredQueueCoverage = restoringPersistedCraft
             ? executionPlan.QueueView
@@ -576,23 +735,62 @@ public static class CraftingGatherBridge
             $"[CraftingRecovery] Resuming owned synthesis recipe {remainingQueue[0].RecipeId} with {remainingQueue.Count} queue item(s) remaining");
         if (RecipeManager.GetRecipe(remainingQueue[0].RecipeId) is { } activeRecipe)
         {
-            var recoveryContext = CraftingContextResolver.ResolveExecutionContext(
+            var activeCraftContext = CraftingContextResolver.ResolveExecutionContext(
                 remainingQueue[0],
                 activeRecipe,
                 ticket.ListConsumables);
-            if (RecoveryRequiresBaselineWarning(recoveryContext))
+            if (RecoveryRequiresBaselineWarning(activeCraftContext))
             {
                 const string warning = "Reload recovery is replanning from the live craft without the pre-reload Raphael incumbent; the original quality result cannot be proven.";
                 GatherBuddy.Log.Warning($"[CraftingRecovery] {warning}");
                 Dalamud.Chat.PrintError($"[GatherBuddy Ascended] {warning}");
             }
         }
+        FcExecutionContext? recoveryContext = null;
+        if (ticket.IsFcOwned)
+        {
+            if (ticket.FcCapability is not { } identity || !identity.IsValid)
+            {
+                GatherBuddy.Log.Error(
+                    "[CraftingRecovery] FC recovery identity is missing; preserving the active synthesis without private fallback.");
+                _startupRecoveryResolved = true;
+                return;
+            }
+
+            var capabilities = global::GatherBuddy.GatherBuddy.FcCapabilities;
+            var worldFingerprint = capabilities?.CurrentWorldFingerprint;
+            if (capabilities is null || string.IsNullOrWhiteSpace(worldFingerprint))
+            {
+                _nextStartupRecoveryAttemptUtc = now.AddSeconds(1);
+                return;
+            }
+
+            FcCapabilityExecutionProof? proof = null;
+            if (!capabilities.TryCreateRecoveryExecutionProof(identity, out proof, out var capabilityReason))
+            {
+                // The current craft is already an indivisible game action. It
+                // may be adopted, but no later craft may start from this
+                // ticket until the service can rebuild a fresh proof.
+                GatherBuddy.Log.Warning(
+                    $"[CraftingRecovery] FC capability recovery is pending: {capabilityReason}");
+            }
+
+            recoveryContext = new FcExecutionContext(
+                identity.SessionId,
+                identity.Lists,
+                worldFingerprint,
+                new FcWorldRevision(0, worldFingerprint),
+                proof);
+        }
+
         _nextStartupRecoveryAttemptUtc = now.AddSeconds(1);
-        var plan = CraftingExecutionPlan.CreateRecovery(remainingQueue);
+        var plan = CraftingExecutionPlan.CreateRecovery(remainingQueue, recoveryContext);
         StartQueueCraftAndGather(
             plan,
             ticket.ListConsumables?.Clone(),
-            owner: ticket.Owner,
+            owner: ticket.IsFcOwned
+                ? CraftingAutomationOwner.FcFulfillment
+                : ticket.Owner,
             restoringPersistedCraft: true);
         _startupRecoveryResolved = HasActiveQueue;
     }
@@ -611,10 +809,30 @@ public static class CraftingGatherBridge
         if (remaining.Count == 0 || remaining[0].RecipeId != recipeId)
             return;
 
+        var source = _activeExecutionPlan?.ExecutionSource
+            ?? (_activeAutomationOwner == CraftingAutomationOwner.FcFulfillment
+                ? ExecutionSource.FcFulfillment
+                : ExecutionSource.PrivateList);
+        FcCapabilityRecoveryIdentity? capabilityIdentity = null;
+        if (source == ExecutionSource.FcFulfillment
+            && _activeExecutionPlan?.FcContext is { } fcContext)
+        {
+            capabilityIdentity = new FcCapabilityRecoveryIdentity
+            {
+                RequestId = fcContext.CapabilityProof?.RequestId ?? Guid.Empty,
+                SessionId = fcContext.SessionId,
+                SessionGeneration = fcContext.CapabilityProof?.SessionGeneration ?? 0,
+                RequiresHq = fcContext.CapabilityProof?.Eligibility != FcCapabilityEligibility.NqAllowed,
+                Lists = fcContext.Lists.ToList(),
+            };
+        }
+
         GatherBuddy.Config.CraftingRecovery = CraftingRecoveryTicket.Capture(
             _activeAutomationOwner,
             remaining,
-            _queueProcessor.ListConsumables);
+            _queueProcessor.ListConsumables,
+            source,
+            capabilityIdentity);
         GatherBuddy.Config.Save();
         GatherBuddy.Log.Debug(
             $"[CraftingRecovery] Persisted ownership for recipe {recipeId} with {remaining.Count} queue item(s) remaining");
@@ -663,6 +881,7 @@ public static class CraftingGatherBridge
 
         GatherBuddy.Log.Information("[CraftingGatherBridge] Cleaning up the previous craft queue before starting a new one");
         ResetCollectablesInterruptionState();
+        AbortFcGatherYieldBoundary();
         _waitingForGatherComplete = false;
         _waitingForJobSwitch = false;
         _jobSwitchTime = DateTime.MinValue;
@@ -683,9 +902,12 @@ public static class CraftingGatherBridge
             QueueProcessorForDeferredDisposal(previousProcessor);
         }
         RestoreQueueOwnedState();
+        _activeExecutionPlan?.ClearFcIntentSnapshotProvider();
         _queueProcessor = null;
         _activeExecutionPlan = null;
         _isQueueMode = false;
+        SetFcGatherTargetOrder(null);
+        SetFcGatherIntentProvider(null);
     }
     
     public static void CreateGatherListForMissingIngredients(Dictionary<uint, int> missing)
@@ -712,7 +934,6 @@ public static class CraftingGatherBridge
                 CompletionProvider = CreateGatherCompletionProvider(),
                 CompletionScope = CreateGatherCompletionScope(),
             };
-
             foreach (var (itemId, quantity) in ingredients)
             {
                 var gatherQuantity = GetCraftingGatherTargetQuantity(
@@ -740,6 +961,28 @@ public static class CraftingGatherBridge
 
             if (_gatherList.Items.Count > 0)
             {
+                if (_activeExecutionPlan?.ExecutionSource == ExecutionSource.FcFulfillment)
+                {
+                    var executionOrder = new List<uint>();
+                    foreach (var itemId in _fcGatherTargetOrder)
+                    {
+                        ResolveCraftingGatherItemIds(
+                            itemId,
+                            out var gatherItemId,
+                            out _,
+                            out _);
+                        executionOrder.Add(itemId);
+                        if (gatherItemId != itemId)
+                            executionOrder.Add(gatherItemId);
+                    }
+                    global::GatherBuddy.GatherBuddy.AutoGather?.SetFcGatherTargetOrder(executionOrder);
+                    SetFcGatherIntentProvider(_activeExecutionPlan);
+                }
+                else
+                {
+                    SetFcGatherTargetOrder(null);
+                    SetFcGatherIntentProvider(null);
+                }
                 _plugin.AutoGatherListsManager.AddList(_gatherList);
                 _plugin.AutoGatherListsManager.SetActiveItems();
 
@@ -766,6 +1009,7 @@ public static class CraftingGatherBridge
         catch (Exception ex)
         {
             GatherBuddy.Log.Error($"Failed to create gather list: {ex.Message}");
+            AbortFcGatherYieldBoundary();
             if (_queueProcessor != null && _isQueueMode)
             {
                 _queueProcessor.FailFromBridge($"Cannot start crafting gather stage: {ex.Message}");
@@ -779,6 +1023,266 @@ public static class CraftingGatherBridge
             }
         }
     }
+
+    private static bool TryBeginFcGatherYieldBoundary(
+        IEnumerable<uint> itemIds,
+        FcItemQuality? quality,
+        out string error)
+    {
+        if (_activeAutomationOwner != CraftingAutomationOwner.FcFulfillment
+            || _activeExecutionPlan?.ExecutionSource != ExecutionSource.FcFulfillment)
+        {
+            error = string.Empty;
+            return true;
+        }
+
+        var expectedItemIds = (itemIds ?? Array.Empty<uint>()).Distinct().ToArray();
+        var status = GatherBuddy.FcWorkerSessions?.Status;
+        if (status is null
+            || !status.IsSubscribed
+            || status.Desired is not { } desired
+            || desired.SessionId == Guid.Empty
+            || desired.SessionGeneration == 0)
+        {
+            error = "FC gather interaction has no current subscribed worker session.";
+            return false;
+        }
+
+        var boundary = new FcGatherYieldBoundary(CraftingInventoryCounter.GetInventorySplitCounts);
+        var token = new FcGatherInteractionToken(
+            Guid.NewGuid(),
+            desired.SessionId,
+            desired.SessionGeneration,
+            expectedItemIds,
+            quality);
+        if (!boundary.Begin(expectedItemIds, token, out error))
+            return false;
+        _fcGatherYieldBoundary = boundary;
+        return true;
+    }
+
+    private static void TrackFcGatherInteractionBoundary(CraftingQueueProcessor processor)
+    {
+        if (_activeAutomationOwner != CraftingAutomationOwner.FcFulfillment
+            || _activeExecutionPlan?.ExecutionSource != ExecutionSource.FcFulfillment
+            || !_waitingForGatherComplete
+            || GatherBuddy.AutoGather is not { } autoGather)
+        {
+            _fcGatherWasInProgress = false;
+            return;
+        }
+
+        var inGatherInteraction = autoGather.IsGathering || autoGather.IsFishing;
+        if (inGatherInteraction)
+        {
+            if (_fcGatherWasInProgress || _fcGatherYieldBoundary is not null)
+                return;
+
+            _fcGatherWasInProgress = true;
+            if (!autoGather.TryGetActiveGatherTarget(out var target))
+            {
+                var error = "FC gather interaction has no uniquely resolved active gather target.";
+                GatherBuddy.Log.Error($"[CraftingGatherBridge] {error}");
+                processor.FailFromBridge(error);
+                return;
+            }
+
+            if (!TryBeginFcGatherYieldBoundary(
+                new[] { target.Item.ItemId },
+                target.CompletionQuality,
+                out var boundaryError))
+            {
+                GatherBuddy.Log.Error($"[CraftingGatherBridge] FC gather yield boundary failed: {boundaryError}");
+                processor.FailFromBridge(boundaryError);
+            }
+            return;
+        }
+
+        if (!_fcGatherWasInProgress)
+            return;
+
+        _fcGatherWasInProgress = false;
+        if (_fcGatherYieldBoundary is not null)
+            TryCompleteFcGatherYieldBoundary();
+    }
+
+    private static bool TryCompleteFcGatherYieldBoundary()
+    {
+        var boundary = _fcGatherYieldBoundary;
+        if (boundary is null)
+            return true;
+
+        if (!TryValidateFcGatherYieldToken(boundary.Token, out var tokenError))
+        {
+            boundary.Abort();
+            _fcGatherYieldBoundary = null;
+            var error = $"FC gather yield interaction token became invalid: {tokenError}";
+            GatherBuddy.Log.Error($"[CraftingGatherBridge] {error}");
+            _queueProcessor?.FailFromBridge(error);
+            return false;
+        }
+
+        var result = boundary.Complete();
+        _fcGatherYieldBoundary = null;
+        if (result.Outcome == FcGatherYieldBoundaryOutcome.Blocked)
+        {
+            var error = $"FC gather yield reconciliation blocked: {result.Error}";
+            GatherBuddy.Log.Error($"[CraftingGatherBridge] {error}");
+            _queueProcessor?.FailFromBridge(error);
+            return false;
+        }
+
+        if (!result.Succeeded)
+            return true;
+
+        try
+        {
+            FcGatherYieldObserved?.Invoke(new GatherYieldObserved(result.Quantity));
+            return true;
+        }
+        catch (Exception exception)
+        {
+            var error = $"FC gather yield publication failed: {exception.Message}";
+            GatherBuddy.Log.Error($"[CraftingGatherBridge] {error}");
+            _queueProcessor?.FailFromBridge(error);
+            return false;
+        }
+    }
+
+    private static bool TryValidateFcGatherYieldToken(
+        FcGatherInteractionToken? token,
+        out string error)
+    {
+        if (token is null || !token.IsValid)
+        {
+            error = "Token identity is invalid.";
+            return false;
+        }
+
+        var status = GatherBuddy.FcWorkerSessions?.Status;
+        if (status is null
+            || !status.IsSubscribed
+            || status.Desired is not { } desired
+            || desired.SessionId != token.SessionId
+            || desired.SessionGeneration != token.SessionGeneration)
+        {
+            error = "Worker session changed or unsubscribed before gather completion.";
+            return false;
+        }
+
+        if (GatherBuddy.AutoGather is not { } autoGather
+            || !autoGather.TryGetActiveGatherTarget(out var target)
+            || target.Item is not { ItemId: not 0 } item
+            || !token.ItemIds.Contains(item.ItemId)
+            || (token.Quality is { } quality && target.CompletionQuality != quality))
+        {
+            error = "Active gather target changed before the interaction completed.";
+            return false;
+        }
+
+        error = string.Empty;
+        return true;
+    }
+
+    private static void AbortFcGatherYieldBoundary()
+    {
+        _fcGatherYieldBoundary?.Abort();
+        _fcGatherYieldBoundary = null;
+        _fcGatherWasInProgress = false;
+    }
+
+    private static void OnInventoryChanged(IReadOnlyCollection<InventoryEventArgs> events)
+    {
+        var boundary = _fcGatherYieldBoundary;
+        if (boundary is null)
+            return;
+
+        foreach (var inventoryEvent in events)
+        {
+            foreach (var itemId in GetAffectedPhysicalInventoryItemIds(inventoryEvent))
+                boundary.ObserveInventoryItem(itemId);
+        }
+    }
+
+    private static IEnumerable<uint> GetAffectedPhysicalInventoryItemIds(InventoryEventArgs inventoryEvent)
+    {
+        switch (inventoryEvent)
+        {
+            case InventoryComplexEventArgs complexEvent:
+            {
+                if (IsPhysicalInventory(complexEvent.SourceInventory))
+                {
+                    var sourceItemId = complexEvent.SourceEvent.Item.BaseItemId != 0
+                        ? complexEvent.SourceEvent.Item.BaseItemId
+                        : complexEvent.SourceEvent.Item.ItemId;
+                    if (sourceItemId > 0)
+                        yield return sourceItemId;
+                }
+
+                if (IsPhysicalInventory(complexEvent.TargetInventory))
+                {
+                    var targetItemId = complexEvent.TargetEvent.Item.BaseItemId != 0
+                        ? complexEvent.TargetEvent.Item.BaseItemId
+                        : complexEvent.TargetEvent.Item.ItemId;
+                    if (targetItemId > 0)
+                        yield return targetItemId;
+                }
+                yield break;
+            }
+            case InventoryItemAddedArgs addedEvent when IsPhysicalInventory(addedEvent.Inventory):
+            {
+                var itemId = addedEvent.Item.BaseItemId != 0
+                    ? addedEvent.Item.BaseItemId
+                    : addedEvent.Item.ItemId;
+                if (itemId > 0)
+                    yield return itemId;
+                yield break;
+            }
+            case InventoryItemRemovedArgs removedEvent when IsPhysicalInventory(removedEvent.Inventory):
+            {
+                var itemId = removedEvent.Item.BaseItemId != 0
+                    ? removedEvent.Item.BaseItemId
+                    : removedEvent.Item.ItemId;
+                if (itemId > 0)
+                    yield return itemId;
+                yield break;
+            }
+            case InventoryItemChangedArgs changedEvent when IsPhysicalInventory(changedEvent.Inventory):
+            {
+                var oldItemId = changedEvent.OldItemState.BaseItemId != 0
+                    ? changedEvent.OldItemState.BaseItemId
+                    : changedEvent.OldItemState.ItemId;
+                if (oldItemId > 0)
+                    yield return oldItemId;
+
+                var itemId = changedEvent.Item.BaseItemId != 0
+                    ? changedEvent.Item.BaseItemId
+                    : changedEvent.Item.ItemId;
+                if (itemId > 0 && itemId != oldItemId)
+                    yield return itemId;
+                yield break;
+            }
+            default:
+            {
+                if (!IsPhysicalInventory(inventoryEvent.Item.ContainerType))
+                    yield break;
+
+                var itemId = inventoryEvent.Item.BaseItemId != 0
+                    ? inventoryEvent.Item.BaseItemId
+                    : inventoryEvent.Item.ItemId;
+                if (itemId > 0)
+                    yield return itemId;
+                yield break;
+            }
+        }
+    }
+
+    private static bool IsPhysicalInventory(GameInventoryType inventoryType)
+        => inventoryType is GameInventoryType.Inventory1
+            or GameInventoryType.Inventory2
+            or GameInventoryType.Inventory3
+            or GameInventoryType.Inventory4
+            or GameInventoryType.Crystals;
 
     private static void DisableStandaloneGatherLists()
     {
@@ -867,6 +1371,8 @@ public static class CraftingGatherBridge
     {
         if (_isQueueMode && _queueProcessor != null)
         {
+            if (!TryCompleteFcGatherYieldBoundary())
+                return;
             _waitingForGatherComplete = false;
             GatherBuddy.Log.Debug($"[CraftingGatherBridge] Gather complete for queue mode");
             _queueProcessor.OnGatherComplete();
@@ -1391,6 +1897,7 @@ public static class CraftingGatherBridge
         if (clearRecoveryTicket)
             ClearRecoveryTicket();
         _pendingQueueStart = null;
+        AbortFcGatherYieldBoundary();
         if (_queueProcessor != null)
         {
             GatherBuddy.Log.Information("[CraftingGatherBridge] Stopping queue processor");
@@ -1453,6 +1960,8 @@ public static class CraftingGatherBridge
             }
             _collectableManager = null;
             CraftingGameInterop.CraftFinished -= OnOwnedCraftFinished;
+            Dalamud.GameInventory.InventoryChanged -= OnInventoryChanged;
+            AbortFcGatherYieldBoundary();
             _plugin = null;
             _queueProcessor = null;
             _activeExecutionPlan = null;

@@ -48,6 +48,11 @@ public static class RecipeManager
         return null;
     }
 
+    internal static uint GetCraftingJobIdOrZero(uint recipeId)
+        => GetRecipe(recipeId) is { } recipe
+            ? recipe.CraftType.RowId + 8
+            : 0u;
+
     public static Recipe? GetRecipeForItem(uint itemId)
     {
         var recipes = GetRecipesForItem(itemId);

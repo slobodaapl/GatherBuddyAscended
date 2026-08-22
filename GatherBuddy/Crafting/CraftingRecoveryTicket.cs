@@ -9,6 +9,7 @@ public enum CraftingAutomationOwner
 {
     GatherBuddy,
     ArtisanIpc,
+    FcFulfillment,
 }
 
 public enum CraftingStartupRecoveryDecision
@@ -16,6 +17,28 @@ public enum CraftingStartupRecoveryDecision
     Wait,
     Start,
     Discard,
+}
+
+/// <summary>
+/// Non-authoritative identity retained for an FC recovery ticket. The proof
+/// itself is deliberately not persisted: recovery must rebuild it from the
+/// current request, worker session, and capability fingerprints.
+/// </summary>
+public sealed class FcCapabilityRecoveryIdentity
+{
+    public Guid RequestId { get; set; }
+    public Guid SessionId { get; set; }
+    public ulong SessionGeneration { get; set; }
+    public bool RequiresHq { get; set; } = true;
+    public List<Guid> Lists { get; set; } = new();
+
+    internal bool IsValid
+        => SessionId != Guid.Empty
+            && SessionGeneration != 0
+            && Lists is { Count: > 0 }
+            && Lists.All(value => value != Guid.Empty)
+            && Lists.Distinct().Count() == Lists.Count
+            && Lists.SequenceEqual(Lists.OrderBy(value => value));
 }
 
 public sealed class CraftingRecoveryItem
@@ -73,16 +96,29 @@ public sealed class CraftingRecoveryTicket
 
     public int Version { get; set; } = CurrentVersion;
     public CraftingAutomationOwner Owner { get; set; }
+    public ExecutionSource Source { get; set; } = ExecutionSource.PrivateList;
+    public FcCapabilityRecoveryIdentity? FcCapability { get; set; }
     public List<CraftingRecoveryItem> RemainingQueue { get; set; } = new();
     public CraftingListConsumableSettings? ListConsumables { get; set; }
+
+    internal ExecutionSource EffectiveSource
+        => Source == ExecutionSource.FcFulfillment || Owner == CraftingAutomationOwner.FcFulfillment
+            ? ExecutionSource.FcFulfillment
+            : ExecutionSource.PrivateList;
+
+    internal bool IsFcOwned => EffectiveSource == ExecutionSource.FcFulfillment;
 
     internal static CraftingRecoveryTicket Capture(
         CraftingAutomationOwner owner,
         IEnumerable<CraftingListItem> remainingQueue,
-        CraftingListConsumableSettings? listConsumables)
+        CraftingListConsumableSettings? listConsumables,
+        ExecutionSource source = ExecutionSource.PrivateList,
+        FcCapabilityRecoveryIdentity? fcCapability = null)
         => new()
         {
             Owner = owner,
+            Source = source,
+            FcCapability = fcCapability,
             RemainingQueue = remainingQueue.Select(CraftingRecoveryItem.Capture).ToList(),
             ListConsumables = listConsumables?.Clone(),
         };
