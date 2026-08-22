@@ -316,6 +316,7 @@ public class GatherWindow : Window
             .Select(x => (x.Item, x.Quantity, x.CompletionItemId, AutoGather: true))
             .Concat(_plugin.GatherWindowManager.ActiveItems.Select(i =>
                 (Item: i, Quantity: 0u, CompletionItemId: 0u, AutoGather: false)))
+            .Where(x => x.Item.Locations.Count > 0)
             .GroupBy(x => (x.Item, x.CompletionItemId))
             .Select(g =>
             {
