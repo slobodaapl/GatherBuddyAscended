@@ -1172,7 +1172,7 @@ var expectedRequestFields = new HashSet<string>
     "abiVersion", "maxCp", "maxDurability", "maxProgress", "maxQuality", "baseProgress",
     "baseQuality", "jobLevel", "manipulation", "specialist", "solveMode",
     "allowCarefulObservation",
-    "progressFirst", "minimizeSteps", "stellarSteadyHandCharges", "incumbentActionIds",
+    "progressFirst", "preferQualityFirst", "minimizeSteps", "stellarSteadyHandCharges", "incumbentActionIds",
     "softDeadlineMillis", "hardDeadlineMillis", "resetSoftDeadlineOnImprovement",
     "bypassSolutionCache", "root",
 };
@@ -1189,11 +1189,12 @@ Require(requestJson.RootElement.EnumerateObject().Select(property => property.Na
             .SetEquals(expectedRequestFields)
         && nativeRoot.EnumerateObject().Select(property => property.Name).ToHashSet()
             .SetEquals(expectedRootFields),
-    "Donatello requests must contain exactly the fields required by native ABI v12");
-Require(requestJson.RootElement.GetProperty("abiVersion").GetUInt32() == 12
+    "Donatello requests must contain exactly the fields required by native ABI v13");
+Require(requestJson.RootElement.GetProperty("abiVersion").GetUInt32() == 13
         && requestJson.RootElement.GetProperty("solveMode").GetInt32() == 0
         && !requestJson.RootElement.GetProperty("allowCarefulObservation").GetBoolean()
         && !requestJson.RootElement.GetProperty("progressFirst").GetBoolean()
+        && !requestJson.RootElement.GetProperty("preferQualityFirst").GetBoolean()
         && !requestJson.RootElement.GetProperty("minimizeSteps").GetBoolean()
         && requestJson.RootElement.GetProperty("stellarSteadyHandCharges").GetUInt32() == 0
         && requestJson.RootElement.GetProperty("incumbentActionIds").GetArrayLength() == 0
@@ -1210,7 +1211,7 @@ Require(requestJson.RootElement.GetProperty("abiVersion").GetUInt32() == 12
         && nativeRoot.GetProperty("muscleMemory").GetInt32() == 0
         && nativeRoot.GetProperty("crafterDelineations").GetInt32() == 1
         && !nativeRoot.TryGetProperty("manipulationLeft", out _),
-    "Donatello requests must match every ABI v12 camelCase field name exactly");
+    "Donatello requests must match every ABI v13 camelCase field name exactly");
 
 using var poorObservationRequestJson = JsonDocument.Parse(DonatelloNative.SerializeRequest(
     observationCraft,

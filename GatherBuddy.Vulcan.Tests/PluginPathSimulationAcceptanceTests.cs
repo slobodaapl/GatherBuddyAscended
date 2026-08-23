@@ -15,11 +15,13 @@ internal static class PluginPathSimulationAcceptanceTests
     public static async Task Run(Action<bool, string> require)
     {
         ValidateNormalConditionDistribution(require);
+        ValidateDonatelloLiveBootstrapGate(require);
         ValidateManualSynthesisTakeoverPluginPath(require);
         ValidateGabrielCatalog(require);
         await ValidateGabrielScriptedRecovery(require);
         ValidateGabrielPluginPathSimulator(require);
         ValidateZeroStepExpediencePreservation(require);
+        await ValidateExpertQualityFirstTie(require);
         await ValidateImprovementQuiescenceLifecycle(require);
         await ValidateImprovementQuiescenceSupersession(require);
         await ValidateLiveReplanMaximumQualityLock(require);
@@ -31,6 +33,201 @@ internal static class PluginPathSimulationAcceptanceTests
         await ValidateManualCarefulObservationRecovery(require);
         await ValidateScriptedConditionAndManualActionRecovery(require);
         await ValidateImprovedRivetsMaterialMiracleRecovery(require);
+    }
+
+    private static void ValidateDonatelloLiveBootstrapGate(Action<bool, string> require)
+    {
+        require(CraftingGameInterop.ResolveRaphaelBootstrapDecision(
+                    solutionReady: true,
+                    solutionFailed: false,
+                    solutionKnown: true,
+                    raphaelEnabled: false)
+                == CraftingGameInterop.RaphaelBootstrapDecision.Ready,
+            "An exact live Raphael baseline must remain usable when new Raphael solves are disabled");
+        require(CraftingGameInterop.ResolveRaphaelBootstrapDecision(
+                    solutionReady: false,
+                    solutionFailed: false,
+                    solutionKnown: false,
+                    raphaelEnabled: true)
+                == CraftingGameInterop.RaphaelBootstrapDecision.Enqueue,
+            "A missing exact live Raphael baseline must enqueue recovery before any action");
+        require(CraftingGameInterop.ResolveRaphaelBootstrapDecision(
+                    solutionReady: false,
+                    solutionFailed: false,
+                    solutionKnown: true,
+                    raphaelEnabled: true)
+                == CraftingGameInterop.RaphaelBootstrapDecision.Wait,
+            "A queued exact live Raphael baseline must keep the craft waiting at step one");
+        require(CraftingGameInterop.ResolveRaphaelBootstrapDecision(
+                    solutionReady: false,
+                    solutionFailed: true,
+                    solutionKnown: true,
+                    raphaelEnabled: true)
+                == CraftingGameInterop.RaphaelBootstrapDecision.FailSolution,
+            "A failed exact live Raphael baseline must stop instead of selecting another solver");
+        require(CraftingGameInterop.ResolveRaphaelBootstrapDecision(
+                    solutionReady: false,
+                    solutionFailed: false,
+                    solutionKnown: false,
+                    raphaelEnabled: false)
+                == CraftingGameInterop.RaphaelBootstrapDecision.FailDisabled,
+            "A missing baseline with Raphael disabled must stop instead of selecting another solver");
+        require(CraftingGameInterop.ResolveRequiredSolverDefinitionType(
+                    VulcanSolverMode.Donatello,
+                    selectedMacroAvailable: false)
+                == typeof(DonatelloSolverDefinition)
+                && CraftingGameInterop.ResolveRequiredSolverDefinitionType(
+                    VulcanSolverMode.PureRaphael,
+                    selectedMacroAvailable: false)
+                == typeof(RaphaelSolverDefinition)
+                && CraftingGameInterop.ResolveRequiredSolverDefinitionType(
+                    VulcanSolverMode.Donatello,
+                    selectedMacroAvailable: true)
+                == typeof(UserMacroSolverDefinition)
+                && CraftingGameInterop.ResolveRequiredSolverDefinitionType(
+                    VulcanSolverMode.Gabriel,
+                    selectedMacroAvailable: true)
+                == typeof(UserMacroSolverDefinition),
+            "Live craft startup must require the configured quality solver while preserving explicit selected-macro precedence");
+
+        var observedCraft = new CraftState
+        {
+            RecipeId = 36758,
+            ItemId = 36758,
+            StatLevel = 100,
+            StatCraftsmanship = 5635,
+            StatControl = 5087,
+            StatCP = 613,
+            UnlockedManipulation = false,
+            Specialist = false,
+            SplendorCosmic = true,
+            RecipeLevelTableId = 740,
+            CraftLevel = 100,
+            CraftStars = 3,
+            CraftDurability = 35,
+            CraftProgress = 5130,
+            CraftQualityMax = 12700,
+            CraftProgressDivider = 170,
+            CraftProgressModifier = 90,
+            CraftQualityDivider = 150,
+            CraftQualityModifier = 75,
+            CraftQualityMin1 = 12700,
+            CraftQualityMin2 = 12700,
+            CraftQualityMin3 = 12700,
+            CraftRequiredQuality = 12700,
+            ConditionFlags = (ConditionFlags)15,
+            CraftConditionProbabilities = [1.0f, 0.25f, 0.04f],
+            DonatelloOptions = new DonatelloExecutionOptions(
+                DonatelloSolveObjective.MaximizeQuality,
+                MinimizeSteps: false,
+                MaximizeQualityAtCostOfTime: true),
+        };
+        var observedRoot = GameStateBuilder.BuildInitialStepState(observedCraft);
+        var transientCoordinator = new RaphaelSolveCoordinator(
+            new RaphaelSolveCoordinatorConfig { RaphaelEnabled = false },
+            loadPersistentCache: false);
+        var result = CraftingPluginPathSimulator.Run(
+            observedCraft,
+            observedRoot,
+            new DonatelloSolverDefinition(transientCoordinator),
+            VulcanSolverMode.Donatello,
+            new PluginPathSimulationScenario(GameSeed: 1, IsTrial: true));
+        require(!result.SynthesisCompleted
+                && result.Trace.Count == 0
+                && result.FinalState.Progress == 0
+                && result.FinalState.Quality == 0
+                && result.FailureReason?.Contains("Initial Raphael solution is unavailable", StringComparison.Ordinal) == true,
+            "Recipe 36758 must issue zero progress actions when its exact live Donatello baseline is unavailable");
+    }
+
+    private static async Task ValidateExpertQualityFirstTie(Action<bool, string> require)
+    {
+        var probe = Craft() with
+        {
+            StatCP = 18,
+            StatLevel = 5,
+            CraftExpert = true,
+            CraftDurability = 30,
+            CraftProgress = 10_000,
+            CraftQualityMax = 10_000,
+            UnlockedManipulation = false,
+            Specialist = false,
+            CrafterDelineations = 0,
+            ConditionFlags = ConditionFlags.Normal | ConditionFlags.Centered,
+            CraftConditionProbabilities = [1f, 0f, 0f, 0f, 0f],
+            DonatelloOptions = new DonatelloExecutionOptions(
+                DonatelloSolveObjective.MaximizeQuality,
+                MinimizeSteps: false,
+                MaximizeQualityAtCostOfTime: false,
+                AllowSpecialistActions: false),
+        };
+        var probeRoot = GameStateBuilder.BuildInitialStepState(probe);
+        var progressPerSynthesis = Simulator.CalculateProgress(
+            probe,
+            probeRoot,
+            VulcanSkill.BasicSynthesis);
+        var qualityPerTouch = Simulator.CalculateQuality(
+            probe,
+            probeRoot,
+            VulcanSkill.BasicTouch);
+        var craft = probe with
+        {
+            CraftProgress = progressPerSynthesis * 2,
+            CraftQualityMax = qualityPerTouch * 2,
+        };
+        var root = GameStateBuilder.BuildInitialStepState(craft) with
+        {
+            Condition = Condition.Centered,
+        };
+        VulcanSkill[] progressFirst =
+        [
+            VulcanSkill.BasicSynthesis,
+            VulcanSkill.BasicTouch,
+            VulcanSkill.BasicSynthesis,
+        ];
+        VulcanSkill[] qualityFirst =
+        [
+            VulcanSkill.BasicTouch,
+            VulcanSkill.BasicSynthesis,
+            VulcanSkill.BasicSynthesis,
+        ];
+        var progressScore = DonatelloPlanEvaluator.Evaluate(craft, root, progressFirst);
+        var qualityScore = DonatelloPlanEvaluator.Evaluate(craft, root, qualityFirst);
+        require(progressScore.Completes
+                && qualityScore.Completes
+                && progressScore.Quality == qualityScore.Quality
+                && progressScore.Steps == qualityScore.Steps
+                && progressScore.Duration == qualityScore.Duration
+                && progressScore.FirstActionKind == DonatelloFirstActionKind.Progress
+                && qualityScore.FirstActionKind == DonatelloFirstActionKind.Quality,
+            "Expert quality-first fixture must isolate two completing routes tied on final quality, steps, and duration");
+
+        var solution = new CachedRaphaelSolution
+        {
+            ActionIds = progressFirst.Select(action => (uint)action).ToList(),
+        };
+        CraftingProcessor.Setup();
+        DonatelloNative.ClearCache();
+        try
+        {
+            CraftingProcessor.RegisterSolver(new SeededDonatelloDefinition(solution));
+            CraftingProcessor.OnCraftStarted(craft, root, craft.RecipeId, isTrial: false);
+            var recommendation = await AwaitRecommendation(TimeSpan.FromSeconds(10));
+            require(CraftingProcessor.ActiveSolver is DonatelloSolver { NativeReplanCount: 1 }
+                    && recommendation.Action == VulcanSkill.BasicTouch
+                    && !recommendation.IsTerminalFailure,
+                "Expert Donatello must replace an exactly tied progress-first incumbent with the quality-first route");
+
+            var game = new SeededGame(craft, root, actionSeed: 47, conditionSeed: 53);
+            var actual = game.Execute(recommendation.Action, require);
+            ReconcileRecommended(craft, root, recommendation.Action, actual, require);
+            CraftingProcessor.OnCraftFinished(craft, actual, craft.RecipeId, cancelled: true);
+        }
+        finally
+        {
+            CraftingProcessor.Dispose();
+            DonatelloNative.ClearCache();
+        }
     }
 
     private static void ValidateManualSynthesisTakeoverPluginPath(Action<bool, string> require)

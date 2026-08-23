@@ -643,6 +643,7 @@ public class DonatelloSolver : Solver, IDisposable
             var candidateScore = DonatelloPlanEvaluator.Evaluate(_craft, root, candidate);
             var stagedProgressPlan = !IsProgressOnly(_craft)
                 && IsValidOneShortBoundary(_craft, result.ProgressBoundary, candidateScore);
+            var expertQualityFirstTie = IsExpertQualityFirstTie(_craft, candidateScore, incumbentScore);
             if (_pendingEstablishesBaseline)
             {
                 GatherBuddy.Log.Information(
@@ -659,7 +660,7 @@ public class DonatelloSolver : Solver, IDisposable
                     ? null
                     : result.ProgressBoundary?.ActionCount;
                 GatherBuddy.Log.Debug(
-                    $"[Donatello] Adopted {(_pendingEstablishesBaseline ? "live Raphael baseline" : stagedProgressPlan ? "staged progress plan" : "strict improvement")}: quality={candidateScore.Quality}, steps={candidateScore.Steps}, "
+                    $"[Donatello] Adopted {(_pendingEstablishesBaseline ? "live Raphael baseline" : stagedProgressPlan ? "staged progress plan" : expertQualityFirstTie ? "Expert quality-first tie" : "strict improvement")}: quality={candidateScore.Quality}, steps={candidateScore.Steps}, "
                     + $"optimal={result.Optimal}, bound={result.QualityUpperBound}, elapsed={result.ElapsedMillis}ms");
             }
             else if (incumbentScore.Completes)
@@ -1010,10 +1011,24 @@ public class DonatelloSolver : Solver, IDisposable
     {
         if (!candidate.Completes)
             return false;
+        if (IsExpertQualityFirstTie(craft, candidate, incumbent))
+            return true;
         if (ProtectsRaphaelBaseline(craft))
             return candidate.IsStrictlyBetterThan(incumbent);
         return stagedProgressPlan || IsStrictlyBetter(craft, candidate, incumbent);
     }
+
+    internal static bool IsExpertQualityFirstTie(
+        CraftState craft,
+        DonatelloPlanEvaluation candidate,
+        DonatelloPlanEvaluation incumbent)
+        => craft.CraftExpert
+            && candidate.Completes == incumbent.Completes
+            && candidate.Quality == incumbent.Quality
+            && candidate.Steps == incumbent.Steps
+            && candidate.Duration == incumbent.Duration
+            && candidate.FirstActionKind == DonatelloFirstActionKind.Quality
+            && incumbent.FirstActionKind == DonatelloFirstActionKind.Progress;
 
     internal static bool ProtectsRaphaelBaseline(CraftState craft)
         => !IsProgressOnly(craft);

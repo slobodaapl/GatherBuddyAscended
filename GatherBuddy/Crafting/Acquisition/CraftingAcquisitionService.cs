@@ -1,16 +1,22 @@
 using System;
+using System.Threading;
 using GatherBuddy.Crafting.Acquisition;
 
 namespace GatherBuddy.Crafting;
 
 /// <summary>
 /// Integration boundary between a live crafting execution plan and the pure
-/// acquisition planner. It is intentionally synchronous: all game reads happen
-/// on the Dalamud framework thread, while Universalis lookups are queued by the
-/// marketboard service and observed on the next update.
+/// acquisition planner. Capture must run on the Dalamud framework thread;
+/// evaluation of the resulting immutable input may run on a worker thread.
 /// </summary>
 public static class CraftingAcquisitionService
 {
+    public sealed class PlanningCapture
+    {
+        public AcquisitionPlanningInputBuilder.BuildResult Snapshot { get; init; } = new();
+        public AcquisitionPlanningSettings Settings { get; init; } = new();
+    }
+
     public sealed class Evaluation
     {
         public AcquisitionPlanningInputBuilder.BuildResult Snapshot { get; init; } = new();
@@ -28,17 +34,34 @@ public static class CraftingAcquisitionService
 
     public static Evaluation Evaluate(CraftingExecutionPlan plan)
     {
+        return Evaluate(Capture(plan));
+    }
+
+    public static PlanningCapture Capture(CraftingExecutionPlan plan)
+    {
         ArgumentNullException.ThrowIfNull(plan);
-        var snapshot = AcquisitionPlanningInputBuilder.Build(plan);
-        if (!snapshot.IsReady)
-            return new Evaluation { Snapshot = snapshot };
+        return new PlanningCapture
+        {
+            Snapshot = AcquisitionPlanningInputBuilder.Build(plan),
+            Settings = plan.PlanningSnapshot.GetAcquisitionSettings(),
+        };
+    }
+
+    public static Evaluation Evaluate(
+        PlanningCapture capture,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(capture);
+        if (!capture.Snapshot.IsReady)
+            return new Evaluation { Snapshot = capture.Snapshot };
 
         var planning = AcquisitionPlanner.Plan(
-            snapshot.Input,
-            plan.PlanningSnapshot.GetAcquisitionSettings());
+            capture.Snapshot.Input,
+            capture.Settings,
+            cancellationToken);
         return new Evaluation
         {
-            Snapshot = snapshot,
+            Snapshot = capture.Snapshot,
             Planning = planning,
         };
     }

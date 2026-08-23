@@ -99,10 +99,10 @@ public static unsafe class AcquisitionPlanningInputBuilder
                 continue;
 
             var (inventoryNq, inventoryHq) = CraftingInventoryCounter.GetInventorySplitCounts(target.ItemId);
-            var inventory = settings.PreferHQ
-                ? Math.Max(0, inventoryHq)
-                : Math.Max(0, inventoryNq + inventoryHq);
-            var missing = Math.Max(0, target.TargetQuantity - inventory);
+            var (missing, requiredHq, requiredNq) = ComputeMarketplaceTargetDemand(
+                target.TargetQuantity,
+                inventoryNq,
+                inventoryHq);
             if (missing == 0)
                 continue;
 
@@ -113,8 +113,8 @@ public static unsafe class AcquisitionPlanningInputBuilder
                     ? ResolveItemName(target.ItemId)
                     : target.ItemName,
                 RequiredQuantity = missing,
-                RequiredHqQuantity = settings.PreferHQ ? missing : 0,
-                RequiredNqQuantity = 0,
+                RequiredHqQuantity = requiredHq,
+                RequiredNqQuantity = requiredNq,
                 IsIntermediateDemand = true,
                 SelectedPath = null,
             });
@@ -125,6 +125,15 @@ public static unsafe class AcquisitionPlanningInputBuilder
             settings,
             Dalamud.Objects.LocalPlayer?.CurrentWorld.RowId ?? 0u,
             (uint)Dalamud.ClientState.TerritoryType);
+    }
+
+    internal static (int Missing, int RequiredHq, int RequiredNq) ComputeMarketplaceTargetDemand(
+        int targetQuantity,
+        int inventoryNq,
+        int inventoryHq)
+    {
+        var inventory = Math.Max(0, inventoryNq) + Math.Max(0, inventoryHq);
+        return (Math.Max(0, targetQuantity - inventory), 0, 0);
     }
 
     private static BuildResult BuildAcquisitionInput(

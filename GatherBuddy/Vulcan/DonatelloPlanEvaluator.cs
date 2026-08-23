@@ -9,6 +9,20 @@ public sealed record DonatelloPlanEvaluation(
     int Duration,
     IReadOnlyList<StepState> Trajectory)
 {
+    internal DonatelloFirstActionKind FirstActionKind
+    {
+        get
+        {
+            if (Trajectory.Count < 2)
+                return DonatelloFirstActionKind.Other;
+            if (Trajectory[1].Quality > Trajectory[0].Quality)
+                return DonatelloFirstActionKind.Quality;
+            return Trajectory[1].Progress > Trajectory[0].Progress
+                ? DonatelloFirstActionKind.Progress
+                : DonatelloFirstActionKind.Other;
+        }
+    }
+
     public bool IsStrictlyBetterThan(DonatelloPlanEvaluation incumbent)
     {
         if (Completes != incumbent.Completes)
@@ -19,6 +33,13 @@ public sealed record DonatelloPlanEvaluation(
             return Steps < incumbent.Steps;
         return Duration < incumbent.Duration;
     }
+}
+
+internal enum DonatelloFirstActionKind
+{
+    Progress,
+    Other,
+    Quality,
 }
 
 public static class DonatelloPlanEvaluator

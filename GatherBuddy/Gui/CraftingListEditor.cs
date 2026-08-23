@@ -99,6 +99,7 @@ public class CraftingListEditor
     private long _acquisitionEstimateTaskGeneration;
     private string _acquisitionStatus = string.Empty;
     private static readonly TimeSpan AcquisitionEstimateTtl = TimeSpan.FromMinutes(15);
+    private static readonly TimeSpan AcquisitionEstimateTimeout = TimeSpan.FromSeconds(10);
     private const double InventoryRefreshIntervalSeconds = 0.5;
     private const double RetainerSnapshotRetryIntervalSeconds = 1.0;
     private const double InventoryChangeDebounceSeconds = 0.2;
@@ -1075,10 +1076,7 @@ public class CraftingListEditor
             var planningSnapshot = CreatePlanningSnapshot();
             cancellationSource = new CancellationTokenSource();
             var token = cancellationSource.Token;
-            var task = GatherBuddy.RunOnFrameworkThreadAsync(
-                () => CraftingAcquisitionService.Evaluate(
-                    CraftingExecutionPlan.Create(planningSnapshot)),
-                token);
+            var task = EvaluateAcquisitionEstimateAsync(planningSnapshot, token);
 
             _acquisitionEstimateTask = task;
             _acquisitionEstimateCancellationSource = cancellationSource;
@@ -1090,6 +1088,34 @@ public class CraftingListEditor
         {
             cancellationSource?.Dispose();
             ApplyAcquisitionEstimateFailure(exception);
+        }
+    }
+
+    private static async Task<CraftingAcquisitionService.Evaluation> EvaluateAcquisitionEstimateAsync(
+        CraftingListDefinition planningSnapshot,
+        CancellationToken cancellationToken)
+    {
+        using var timeoutSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeoutSource.CancelAfter(AcquisitionEstimateTimeout);
+        var solveToken = timeoutSource.Token;
+        try
+        {
+            var capture = await GatherBuddy.RunOnFrameworkThreadAsync(
+                    () => CraftingAcquisitionService.Capture(
+                        CraftingExecutionPlan.Create(planningSnapshot)),
+                    solveToken)
+                .ConfigureAwait(false);
+            solveToken.ThrowIfCancellationRequested();
+            return await Task.Run(
+                    () => CraftingAcquisitionService.Evaluate(capture, solveToken),
+                    solveToken)
+                .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested
+            && timeoutSource.IsCancellationRequested)
+        {
+            throw new TimeoutException(
+                $"Acquisition estimate did not complete within {AcquisitionEstimateTimeout.TotalSeconds:0} seconds.");
         }
     }
 
@@ -1127,7 +1153,12 @@ public class CraftingListEditor
         var result = _acquisitionPlanningResult;
         if (result == null)
         {
-            ImGui.TextColored(ImGuiColors.DalamudGrey3, "Waiting for dependency and market estimates.");
+            var status = string.IsNullOrWhiteSpace(_acquisitionStatus)
+                ? _acquisitionEstimateTask == null
+                    ? "Waiting for dependency and market estimates."
+                    : "Computing acquisition estimate."
+                : _acquisitionStatus;
+            ImGui.TextWrapped(status);
             return;
         }
 

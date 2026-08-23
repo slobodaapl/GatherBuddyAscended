@@ -15,6 +15,15 @@ namespace GatherBuddy.Crafting;
 
 public static partial class CraftingGameInterop
 {
+    internal enum RaphaelBootstrapDecision
+    {
+        Ready,
+        Enqueue,
+        Wait,
+        FailDisabled,
+        FailSolution,
+    }
+
     public enum CraftPreparationFailureReason
     {
         MissingIngredientsUnableToSelect,
@@ -121,6 +130,38 @@ public static partial class CraftingGameInterop
             || Dalamud.Conditions[ConditionFlag.ExecutingCraftingAction])
             return "Another craft is already active.";
         return null;
+    }
+
+    internal static RaphaelBootstrapDecision ResolveRaphaelBootstrapDecision(
+        bool solutionReady,
+        bool solutionFailed,
+        bool solutionKnown,
+        bool raphaelEnabled)
+    {
+        if (solutionReady)
+            return RaphaelBootstrapDecision.Ready;
+        if (solutionFailed)
+            return RaphaelBootstrapDecision.FailSolution;
+        if (!raphaelEnabled)
+            return RaphaelBootstrapDecision.FailDisabled;
+        return solutionKnown
+            ? RaphaelBootstrapDecision.Wait
+            : RaphaelBootstrapDecision.Enqueue;
+    }
+
+    internal static Type? ResolveRequiredSolverDefinitionType(
+        VulcanSolverMode mode,
+        bool selectedMacroAvailable)
+    {
+        if (selectedMacroAvailable)
+            return typeof(UserMacroSolverDefinition);
+        return mode switch
+        {
+            VulcanSolverMode.PureRaphael => typeof(RaphaelSolverDefinition),
+            VulcanSolverMode.Donatello => typeof(DonatelloSolverDefinition),
+            VulcanSolverMode.Gabriel => typeof(GabrielSolverDefinition),
+            _ => null,
+        };
     }
 
     public static bool TryResumeLiveCraft()
@@ -1358,8 +1399,12 @@ public static partial class CraftingGameInterop
             if (CraftingProcessor.ActiveSolver is DonatelloSolver issued)
                 issued.NotifyOpportunisticActionIssued();
 
+            var activeSolverName = CraftingProcessor.ActiveSolverName;
+            var traceSolverName = activeSolverName.Length > 0
+                ? activeSolverName
+                : $"{_currentSolverMode} bootstrap";
             GatherBuddy.Log.Debug(
-                $"[CraftingTrace] Issued recipe={craft.RecipeId} solver={_currentSolverMode} action={recommendation.Action}({(uint)recommendation.Action}) "
+                $"[CraftingTrace] Issued recipe={craft.RecipeId} solver={traceSolverName} action={recommendation.Action}({(uint)recommendation.Action}) "
                 + $"source={recommendation.Comment} status={Vulcan.SolverUtils.Status(craft, step)} step={step.Index} "
                 + $"condition={step.Condition} progress={step.Progress}/{craft.CraftProgress} quality={step.Quality}/{craft.CraftQualityMax} "
                 + $"durability={step.Durability}/{craft.CraftDurability} cp={step.RemainingCP}/{craft.StatCP} state={step}");
@@ -1799,17 +1844,83 @@ public static partial class CraftingGameInterop
                 _vulcanCraftState = _vulcanCraftState with { InitialQuality = iq };
             }
         }
-        if (_vulcanCraftState != null && CraftingProcessor.SolverDefinitions.Any(definition => definition is RaphaelSolverDefinition))
-        {
-            var liveRaphaelRequest = RaphaelSolveRequest.FromCraftState(
-                _vulcanCraftState,
-                CraftingContextResolver.ResolveSpecialistActionsAllowed(_vulcanCraftState));
-            GatherBuddy.Log.Debug($@"[Crafting] Live Raphael request at craft start: {liveRaphaelRequest.GetKey()}");
-        }
         var modeledInitialStep = CraftingStateBuilder.BuildInitialStepState(_vulcanCraftState!);
         var observedInitialStep = SynthesisReader.ReadCurrentStepState(_vulcanCraftState!, modeledInitialStep);
         if (observedInitialStep == null)
             return CraftState.WaitStart;
+
+        if (_vulcanCraftState.InitialQuality != observedInitialStep.Quality)
+        {
+            GatherBuddy.Log.Debug(
+                $"[Crafting] Replacing configured initial quality {_vulcanCraftState.InitialQuality} "
+                + $"with observed initial quality {observedInitialStep.Quality} for the live Raphael key");
+            _vulcanCraftState = _vulcanCraftState with { InitialQuality = observedInitialStep.Quality };
+        }
+
+        var selectedMacroAvailable = !string.IsNullOrEmpty(_currentSelectedMacroId)
+            && UserMacroLibrary.GetMacroByStringId(_currentSelectedMacroId) != null;
+        var requiredSolverDefinitionType = ResolveRequiredSolverDefinitionType(
+            _currentSolverMode,
+            selectedMacroAvailable);
+        var requiresRaphaelBaseline = requiredSolverDefinitionType == typeof(RaphaelSolverDefinition)
+            || requiredSolverDefinitionType == typeof(DonatelloSolverDefinition);
+        if (requiresRaphaelBaseline)
+        {
+            var liveRaphaelRequest = RaphaelSolveRequest.FromCraftState(
+                _vulcanCraftState,
+                CraftingContextResolver.ResolveSpecialistActionsAllowed(_vulcanCraftState));
+            var liveRaphaelKey = liveRaphaelRequest.GetKey();
+            var solutionReady = GatherBuddy.RaphaelSolveCoordinator.TryGetSolution(
+                liveRaphaelRequest,
+                out var liveRaphaelSolution)
+                && liveRaphaelSolution != null;
+            var solutionFailed = GatherBuddy.RaphaelSolveCoordinator.HasFailedSolution(
+                liveRaphaelRequest,
+                out var solveFailure);
+            var solutionKnown = GatherBuddy.RaphaelSolveCoordinator.IsKnown(liveRaphaelRequest);
+            var bootstrapDecision = ResolveRaphaelBootstrapDecision(
+                solutionReady,
+                solutionFailed,
+                solutionKnown,
+                GatherBuddy.Config.RaphaelSolverConfig.RaphaelEnabled);
+            switch (bootstrapDecision)
+            {
+                case RaphaelBootstrapDecision.Ready:
+                    GatherBuddy.Log.Debug($"[Crafting] Exact live Raphael solution ready at craft start: {liveRaphaelKey}");
+                    break;
+                case RaphaelBootstrapDecision.Enqueue:
+                    GatherBuddy.Log.Information(
+                        $"[Crafting] Live Raphael request differs from the prepared request; waiting at step 1 for exact key {liveRaphaelKey}");
+                    if (!GatherBuddy.RaphaelSolveCoordinator.EnqueueOrPromoteRequest(
+                            liveRaphaelRequest,
+                            RaphaelSolvePriority.Urgent)
+                        && !GatherBuddy.RaphaelSolveCoordinator.IsKnown(liveRaphaelRequest))
+                    {
+                        if (!_automationFaultReported)
+                        {
+                            var reason = $"Could not enqueue the exact live Raphael baseline for recipe {_currentRecipeId.Value}";
+                            _automationFaultReported = true;
+                            GatherBuddy.Log.Error($"[Crafting] {reason}. Key={liveRaphaelKey}");
+                            AutomationFaulted?.Invoke(reason);
+                        }
+                    }
+                    return CraftState.WaitStart;
+                case RaphaelBootstrapDecision.Wait:
+                    return CraftState.WaitStart;
+                case RaphaelBootstrapDecision.FailDisabled:
+                case RaphaelBootstrapDecision.FailSolution:
+                    if (!_automationFaultReported)
+                    {
+                        var reason = bootstrapDecision == RaphaelBootstrapDecision.FailDisabled
+                            ? $"Raphael is disabled, so {_currentSolverMode} cannot establish an exact live baseline"
+                            : $"Exact live Raphael baseline failed for recipe {_currentRecipeId.Value}: {solveFailure ?? "unknown failure"}";
+                        _automationFaultReported = true;
+                        GatherBuddy.Log.Error($"[Crafting] {reason}. Key={liveRaphaelKey}");
+                        AutomationFaulted?.Invoke(reason);
+                    }
+                    return CraftState.WaitStart;
+            }
+        }
 
         _currentRecipe = recipe;
         _executedActions.Clear();
@@ -1851,9 +1962,7 @@ public static partial class CraftingGameInterop
                     _vulcanStepState,
                     _currentRecipeId.Value,
                     _currentCraftIsTrial,
-                    _currentSolverMode == VulcanSolverMode.Gabriel
-                        ? typeof(GabrielSolverDefinition)
-                        : null);
+                    requiredSolverDefinitionType);
             }
             var recommendation = RecommendationForExecution(
                 _vulcanCraftState,

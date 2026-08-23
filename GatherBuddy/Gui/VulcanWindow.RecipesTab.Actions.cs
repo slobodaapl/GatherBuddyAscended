@@ -137,7 +137,9 @@ public partial class VulcanWindow
 
         if (GatherBuddy.RaphaelSolveCoordinator.TryGetSolution(request, out var solution) && solution != null && !solution.IsFailed)
         {
-            GatherBuddy.Log.Debug($"[VulcanWindow] Raphael solution already cached for recipe {recipe.RowId}, starting synthesis");
+            GatherBuddy.Log.Debug(
+                $"[VulcanWindow] Raphael solution already cached for recipe {recipe.RowId}, "
+                + $"starting synthesis with prepared key {request.GetKey()}");
             StartPreparedSynthesis(recipe, executionContext, trialSynthesis);
             return;
         }

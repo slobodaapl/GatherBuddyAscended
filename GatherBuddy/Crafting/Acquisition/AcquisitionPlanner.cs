@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 
 namespace GatherBuddy.Crafting.Acquisition;
 
@@ -19,7 +20,8 @@ public static class AcquisitionPlanner
 
     public static AcquisitionPlanningResult Plan(
         AcquisitionPlanningInput input,
-        AcquisitionPlanningSettings settings)
+        AcquisitionPlanningSettings settings,
+        CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(input);
         ArgumentNullException.ThrowIfNull(settings);
@@ -30,6 +32,7 @@ public static class AcquisitionPlanner
 
         foreach (var dependency in input.Dependencies)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             if (dependency.RequiredQuantity <= 0)
                 continue;
 
@@ -91,7 +94,14 @@ public static class AcquisitionPlanner
         var candidateSets = new List<IReadOnlyList<Candidate>>(blockedDependencies.Count);
         foreach (var dependency in blockedDependencies)
         {
-            var candidates = BuildCandidates(dependency, input, settings, out var candidateBlocker, out var limitExceeded);
+            cancellationToken.ThrowIfCancellationRequested();
+            var candidates = BuildCandidates(
+                dependency,
+                input,
+                settings,
+                cancellationToken,
+                out var candidateBlocker,
+                out var limitExceeded);
             if (limitExceeded)
             {
                 blockers.Add(new AcquisitionBlocker
@@ -143,7 +153,7 @@ public static class AcquisitionPlanner
             };
         }
 
-        var search = new GlobalSearch(input, settings, candidateSets);
+        var search = new GlobalSearch(input, settings, candidateSets, cancellationToken);
         search.Run();
 
         if (search.LimitExceeded)
@@ -229,8 +239,9 @@ public static class AcquisitionPlanner
 
     public static AcquisitionPlanningResult Evaluate(
         AcquisitionPlanningInput input,
-        AcquisitionPlanningSettings settings)
-        => Plan(input, settings);
+        AcquisitionPlanningSettings settings,
+        CancellationToken cancellationToken = default)
+        => Plan(input, settings, cancellationToken);
 
     private static string BuildCapabilityFailureReason(
         AcquisitionDependency dependency,
@@ -246,6 +257,7 @@ public static class AcquisitionPlanner
         AcquisitionDependency dependency,
         AcquisitionPlanningInput input,
         AcquisitionPlanningSettings settings,
+        CancellationToken cancellationToken,
         out string failureReason,
         out bool limitExceeded)
     {
@@ -350,74 +362,95 @@ public static class AcquisitionPlanner
             return new List<Candidate>();
         }
 
-        if (CanDiscardMarketChoices(sourceChoices, input, settings, requiredQuantity, requiredHq, requiredNq))
-            sourceChoices = sourceChoices
-                .Where(choice => choice.Kind != AcquisitionSourceKind.Market)
-                .ToList();
-
-        var results = new List<Candidate>();
-        var current = new List<ChosenSource>();
-        var states = 0;
-        var searchLimitExceeded = false;
-        var remainingQuantity = new long[sourceChoices.Count + 1];
-        var remainingHq = new long[sourceChoices.Count + 1];
-        var remainingNq = new long[sourceChoices.Count + 1];
-        for (var i = sourceChoices.Count - 1; i >= 0; i--)
+        List<Candidate> results;
+        var independentSources = sourceChoices.All(choice => choice.Outputs.All(output =>
+            output.ItemId == dependency.ItemId));
+        if (independentSources)
         {
-            var choice = sourceChoices[i];
-            var capacity = checked((long)choice.ReceiveQuantity * choice.MaxUses);
-            remainingQuantity[i] = checked(remainingQuantity[i + 1] + capacity);
-            remainingHq[i] = checked(remainingHq[i + 1] + (choice.IsHq ? capacity : 0));
-            remainingNq[i] = checked(remainingNq[i + 1] + (choice.IsHq ? 0 : capacity));
+            results = BuildIndependentCandidates(
+                dependency,
+                input,
+                settings,
+                sourceChoices,
+                requiredQuantity,
+                requiredHq,
+                requiredNq,
+                cancellationToken,
+                out var searchLimitExceeded);
+            limitExceeded = searchLimitExceeded;
+            if (searchLimitExceeded)
+            {
+                failureReason = "The exact per-item source search exceeded its deterministic state limit.";
+                return new List<Candidate>();
+            }
         }
-
-        void Visit(int index, int acquired, int hq, int nq)
+        else
         {
-            if (++states > MaxDependencySearchStates)
+            results = new List<Candidate>();
+            var current = new List<ChosenSource>();
+            var states = 0;
+            var searchLimitExceeded = false;
+            var remainingQuantity = new long[sourceChoices.Count + 1];
+            var remainingHq = new long[sourceChoices.Count + 1];
+            var remainingNq = new long[sourceChoices.Count + 1];
+            for (var i = sourceChoices.Count - 1; i >= 0; i--)
             {
-                searchLimitExceeded = true;
-                return;
+                var choice = sourceChoices[i];
+                var capacity = checked((long)choice.ReceiveQuantity * choice.MaxUses);
+                remainingQuantity[i] = checked(remainingQuantity[i + 1] + capacity);
+                remainingHq[i] = checked(remainingHq[i + 1] + (choice.IsHq ? capacity : 0));
+                remainingNq[i] = checked(remainingNq[i + 1] + (choice.IsHq ? 0 : capacity));
             }
 
-            if (acquired >= requiredQuantity && hq >= requiredHq && nq >= requiredNq)
+            void Visit(int index, int acquired, int hq, int nq)
             {
-                results.Add(Candidate.Create(dependency, current));
-                return;
-            }
-
-            if (index >= sourceChoices.Count
-                || (long)acquired + remainingQuantity[index] < requiredQuantity
-                || (long)hq + remainingHq[index] < requiredHq
-                || (long)nq + remainingNq[index] < requiredNq)
-                return;
-
-            var choice = sourceChoices[index];
-            var maxUses = choice.MaxUses;
-            for (var uses = 1; uses <= maxUses; uses++)
-            {
-                for (var use = 0; use < uses; use++)
-                    current.Add(new ChosenSource(choice));
-
-                var nextAcquired = checked(acquired + choice.ReceiveQuantity * uses);
-                var nextHq = checked(hq + (choice.IsHq ? choice.ReceiveQuantity * uses : 0));
-                var nextNq = checked(nq + (choice.IsHq ? 0 : choice.ReceiveQuantity * uses));
-                Visit(index + 1, nextAcquired, nextHq, nextNq);
-
-                for (var use = 0; use < uses; use++)
-                    current.RemoveAt(current.Count - 1);
-                if (searchLimitExceeded)
+                cancellationToken.ThrowIfCancellationRequested();
+                if (++states > MaxDependencySearchStates)
+                {
+                    searchLimitExceeded = true;
                     return;
+                }
+
+                if (acquired >= requiredQuantity && hq >= requiredHq && nq >= requiredNq)
+                {
+                    results.Add(Candidate.Create(dependency, current));
+                    return;
+                }
+
+                if (index >= sourceChoices.Count
+                    || (long)acquired + remainingQuantity[index] < requiredQuantity
+                    || (long)hq + remainingHq[index] < requiredHq
+                    || (long)nq + remainingNq[index] < requiredNq)
+                    return;
+
+                var choice = sourceChoices[index];
+                var maxUses = choice.MaxUses;
+                for (var uses = 1; uses <= maxUses; uses++)
+                {
+                    for (var use = 0; use < uses; use++)
+                        current.Add(new ChosenSource(choice));
+
+                    var nextAcquired = checked(acquired + choice.ReceiveQuantity * uses);
+                    var nextHq = checked(hq + (choice.IsHq ? choice.ReceiveQuantity * uses : 0));
+                    var nextNq = checked(nq + (choice.IsHq ? 0 : choice.ReceiveQuantity * uses));
+                    Visit(index + 1, nextAcquired, nextHq, nextNq);
+
+                    for (var use = 0; use < uses; use++)
+                        current.RemoveAt(current.Count - 1);
+                    if (searchLimitExceeded)
+                        return;
+                }
+
+                Visit(index + 1, acquired, hq, nq);
             }
 
-            Visit(index + 1, acquired, hq, nq);
-        }
-
-        Visit(0, 0, 0, 0);
-        limitExceeded = searchLimitExceeded;
-        if (searchLimitExceeded)
-        {
-            failureReason = "The exact per-item source search exceeded its deterministic state limit.";
-            return new List<Candidate>();
+            Visit(0, 0, 0, 0);
+            limitExceeded = searchLimitExceeded;
+            if (searchLimitExceeded)
+            {
+                failureReason = "The exact per-item source search exceeded its deterministic state limit.";
+                return new List<Candidate>();
+            }
         }
 
         var unique = results
@@ -447,73 +480,224 @@ public static class AcquisitionPlanner
         return unique;
     }
 
-    private static bool CanDiscardMarketChoices(
-        IReadOnlyList<SourceChoice> sourceChoices,
+    private static List<Candidate> BuildIndependentCandidates(
+        AcquisitionDependency dependency,
         AcquisitionPlanningInput input,
         AcquisitionPlanningSettings settings,
+        IReadOnlyList<SourceChoice> sourceChoices,
         int requiredQuantity,
         int requiredHq,
-        int requiredNq)
+        int requiredNq,
+        CancellationToken cancellationToken,
+        out bool limitExceeded)
     {
-        var markets = sourceChoices
-            .Where(choice => choice.Kind == AcquisitionSourceKind.Market)
-            .ToArray();
-        if (markets.Length == 0
-            || settings.PreferHQ
-            || settings.PreferMarketForSpecialCurrency
-                && sourceChoices.Any(choice => choice.Kind == AcquisitionSourceKind.Vendor
-                    && choice.IsSpecialCurrencySource))
-            return false;
-
-        var minGilPerUnit = sourceChoices
-            .Where(choice => choice.ReceiveQuantity > 0)
-            .Select(choice => choice.GilCost / choice.ReceiveQuantity)
-            .DefaultIfEmpty(long.MaxValue)
-            .Min();
-        if (minGilPerUnit == long.MaxValue)
-            return false;
-
-        foreach (var vendor in sourceChoices.Where(choice => choice.Kind == AcquisitionSourceKind.Vendor))
+        var states = 0;
+        limitExceeded = false;
+        if (!settings.PreferHQ && requiredHq == 0 && requiredNq == 0)
         {
-            var uses = DivideRoundUp(requiredQuantity, vendor.ReceiveQuantity);
-            if (uses <= 0 || uses > vendor.MaxUses)
-                continue;
-
-            var acquired = checked(vendor.ReceiveQuantity * uses);
-            var hq = vendor.IsHq ? acquired : 0;
-            var nq = vendor.IsHq ? 0 : acquired;
-            if (hq < requiredHq || nq < requiredNq)
-                continue;
-
-            var affordable = true;
-            foreach (var cost in vendor.Costs)
-            {
-                if (!TryGetBalance(input, cost.CurrencyId, out var balance)
-                    || checked(cost.Amount * (long)uses) > balance)
-                {
-                    affordable = false;
-                    break;
-                }
-            }
-            if (!affordable)
-                continue;
-
-            var vendorGil = checked(vendor.GilCost * uses);
-            if (settings.PreferVendors)
-                return true;
-
-            var marketCanTieOrBeatVendor = markets.Any(market =>
-            {
-                var remaining = Math.Max(0, requiredQuantity - market.ReceiveQuantity);
-                var lowerBound = checked(market.GilCost + checked((long)remaining * minGilPerUnit));
-                return lowerBound <= vendorGil;
-            });
-            if (!marketCanTieOrBeatVendor)
-                return true;
+            var frontier = BuildQuantityFrontier(
+                dependency,
+                input,
+                settings,
+                sourceChoices,
+                requiredQuantity,
+                cancellationToken,
+                ref states,
+                ref limitExceeded);
+            return limitExceeded ? new List<Candidate>() : frontier[requiredQuantity];
         }
 
-        return false;
+        var hqFrontier = BuildQuantityFrontier(
+            dependency,
+            input,
+            settings,
+            sourceChoices.Where(choice => choice.IsHq),
+            requiredQuantity,
+            cancellationToken,
+            ref states,
+            ref limitExceeded);
+        if (limitExceeded)
+            return new List<Candidate>();
+        var nqFrontier = BuildQuantityFrontier(
+            dependency,
+            input,
+            settings,
+            sourceChoices.Where(choice => !choice.IsHq),
+            requiredQuantity,
+            cancellationToken,
+            ref states,
+            ref limitExceeded);
+        if (limitExceeded)
+            return new List<Candidate>();
+        var nqAtLeast = BuildAtLeastFrontier(nqFrontier, input, settings);
+        var results = new Dictionary<string, CandidateBucket>(StringComparer.Ordinal);
+
+        for (var hqQuantity = requiredHq; hqQuantity <= requiredQuantity; hqQuantity++)
+        foreach (var hqCandidate in hqFrontier[hqQuantity])
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var remaining = Math.Max(requiredNq, requiredQuantity - hqCandidate.AcquiredQuantity);
+            if (remaining > requiredQuantity)
+                continue;
+            foreach (var nqCandidate in nqAtLeast[remaining])
+            {
+                if (++states > MaxDependencySearchStates)
+                {
+                    limitExceeded = true;
+                    return new List<Candidate>();
+                }
+                var combined = Candidate.Combine(dependency, hqCandidate, nqCandidate);
+                if (combined.AcquiredQuantity < requiredQuantity
+                    || combined.AcquiredQuantity - combined.NonHqQuantity < requiredHq
+                    || combined.NonHqQuantity < requiredNq)
+                    continue;
+                InsertCandidateObjectives(results, combined, input, settings);
+            }
+        }
+
+        return FlattenCandidateBuckets(results);
     }
+
+    private static List<Candidate>[] BuildQuantityFrontier(
+        AcquisitionDependency dependency,
+        AcquisitionPlanningInput input,
+        AcquisitionPlanningSettings settings,
+        IEnumerable<SourceChoice> sourceChoices,
+        int target,
+        CancellationToken cancellationToken,
+        ref int states,
+        ref bool limitExceeded)
+    {
+        var frontier = Enumerable.Range(0, target + 1)
+            .Select(_ => new Dictionary<string, CandidateBucket>(StringComparer.Ordinal))
+            .ToArray();
+        InsertCandidateObjectives(frontier[0], new Candidate(), input, settings);
+
+        foreach (var choice in sourceChoices
+                     .OrderBy(choice => choice.IsSpecialCurrencySource ? 0 : choice.Kind == AcquisitionSourceKind.Vendor ? 1 : 2)
+                     .ThenBy(choice => choice.Identity, StringComparer.Ordinal))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var maxUses = Math.Min(choice.MaxUses, DivideRoundUp(target, choice.ReceiveQuantity));
+            foreach (var uses in SplitBoundedUses(maxUses))
+            {
+                var next = frontier
+                    .Select(candidates => new Dictionary<string, CandidateBucket>(candidates, StringComparer.Ordinal))
+                    .ToArray();
+                for (var acquired = 0; acquired <= target; acquired++)
+                foreach (var candidate in FlattenCandidateBuckets(frontier[acquired]))
+                {
+                    if (++states > MaxDependencySearchStates)
+                    {
+                        limitExceeded = true;
+                        return frontier.Select(FlattenCandidateBuckets).ToArray();
+                    }
+                    var extended = candidate.CloneAndAdd(dependency, choice, uses);
+                    if (!FitsKnownCurrencyBalances(extended, input))
+                        continue;
+                    var nextQuantity = Math.Min(target, extended.AcquiredQuantity);
+                    InsertCandidateObjectives(next[nextQuantity], extended, input, settings);
+                }
+                frontier = next;
+            }
+        }
+
+        return frontier.Select(FlattenCandidateBuckets).ToArray();
+    }
+
+    private static IEnumerable<int> SplitBoundedUses(int maxUses)
+    {
+        long block = 1;
+        var remaining = maxUses;
+        while (remaining > 0)
+        {
+            var uses = (int)Math.Min(block, remaining);
+            yield return uses;
+            remaining -= uses;
+            block = Math.Min(block * 2, int.MaxValue);
+        }
+    }
+
+    private static List<Candidate>[] BuildAtLeastFrontier(
+        IReadOnlyList<List<Candidate>> exact,
+        AcquisitionPlanningInput input,
+        AcquisitionPlanningSettings settings)
+    {
+        var atLeast = new List<Candidate>[exact.Count];
+        var running = new Dictionary<string, CandidateBucket>(StringComparer.Ordinal);
+        for (var quantity = exact.Count - 1; quantity >= 0; quantity--)
+        {
+            foreach (var candidate in exact[quantity])
+                InsertCandidateObjectives(running, candidate, input, settings);
+            atLeast[quantity] = FlattenCandidateBuckets(running);
+        }
+        return atLeast;
+    }
+
+    private static void InsertCandidateObjectives(
+        Dictionary<string, CandidateBucket> frontier,
+        Candidate candidate,
+        AcquisitionPlanningInput input,
+        AcquisitionPlanningSettings settings)
+    {
+        var key = candidate.GetDpStateSignature(settings);
+        if (!frontier.TryGetValue(key, out var bucket))
+            bucket = default;
+        var minimum = bucket.Minimum;
+        if (minimum == null || CompareCandidateMinimum(candidate, minimum, input) < 0)
+            minimum = candidate;
+        frontier[key] = new CandidateBucket(minimum);
+    }
+
+    private static List<Candidate> FlattenCandidateBuckets(
+        IReadOnlyDictionary<string, CandidateBucket> frontier)
+        => frontier.Values
+            .Where(bucket => bucket.Minimum != null)
+            .Select(bucket => bucket.Minimum!)
+            .ToList();
+
+    private static bool FitsKnownCurrencyBalances(
+        Candidate candidate,
+        AcquisitionPlanningInput input)
+    {
+        foreach (var cost in candidate.CurrencyCosts)
+            if (TryGetBalance(input, cost.Key, out var balance) && cost.Value > balance)
+                return false;
+        return true;
+    }
+
+    private static int CompareCandidateMinimum(
+        Candidate left,
+        Candidate right,
+        AcquisitionPlanningInput input)
+    {
+        if (left.GilCost != right.GilCost)
+            return left.GilCost.CompareTo(right.GilCost);
+        if (left.WorldCount != right.WorldCount)
+            return left.WorldCount.CompareTo(right.WorldCount);
+        if (left.Transactions.Count != right.Transactions.Count)
+            return left.Transactions.Count.CompareTo(right.Transactions.Count);
+        if (left.Overbuy != right.Overbuy)
+            return left.Overbuy.CompareTo(right.Overbuy);
+        if (left.NonHqQuantity != right.NonHqQuantity)
+            return left.NonHqQuantity.CompareTo(right.NonHqQuantity);
+        var leftTravel = VendorRoutesRequiringTravel(left.Transactions, input.CurrentTerritoryId);
+        var rightTravel = VendorRoutesRequiringTravel(right.Transactions, input.CurrentTerritoryId);
+        if (leftTravel != rightTravel)
+            return leftTravel.CompareTo(rightTravel);
+        return string.CompareOrdinal(left.Signature, right.Signature);
+    }
+
+    private readonly record struct CandidateBucket(Candidate? Minimum);
+
+    private static int VendorRoutesRequiringTravel(
+        IEnumerable<AcquisitionTransaction> transactions,
+        uint currentTerritoryId)
+        => transactions.Count(transaction =>
+            transaction.SourceKind == AcquisitionSourceKind.Vendor
+            && (currentTerritoryId == 0
+                || transaction.VendorTerritoryId == 0
+                || transaction.VendorTerritoryId != currentTerritoryId));
 
     private static IReadOnlyList<AcquisitionCurrencyCost>? NormalizeCosts(
         IReadOnlyList<AcquisitionCurrencyCost> costs)
@@ -826,71 +1010,166 @@ public static class AcquisitionPlanner
         public int AcquiredQuantity { get; private set; }
         public int Overbuy { get; private set; }
         public int NonHqQuantity { get; private set; }
+        public int NqTargetCoverage { get; private set; }
         public int SpecialCurrencyVendorCount { get; private set; }
         public int SpecialCurrencyMarketCount { get; private set; }
         public string Signature { get; private set; } = string.Empty;
+        public int MarketTransactionCount
+            => Transactions.Count(transaction => transaction.SourceKind == AcquisitionSourceKind.Market);
+        public int WorldCount
+            => Transactions
+                .Where(transaction => transaction.SourceKind == AcquisitionSourceKind.Market)
+                .Select(transaction => transaction.WorldId)
+                .Distinct()
+                .Count();
+        public string GetDpStateSignature(AcquisitionPlanningSettings settings)
+        {
+            var currencies = string.Join(",", CurrencyCosts
+                .Where(cost => cost.Key != AcquisitionCurrency.GilId)
+                .OrderBy(cost => cost.Key)
+                .Select(cost => $"{cost.Key}:{cost.Value}"));
+            var worlds = string.Join(",", Transactions
+                .Where(transaction => transaction.SourceKind == AcquisitionSourceKind.Market)
+                .Select(transaction => transaction.WorldId)
+                .Distinct()
+                .OrderBy(worldId => worldId));
+            var preferredSpecialCount = settings.PreferMarketForSpecialCurrency
+                ? SpecialCurrencyVendorCount
+                : SpecialCurrencyMarketCount;
+            return $"{currencies};w={worlds};hq={(settings.PreferHQ ? NqTargetCoverage : 0)};"
+                + $"v={(settings.PreferVendors ? MarketTransactionCount : 0)};s={preferredSpecialCount}";
+        }
+
+        public Candidate()
+        {
+        }
+
+        private Candidate(Candidate source)
+        {
+            Transactions.AddRange(source.Transactions);
+            foreach (var cost in source.CurrencyCosts)
+                CurrencyCosts[cost.Key] = cost.Value;
+            AcquiredQuantity = source.AcquiredQuantity;
+            Overbuy = source.Overbuy;
+            NonHqQuantity = source.NonHqQuantity;
+            NqTargetCoverage = source.NqTargetCoverage;
+            SpecialCurrencyVendorCount = source.SpecialCurrencyVendorCount;
+            SpecialCurrencyMarketCount = source.SpecialCurrencyMarketCount;
+            Signature = source.Signature;
+        }
 
         public static Candidate Create(AcquisitionDependency dependency, IEnumerable<ChosenSource> selected)
         {
             var candidate = new Candidate();
-            var sourceOrdinals = new Dictionary<string, int>(StringComparer.Ordinal);
             var selectedSources = selected
                 .GroupBy(chosen => chosen.Choice.Identity, StringComparer.Ordinal)
                 .Select(group => (choice: group.First().Choice, units: group.Count()))
                 .ToArray();
             foreach (var (choice, units) in selectedSources)
-            {
-                var sourceKey = choice.Identity;
-                var sourceOrdinal = sourceOrdinals.GetValueOrDefault(sourceKey);
-                sourceOrdinals[sourceKey] = checked(sourceOrdinal + 1);
-                var transactionCosts = ScaleCosts(choice.Costs, units);
-                var transaction = new AcquisitionTransaction
-                {
-                    ExecutionId = AcquisitionTransactionIdentity.Create(
-                        choice.OfferItemId,
-                        dependency.SelectedPath?.RecipeId ?? 0,
-                        choice.Kind,
-                        choice.SourceId,
-                        choice.IsHq,
-                        sourceOrdinal),
-                    ItemId = choice.OfferItemId,
-                    ItemName = string.IsNullOrWhiteSpace(dependency.ItemName)
-                        ? choice.OfferItemName
-                        : dependency.ItemName,
-                    SelectedRecipeId = dependency.SelectedPath?.RecipeId ?? 0,
-                    SourceKind = choice.Kind,
-                    SourceId = choice.SourceId,
-                    SourceName = choice.SourceName,
-                    Location = choice.Location,
-                    VendorTerritoryId = choice.VendorTerritoryId,
-                    WorldId = choice.WorldId,
-                    WorldName = choice.WorldName,
-                    Quantity = checked(choice.PrimaryReceiveQuantity * units),
-                    Outputs = choice.Outputs,
-                    PrimaryOutputQuantity = choice.PrimaryReceiveQuantity,
-                    PurchaseUnits = units,
-                    IsHq = choice.IsHq,
-                    IsSpecialCurrencySource = choice.IsSpecialCurrencySource,
-                    IsSpecialCurrencyAlternative = choice.IsSpecialCurrencyAlternative,
-                    Costs = transactionCosts,
-                    GilCost = checked(choice.GilCost * units),
-                    TaxGilCost = checked(choice.TaxGilCost * units),
-                };
-                candidate.Transactions.Add(transaction);
-                candidate.AcquiredQuantity = checked(candidate.AcquiredQuantity + choice.ReceiveQuantity * units);
-                candidate.NonHqQuantity = checked(candidate.NonHqQuantity + (choice.IsHq ? 0 : choice.ReceiveQuantity * units));
-                if (choice.IsSpecialCurrencySource)
-                    candidate.SpecialCurrencyVendorCount += units;
-                if (choice.IsSpecialCurrencyAlternative)
-                    candidate.SpecialCurrencyMarketCount += units;
-                foreach (var cost in transactionCosts)
-                    candidate.CurrencyCosts[cost.CurrencyId] = checked(candidate.CurrencyCosts.GetValueOrDefault(cost.CurrencyId) + cost.Amount);
-            }
-
-            candidate.Overbuy = Math.Max(0, candidate.AcquiredQuantity - dependency.RequiredQuantity);
-            candidate.Signature = string.Join("|", candidate.Transactions.Select(transaction =>
-                $"{transaction.SourceKind}:{transaction.SourceId}:{transaction.Quantity}:{transaction.PurchaseUnits}:{transaction.IsHq}"));
+                candidate.Add(dependency, choice, units);
             return candidate;
+        }
+
+        public Candidate CloneAndAdd(
+            AcquisitionDependency dependency,
+            SourceChoice choice,
+            int units)
+        {
+            var clone = new Candidate(this);
+            clone.Add(dependency, choice, units);
+            return clone;
+        }
+
+        public static Candidate Combine(
+            AcquisitionDependency dependency,
+            Candidate left,
+            Candidate right)
+        {
+            var combined = new Candidate(left);
+            combined.Transactions.AddRange(right.Transactions);
+            foreach (var cost in right.CurrencyCosts)
+                combined.CurrencyCosts[cost.Key] = checked(combined.CurrencyCosts.GetValueOrDefault(cost.Key) + cost.Value);
+            combined.AcquiredQuantity = checked(left.AcquiredQuantity + right.AcquiredQuantity);
+            combined.NonHqQuantity = checked(left.NonHqQuantity + right.NonHqQuantity);
+            combined.SpecialCurrencyVendorCount = checked(
+                left.SpecialCurrencyVendorCount + right.SpecialCurrencyVendorCount);
+            combined.SpecialCurrencyMarketCount = checked(
+                left.SpecialCurrencyMarketCount + right.SpecialCurrencyMarketCount);
+            combined.RefreshDerived(dependency.RequiredQuantity, dependency.RequiredNqQuantity);
+            return combined;
+        }
+
+        private void Add(AcquisitionDependency dependency, SourceChoice choice, int units)
+        {
+            if (units <= 0)
+                return;
+
+            var existingIndex = Transactions.FindIndex(transaction =>
+                transaction.SourceKind == choice.Kind
+                && string.Equals(transaction.SourceId, choice.SourceId, StringComparison.Ordinal)
+                && transaction.WorldId == choice.WorldId
+                && transaction.IsHq == choice.IsHq);
+            var totalUnits = existingIndex < 0
+                ? units
+                : checked(Transactions[existingIndex].PurchaseUnits + units);
+            var transactionCosts = ScaleCosts(choice.Costs, totalUnits);
+            var transaction = new AcquisitionTransaction
+            {
+                ExecutionId = AcquisitionTransactionIdentity.Create(
+                    choice.OfferItemId,
+                    dependency.SelectedPath?.RecipeId ?? 0,
+                    choice.Kind,
+                    choice.SourceId,
+                    choice.IsHq,
+                    0),
+                ItemId = choice.OfferItemId,
+                ItemName = string.IsNullOrWhiteSpace(dependency.ItemName)
+                    ? choice.OfferItemName
+                    : dependency.ItemName,
+                SelectedRecipeId = dependency.SelectedPath?.RecipeId ?? 0,
+                SourceKind = choice.Kind,
+                SourceId = choice.SourceId,
+                SourceName = choice.SourceName,
+                Location = choice.Location,
+                VendorTerritoryId = choice.VendorTerritoryId,
+                WorldId = choice.WorldId,
+                WorldName = choice.WorldName,
+                Quantity = checked(choice.PrimaryReceiveQuantity * totalUnits),
+                Outputs = choice.Outputs,
+                PrimaryOutputQuantity = choice.PrimaryReceiveQuantity,
+                PurchaseUnits = totalUnits,
+                IsHq = choice.IsHq,
+                IsSpecialCurrencySource = choice.IsSpecialCurrencySource,
+                IsSpecialCurrencyAlternative = choice.IsSpecialCurrencyAlternative,
+                Costs = transactionCosts,
+                GilCost = checked(choice.GilCost * totalUnits),
+                TaxGilCost = checked(choice.TaxGilCost * totalUnits),
+            };
+            if (existingIndex < 0)
+                Transactions.Add(transaction);
+            else
+                Transactions[existingIndex] = transaction;
+
+            AcquiredQuantity = checked(AcquiredQuantity + choice.ReceiveQuantity * units);
+            NonHqQuantity = checked(NonHqQuantity + (choice.IsHq ? 0 : choice.ReceiveQuantity * units));
+            if (choice.IsSpecialCurrencySource)
+                SpecialCurrencyVendorCount = checked(SpecialCurrencyVendorCount + units);
+            if (choice.IsSpecialCurrencyAlternative)
+                SpecialCurrencyMarketCount = checked(SpecialCurrencyMarketCount + units);
+            foreach (var cost in ScaleCosts(choice.Costs, units))
+                CurrencyCosts[cost.CurrencyId] = checked(CurrencyCosts.GetValueOrDefault(cost.CurrencyId) + cost.Amount);
+            RefreshDerived(dependency.RequiredQuantity, dependency.RequiredNqQuantity);
+        }
+
+        private void RefreshDerived(int requiredQuantity, int requiredNqQuantity)
+        {
+            Overbuy = Math.Max(0, AcquiredQuantity - requiredQuantity);
+            var hardNqCoverage = Math.Clamp(requiredNqQuantity, 0, requiredQuantity);
+            var hqQuantity = Math.Max(0, AcquiredQuantity - NonHqQuantity);
+            var usableHqCoverage = Math.Min(hqQuantity, requiredQuantity - hardNqCoverage);
+            NqTargetCoverage = requiredQuantity - usableHqCoverage;
+            Signature = string.Join("|", Transactions.Select(transaction =>
+                $"{transaction.SourceKind}:{transaction.SourceId}:{transaction.Quantity}:{transaction.PurchaseUnits}:{transaction.IsHq}"));
         }
     }
 
@@ -922,6 +1201,7 @@ public static class AcquisitionPlanner
         public long GilCost => CurrencyCosts.GetValueOrDefault(AcquisitionCurrency.GilId);
         public int Overbuy { get; private set; }
         public int NonHqQuantity { get; private set; }
+        public int NqTargetCoverage { get; private set; }
         public int SpecialCurrencyVendorCount { get; private set; }
         public int SpecialCurrencyMarketCount { get; private set; }
         public long TotalTaxGil { get; private set; }
@@ -954,6 +1234,7 @@ public static class AcquisitionPlanner
         {
             Overbuy = checked(Overbuy + candidate.Overbuy);
             NonHqQuantity = checked(NonHqQuantity + candidate.NonHqQuantity);
+            NqTargetCoverage = checked(NqTargetCoverage + candidate.NqTargetCoverage);
             foreach (var transaction in candidate.Transactions)
             {
                 var existingIndex = Transactions.FindIndex(existing =>
@@ -1036,6 +1317,7 @@ public static class AcquisitionPlanner
             Transactions.AddRange(snapshot.Transactions);
             Overbuy = snapshot.Overbuy;
             NonHqQuantity = snapshot.NonHqQuantity;
+            NqTargetCoverage = snapshot.NqTargetCoverage;
             SpecialCurrencyVendorCount = snapshot.SpecialCurrencyVendorCount;
             SpecialCurrencyMarketCount = snapshot.SpecialCurrencyMarketCount;
             TotalTaxGil = snapshot.TotalTaxGil;
@@ -1052,6 +1334,7 @@ public static class AcquisitionPlanner
                 clone.CurrencyCosts[cost.Key] = cost.Value;
             clone.Overbuy = Overbuy;
             clone.NonHqQuantity = NonHqQuantity;
+            clone.NqTargetCoverage = NqTargetCoverage;
             clone.SpecialCurrencyVendorCount = SpecialCurrencyVendorCount;
             clone.SpecialCurrencyMarketCount = SpecialCurrencyMarketCount;
             clone.TotalTaxGil = TotalTaxGil;
@@ -1153,6 +1436,7 @@ public static class AcquisitionPlanner
         private readonly AcquisitionPlanningInput _input;
         private readonly AcquisitionPlanningSettings _settings;
         private readonly IReadOnlyList<IReadOnlyList<Candidate>> _candidateSets;
+        private readonly CancellationToken _cancellationToken;
         private readonly HashSet<uint> _unknownCurrencyIds = new();
         private long _states;
 
@@ -1165,11 +1449,13 @@ public static class AcquisitionPlanner
         public GlobalSearch(
             AcquisitionPlanningInput input,
             AcquisitionPlanningSettings settings,
-            IReadOnlyList<IReadOnlyList<Candidate>> candidateSets)
+            IReadOnlyList<IReadOnlyList<Candidate>> candidateSets,
+            CancellationToken cancellationToken)
         {
             _input = input;
             _settings = settings;
             _candidateSets = candidateSets;
+            _cancellationToken = cancellationToken;
         }
 
         public void Run()
@@ -1177,10 +1463,12 @@ public static class AcquisitionPlanner
             var frontier = new List<CandidatePlan> { new() };
             foreach (var candidateSet in _candidateSets)
             {
+                _cancellationToken.ThrowIfCancellationRequested();
                 var next = new List<CandidatePlan>();
                 foreach (var partial in frontier)
                 foreach (var candidate in candidateSet)
                 {
+                    _cancellationToken.ThrowIfCancellationRequested();
                     if (++_states > MaxGlobalSearchStates)
                     {
                         LimitExceeded = true;
@@ -1230,7 +1518,8 @@ public static class AcquisitionPlanner
             if ((left.HasCoProductTransactions || right.HasCoProductTransactions)
                 && !string.Equals(left.TransactionStateSignature, right.TransactionStateSignature, StringComparison.Ordinal))
                 return false;
-            if (left.NonHqQuantity > right.NonHqQuantity
+            if (_settings.PreferHQ && left.NqTargetCoverage > right.NqTargetCoverage
+                || left.NonHqQuantity > right.NonHqQuantity
                 || left.SpecialCurrencyVendorCount > right.SpecialCurrencyVendorCount
                 || left.SpecialCurrencyMarketCount > right.SpecialCurrencyMarketCount
                 || left.MarketTransactionCount > right.MarketTransactionCount
@@ -1244,7 +1533,8 @@ public static class AcquisitionPlanner
                 if (left.CurrencyCosts.GetValueOrDefault(currencyId) > right.CurrencyCosts.GetValueOrDefault(currencyId))
                     return false;
 
-            return left.NonHqQuantity < right.NonHqQuantity
+            return _settings.PreferHQ && left.NqTargetCoverage < right.NqTargetCoverage
+                || left.NonHqQuantity < right.NonHqQuantity
                 || left.SpecialCurrencyVendorCount < right.SpecialCurrencyVendorCount
                 || left.SpecialCurrencyMarketCount < right.SpecialCurrencyMarketCount
                 || left.MarketTransactionCount < right.MarketTransactionCount
@@ -1274,8 +1564,8 @@ public static class AcquisitionPlanner
 
         private int ComparePreferred(CandidatePlan left, CandidatePlan right)
         {
-            if (_settings.PreferHQ && left.NonHqQuantity != right.NonHqQuantity)
-                return left.NonHqQuantity.CompareTo(right.NonHqQuantity);
+            if (_settings.PreferHQ && left.NqTargetCoverage != right.NqTargetCoverage)
+                return left.NqTargetCoverage.CompareTo(right.NqTargetCoverage);
             if (_settings.PreferVendors)
             {
                 var leftMarket = left.Transactions.Count(transaction => transaction.SourceKind == AcquisitionSourceKind.Market);

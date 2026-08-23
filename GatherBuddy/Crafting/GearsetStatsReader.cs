@@ -356,7 +356,7 @@ public static unsafe class GearsetStatsReader
         perception = 0;
         try
         {
-            if (Dalamud.Objects.LocalPlayer?.ClassJob.RowId == jobId)
+            if (Dalamud.PlayerState.ClassJob.RowId == jobId)
             {
                 var playerState = PlayerState.Instance();
                 if (playerState == null)

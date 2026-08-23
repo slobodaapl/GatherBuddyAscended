@@ -13,7 +13,7 @@ namespace GatherBuddy.Vulcan;
 internal static partial class DonatelloNative
 {
     private const string LibraryName = "donatello_ffi.dll";
-    internal const uint AbiVersion = 12;
+    internal const uint AbiVersion = 13;
     private static readonly SemaphoreSlim NativeSolveGate = new(1, 1);
     private static readonly JsonSerializerOptions RequestSerializerOptions = new()
     {
@@ -248,6 +248,7 @@ internal static partial class DonatelloNative
                 craft,
                 solveMode,
                 experimentalProgressPriorityEnabled),
+            PreferQualityFirst = craft.CraftExpert && solveMode != SolveMode.CompleteFastest,
             MinimizeSteps = solveMode == SolveMode.CompleteFastest
                 ? false
                 : craft.DonatelloOptions?.MinimizeSteps ?? fallbackMinimizeSteps,

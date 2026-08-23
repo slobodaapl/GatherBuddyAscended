@@ -49,9 +49,15 @@ public class RaphaelSolveCoordinator
     internal const int SolutionCacheVersion = 3;
 
     public RaphaelSolveCoordinator(RaphaelSolveCoordinatorConfig? config = null)
+        : this(config, loadPersistentCache: true)
+    {
+    }
+
+    internal RaphaelSolveCoordinator(RaphaelSolveCoordinatorConfig? config, bool loadPersistentCache)
     {
         _config = config ?? new RaphaelSolveCoordinatorConfig();
-        Load();
+        if (loadPersistentCache)
+            Load();
     }
 
     public void Save()

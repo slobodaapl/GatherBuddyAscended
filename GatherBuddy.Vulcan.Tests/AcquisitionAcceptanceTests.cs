@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text.Json;
+using System.Threading;
 using GatherBuddy.AutoGather;
 using GatherBuddy.Crafting;
 using GatherBuddy.Crafting.Acquisition;
@@ -42,8 +43,16 @@ public static class AcquisitionAcceptanceTests
         SameSourceDifferentItemVendorTransactionsRemainDistinct(require);
         CoProductVendorTransactionIsSharedAcrossDependencies(require);
         ParetoFrontierAvoidsCartesianGlobalExplosion(require);
+        MixedVendorAndMarketSupplyIsOptimal(require);
+        SpecialCurrencyAllocationMaximizesGilReduction(require);
         FeasibleVendorSurvivesImpossibleMarketplaceBranch(require);
-        ExactSearchReportsItsDeterministicLimit(require);
+        BudgetRetainsMixedPreferenceFallback(require);
+        PreferHqIsInertWithoutHqSources(require);
+        PreferHqMaximizesUsefulHqCoverageWithinBudget(require);
+        MarketplaceTargetDemandKeepsHqPreferenceSoft(require);
+        CappedDpHandlesDenseAtomicListings(require);
+        CappedDpHandlesLargeAtomicListingSets(require);
+        AcquisitionPlanningHonorsCancellation(require);
         AcquisitionSettingsRoundTrip(require);
     }
 
@@ -898,24 +907,25 @@ public static class AcquisitionAcceptanceTests
             CurrencyBalances = new Dictionary<uint, long> { [9004] = 1 },
             GilBalance = 1_000,
         };
-        var planning = AcquisitionPlanner.Plan(
-            input,
-            new AcquisitionPlanningSettings
-            {
-                AutoPurchaseBlockedDependencies = true,
-                PreferMarketForSpecialCurrency = true,
-            });
-        var reasons = CraftingListEditor.BuildMarketplacePurchaseReasons(
-            new CraftingAcquisitionService.Evaluation
+        var evaluation = CraftingAcquisitionService.Evaluate(
+            new CraftingAcquisitionService.PlanningCapture
             {
                 Snapshot = new AcquisitionPlanningInputBuilder.BuildResult { Input = input },
-                Planning = planning,
-            },
+                Settings = new AcquisitionPlanningSettings
+                {
+                    AutoPurchaseBlockedDependencies = true,
+                    PreferMarketForSpecialCurrency = true,
+                },
+            });
+        var reasons = CraftingListEditor.BuildMarketplacePurchaseReasons(
+            evaluation,
             preferMarketForSpecialCurrency: true);
 
-        require(reasons.TryGetValue(701u, out var reason)
+        require(evaluation.Planning?.SelectedPlan?.Transactions.SingleOrDefault()?.SourceKind
+                == AcquisitionSourceKind.Market
+                && reasons.TryGetValue(701u, out var reason)
                 && reason.Text == "market selected by special-currency preference",
-            "special-currency market purchases must identify the preference that selected them");
+            "captured acquisition input must preserve planning and purchase-reason semantics when evaluated independently");
     }
 
     private static void InsufficientCurrencyMarketReasonIncludesCostAndIcon(Action<bool, string> require)
@@ -974,7 +984,7 @@ public static class AcquisitionAcceptanceTests
             "market fallback must identify the total missing special-currency cost and its icon");
     }
 
-    private static void ExactSearchReportsItsDeterministicLimit(Action<bool, string> require)
+    private static void CappedDpHandlesDenseAtomicListings(Action<bool, string> require)
     {
         var listings = Enumerable.Range(0, 20)
             .Select(index => Listing(800, 8000 + index, 1, price: index + 1))
@@ -988,8 +998,329 @@ public static class AcquisitionAcceptanceTests
             },
             Enabled());
 
-        require(result.Status == AcquisitionPlanStatus.DeterministicLimitExceeded,
-            "bounded exact search must fail explicitly instead of returning a partial greedy plan");
+        require(result.IsSuccess
+                && result.SelectedPlan?.Transactions.Count == 10
+                && result.SelectedPlan.Estimate.TotalGil == 55,
+            "capped listing DP must solve a dense atomic-listing set exactly without reaching the legacy subset-search limit");
+    }
+
+    private static void CappedDpHandlesLargeAtomicListingSets(Action<bool, string> require)
+    {
+        var listings = Enumerable.Range(0, 200)
+            .Select(index => Listing(803, 803_000 + index, 1, price: index + 1))
+            .ToArray();
+        var result = AcquisitionPlanner.Plan(
+            new AcquisitionPlanningInput
+            {
+                Dependencies = new[] { Blocked(803, 100) },
+                MarketListings = listings,
+                GilBalance = 1_000_000,
+            },
+            Enabled());
+
+        require(result.IsSuccess
+                && result.SelectedPlan?.Transactions.Count == 100
+                && result.SelectedPlan.Estimate.TotalGil == 5_050,
+            $"quantity-capped DP must solve 200 atomic listings for a target of 100 exactly "
+            + $"(status={result.Status}, gil={result.SelectedPlan?.Estimate.TotalGil}, "
+            + $"transactions={result.SelectedPlan?.Transactions.Count})");
+    }
+
+    private static void AcquisitionPlanningHonorsCancellation(Action<bool, string> require)
+    {
+        using var cancellationSource = new CancellationTokenSource();
+        cancellationSource.Cancel();
+        var canceled = false;
+        try
+        {
+            _ = AcquisitionPlanner.Plan(
+                new AcquisitionPlanningInput
+                {
+                    Dependencies = new[] { Blocked(804, 1) },
+                    MarketListings = new[] { Listing(804, 804_000, 1) },
+                    GilBalance = 1_000,
+                },
+                Enabled(),
+                cancellationSource.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            canceled = true;
+        }
+
+        require(canceled,
+            "acquisition planning must stop when its caller cancels the estimate");
+    }
+
+    private static void MixedVendorAndMarketSupplyIsOptimal(Action<bool, string> require)
+    {
+        var result = AcquisitionPlanner.Plan(
+            new AcquisitionPlanningInput
+            {
+                Dependencies = new[] { Blocked(802, 10) },
+                VendorOffers = new[] { Vendor(802, "fixed-gil-vendor", 10) },
+                MarketListings = new[]
+                {
+                    new AcquisitionMarketListing
+                    {
+                        ItemId = 802,
+                        ListingId = 8_020,
+                        WorldId = 10,
+                        WorldName = "Test World",
+                        Quantity = 6,
+                        PricePerUnit = 0,
+                        TotalTax = 1,
+                    },
+                },
+                GilBalance = 1_000,
+            },
+            Enabled());
+
+        var selected = result.SelectedPlan;
+        require(result.IsSuccess
+                && selected?.Estimate.TotalGil == 41
+                && selected.Transactions.Count == 2
+                && selected.Transactions.Single(transaction =>
+                    transaction.SourceKind == AcquisitionSourceKind.Vendor).PurchaseUnits == 4,
+            $"fixed-price vendor supply must fill the residual after a cheaper atomic market bundle "
+            + $"(status={result.Status}, gil={selected?.Estimate.TotalGil}, transactions="
+            + $"{string.Join(" | ", selected?.Transactions.Select(transaction => $"{transaction.SourceKind}:{transaction.SourceId}:{transaction.PurchaseUnits}:{transaction.Quantity}") ?? [])})");
+    }
+
+    private static void BudgetRetainsMixedPreferenceFallback(Action<bool, string> require)
+    {
+        var result = AcquisitionPlanner.Plan(
+            new AcquisitionPlanningInput
+            {
+                Dependencies = new[] { Blocked(805, 2) },
+                VendorOffers = new[] { Vendor(805, "preferred-vendor", 100) },
+                MarketListings = new[]
+                {
+                    Listing(805, 805_001, 1, price: 10),
+                    Listing(805, 805_002, 1, price: 10),
+                },
+                GilBalance = 1_000,
+            },
+            new AcquisitionPlanningSettings
+            {
+                AutoPurchaseBlockedDependencies = true,
+                PreferVendors = true,
+                MaximumGilSpend = 110,
+            });
+
+        var selected = result.SelectedPlan;
+        require(result.IsSuccess
+                && selected?.Estimate.TotalGil == 110
+                && selected.Transactions.Count == 2
+                && selected.Transactions.Single(transaction =>
+                    transaction.SourceKind == AcquisitionSourceKind.Vendor).PurchaseUnits == 1
+                && selected.Transactions.Single(transaction =>
+                    transaction.SourceKind == AcquisitionSourceKind.Market).PurchaseUnits == 1,
+            $"a hard budget must retain the best mixed fallback between the preferred and cheapest plans "
+            + $"(status={result.Status}, gil={selected?.Estimate.TotalGil}, transactions="
+            + $"{string.Join(" | ", selected?.Transactions.Select(transaction => $"{transaction.SourceKind}:{transaction.SourceId}:{transaction.PurchaseUnits}:{transaction.Quantity}") ?? [])})");
+    }
+
+    private static void PreferHqIsInertWithoutHqSources(Action<bool, string> require)
+    {
+        const uint itemId = 806;
+        const uint currencyId = 9_300;
+        var input = new AcquisitionPlanningInput
+        {
+            Dependencies = new[] { Blocked(itemId, 4) },
+            VendorOffers = new[]
+            {
+                new AcquisitionVendorOffer
+                {
+                    ItemId = itemId,
+                    OfferId = "tomestone-vendor",
+                    ReceiveQuantity = 1,
+                    Costs = new[] { Currency(currencyId, 20, true) },
+                },
+            },
+            MarketListings = new[]
+            {
+                new AcquisitionMarketListing
+                {
+                    ItemId = itemId,
+                    ListingId = 806_001,
+                    WorldId = 10,
+                    WorldName = "Test World",
+                    Quantity = 5,
+                    PricePerUnit = 20_000,
+                },
+                new AcquisitionMarketListing
+                {
+                    ItemId = itemId,
+                    ListingId = 806_002,
+                    WorldId = 10,
+                    WorldName = "Test World",
+                    Quantity = 3,
+                    PricePerUnit = 23_333,
+                    TotalTax = 1,
+                },
+            },
+            CurrencyBalances = new Dictionary<uint, long> { [currencyId] = 20 },
+            GilBalance = 1_000_000,
+        };
+        var normal = AcquisitionPlanner.Plan(
+            input,
+            new AcquisitionPlanningSettings
+            {
+                AutoPurchaseBlockedDependencies = true,
+                PreferMarketForSpecialCurrency = true,
+            });
+        var preferHq = AcquisitionPlanner.Plan(
+            input,
+            new AcquisitionPlanningSettings
+            {
+                AutoPurchaseBlockedDependencies = true,
+                PreferMarketForSpecialCurrency = true,
+                PreferHQ = true,
+            });
+        var budgetedPreferHq = AcquisitionPlanner.Plan(
+            input,
+            new AcquisitionPlanningSettings
+            {
+                AutoPurchaseBlockedDependencies = true,
+                PreferMarketForSpecialCurrency = true,
+                PreferHQ = true,
+                MaximumGilSpend = 80_000,
+            });
+
+        require(normal.IsSuccess
+                && preferHq.IsSuccess
+                && normal.SelectedPlan?.Estimate.TotalGil == 100_000
+                && preferHq.SelectedPlan?.Estimate.TotalGil == 100_000
+                && normal.SelectedPlan.Transactions.Single().SourceId == "806001"
+                && preferHq.SelectedPlan.Transactions.Single().SourceId == "806001",
+            $"an empty HQ bucket must not change the preferred NQ plan "
+            + $"(normal={normal.SelectedPlan?.Estimate.TotalGil}, preferHq={preferHq.SelectedPlan?.Estimate.TotalGil})");
+        require(budgetedPreferHq.IsSuccess
+                && budgetedPreferHq.SelectedPlan?.Estimate.TotalGil == 70_000
+                && budgetedPreferHq.SelectedPlan.Transactions.Count == 2
+                && budgetedPreferHq.SelectedPlan.Estimate.Currencies.Single(currency =>
+                    currency.CurrencyId == currencyId).Required == 20,
+            $"the hard Gil budget must still admit the cheaper mixed NQ and currency plan "
+            + $"(status={budgetedPreferHq.Status}, gil={budgetedPreferHq.SelectedPlan?.Estimate.TotalGil})");
+    }
+
+    private static void PreferHqMaximizesUsefulHqCoverageWithinBudget(Action<bool, string> require)
+    {
+        const uint itemId = 807;
+        var result = AcquisitionPlanner.Plan(
+            new AcquisitionPlanningInput
+            {
+                Dependencies = new[] { Blocked(itemId, 4) },
+                MarketListings = new[]
+                {
+                    new AcquisitionMarketListing
+                    {
+                        ItemId = itemId,
+                        ListingId = 807_001,
+                        WorldId = 10,
+                        WorldName = "Test World",
+                        Quantity = 2,
+                        PricePerUnit = 40,
+                        IsHq = true,
+                    },
+                    new AcquisitionMarketListing
+                    {
+                        ItemId = itemId,
+                        ListingId = 807_002,
+                        WorldId = 10,
+                        WorldName = "Test World",
+                        Quantity = 2,
+                        PricePerUnit = 40,
+                        IsHq = true,
+                    },
+                    Listing(itemId, 807_003, 2, price: 10),
+                    Listing(itemId, 807_004, 2, price: 10),
+                },
+                GilBalance = 1_000,
+            },
+            new AcquisitionPlanningSettings
+            {
+                AutoPurchaseBlockedDependencies = true,
+                PreferHQ = true,
+                MaximumGilSpend = 100,
+            });
+
+        require(result.IsSuccess
+                && result.PreferredEstimate?.TotalGil == 160
+                && result.SelectedPlan?.Estimate.TotalGil == 100
+                && result.SelectedPlan.Transactions.Count == 2
+                && result.SelectedPlan.Transactions.Count(transaction => transaction.IsHq) == 1
+                && result.SelectedPlan.Transactions.Count(transaction => !transaction.IsHq) == 1,
+            $"Prefer HQ must maximize useful HQ target coverage inside the hard Gil budget "
+            + $"(status={result.Status}, preferred={result.PreferredEstimate?.TotalGil}, selected={result.SelectedPlan?.Estimate.TotalGil})");
+    }
+
+    private static void MarketplaceTargetDemandKeepsHqPreferenceSoft(Action<bool, string> require)
+    {
+        var demand = AcquisitionPlanningInputBuilder.ComputeMarketplaceTargetDemand(
+            targetQuantity: 4,
+            inventoryNq: 1,
+            inventoryHq: 0);
+
+        require(demand == (Missing: 3, RequiredHq: 0, RequiredNq: 0),
+            $"marketplace target capture must count existing NQ inventory and leave HQ as a soft preference "
+            + $"(missing={demand.Missing}, requiredHq={demand.RequiredHq}, requiredNq={demand.RequiredNq})");
+    }
+
+    private static void SpecialCurrencyAllocationMaximizesGilReduction(Action<bool, string> require)
+    {
+        const uint currencyId = 9_200;
+        var dependencies = new[] { Blocked(820, 4), Blocked(821, 4) };
+        var result = AcquisitionPlanner.Plan(
+            new AcquisitionPlanningInput
+            {
+                Dependencies = dependencies,
+                VendorOffers = new[]
+                {
+                    new AcquisitionVendorOffer
+                    {
+                        ItemId = 820,
+                        OfferId = "high-saving-token-vendor",
+                        ReceiveQuantity = 1,
+                        Costs = new[] { Currency(currencyId, 1, true) },
+                    },
+                    new AcquisitionVendorOffer
+                    {
+                        ItemId = 821,
+                        OfferId = "low-saving-token-vendor",
+                        ReceiveQuantity = 1,
+                        Costs = new[] { Currency(currencyId, 2, true) },
+                    },
+                },
+                MarketListings = dependencies
+                    .SelectMany((dependency, dependencyIndex) => Enumerable.Range(0, 4)
+                        .Select(index => Listing(
+                            dependency.ItemId,
+                            82_000 + dependencyIndex * 10 + index,
+                            1,
+                            price: dependencyIndex == 0 ? 10 : 5)))
+                    .ToArray(),
+                CurrencyBalances = new Dictionary<uint, long> { [currencyId] = 4 },
+                GilBalance = 1_000,
+            },
+            new AcquisitionPlanningSettings
+            {
+                AutoPurchaseBlockedDependencies = true,
+                PreferMarketForSpecialCurrency = false,
+            });
+
+        var selected = result.SelectedPlan;
+        var currency = selected?.Estimate.Currencies.SingleOrDefault(requirement =>
+            requirement.CurrencyId == currencyId);
+        require(result.IsSuccess
+                && selected?.Estimate.TotalGil == 20
+                && currency?.Required == 4
+                && selected.Transactions.Single(transaction =>
+                    transaction.SourceId == "high-saving-token-vendor").PurchaseUnits == 4
+                && selected.Transactions.All(transaction =>
+                    transaction.SourceId != "low-saving-token-vendor"),
+            "special-currency allocation must spend the shared balance where it removes the most residual Gil cost");
     }
 
     private static void FeasibleVendorSurvivesImpossibleMarketplaceBranch(Action<bool, string> require)
