@@ -16,6 +16,7 @@ internal static class PluginPathSimulationAcceptanceTests
     {
         ValidateNormalConditionDistribution(require);
         ValidateDonatelloLiveBootstrapGate(require);
+        ValidateLowLevelInnerQuietPluginPath(require);
         ValidateManualSynthesisTakeoverPluginPath(require);
         ValidateGabrielCatalog(require);
         await ValidateGabrielScriptedRecovery(require);
@@ -33,6 +34,86 @@ internal static class PluginPathSimulationAcceptanceTests
         await ValidateManualCarefulObservationRecovery(require);
         await ValidateScriptedConditionAndManualActionRecovery(require);
         await ValidateImprovedRivetsMaterialMiracleRecovery(require);
+    }
+
+    private static void ValidateLowLevelInnerQuietPluginPath(Action<bool, string> require)
+    {
+        var craft = Craft() with
+        {
+            RecipeId = 1115,
+            ItemId = 1115,
+            StatCraftsmanship = 21,
+            StatControl = 0,
+            StatCP = 180,
+            StatLevel = 7,
+            CraftLevel = 7,
+            CraftDurability = 40,
+            CraftProgress = 6,
+            CraftQualityMax = 105,
+            CraftProgressDivider = 50,
+            CraftProgressModifier = 100,
+            CraftQualityDivider = 30,
+            CraftQualityModifier = 100,
+            UnlockedManipulation = false,
+            Specialist = false,
+            CrafterDelineations = 0,
+            ConditionFlags = NormalConditions,
+            CraftConditionProbabilities = GameStateBuilder.GetConditionProbabilities(
+                NormalConditions,
+                statLevel: 7,
+                craftExpert: false),
+            DonatelloOptions = new DonatelloExecutionOptions(
+                DonatelloSolveObjective.MaximizeQuality,
+                MinimizeSteps: false,
+                AllowSpecialistActions: false),
+        };
+        var root = GameStateBuilder.BuildInitialStepState(craft);
+        var firstTouch = root with
+        {
+            Index = 2,
+            Quality = 35,
+            Durability = 30,
+            RemainingCP = 162,
+            Condition = Condition.Normal,
+            IQStacks = 0,
+            ComboAction = VulcanSkill.BasicTouch,
+            PrevComboAction = VulcanSkill.BasicTouch,
+        };
+        var solution = new CachedRaphaelSolution
+        {
+            ActionIds =
+            [
+                (uint)VulcanSkill.BasicTouch,
+                (uint)VulcanSkill.BasicTouch,
+                (uint)VulcanSkill.BasicTouch,
+                (uint)VulcanSkill.BasicSynthesis,
+            ],
+            AchievedQuality = 105,
+            QualityUpperBound = 105,
+            Optimal = true,
+        };
+
+        var result = CraftingPluginPathSimulator.Run(
+            craft,
+            root,
+            new SeededDonatelloDefinition(solution),
+            VulcanSolverMode.Donatello,
+            new PluginPathSimulationScenario(
+                GameSeed: 1115,
+                AuthoritativeStates: new Dictionary<int, StepState> { [1] = firstTouch }));
+
+        require(result is
+                {
+                    SynthesisCompleted: true,
+                    FullQuality: true,
+                    SolverTerminalFailure: false,
+                    FailureReason: null,
+                    Trace.Count: 4,
+                }
+                && result.Trace[0].ExecutedAction == VulcanSkill.BasicTouch
+                && result.Trace[0].State.IQStacks == 0
+                && result.FinalState.Quality == 105,
+            "level 7 Donatello must reconcile the game's zero-stack Basic Touch and complete its protected Raphael plan without pausing");
     }
 
     private static void ValidateDonatelloLiveBootstrapGate(Action<bool, string> require)

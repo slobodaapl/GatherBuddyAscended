@@ -1005,6 +1005,33 @@ Require(RaphaelSolveCoordinator.ValidateSolvedPlan(
         validatedRaphaelActions,
         validatedRaphaelQuality) == null,
     "Raphael cache admission must accept a completing plan whose native and plugin quality agree");
+var lowLevelRaphaelCraft = Craft() with
+{
+    StatCraftsmanship = 21,
+    StatControl = 0,
+    StatCP = 180,
+    StatLevel = 7,
+    CraftLevel = 7,
+    CraftDurability = 40,
+    CraftProgress = 1,
+    CraftQualityMax = 1_000,
+    CraftProgressDivider = 50,
+    CraftQualityDivider = 30,
+    UnlockedManipulation = false,
+};
+var lowLevelRaphaelActions = new[]
+{
+    VulcanSkill.BasicTouch,
+    VulcanSkill.BasicTouch,
+    VulcanSkill.BasicTouch,
+    VulcanSkill.BasicSynthesis,
+};
+Require(RaphaelSolveCoordinator.ValidateSolvedPlan(
+        lowLevelRaphaelCraft,
+        GameStateBuilder.BuildInitialStepState(lowLevelRaphaelCraft),
+        lowLevelRaphaelActions,
+        claimedQuality: 105) == null,
+    "level 7 Raphael cache admission must match native quality without pre-unlock Inner Quiet gains");
 Require(RaphaelSolveCoordinator.ValidateSolvedPlan(
         validatedRaphaelCraft,
         validatedRaphaelRoot,

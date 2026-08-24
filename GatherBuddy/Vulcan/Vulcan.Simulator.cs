@@ -30,9 +30,10 @@ public static class Simulator
             }
             else if (success)
             {
-                if (qualityIncrease > 0)
+                if (qualityIncrease > 0 && craft.StatLevel >= 11)
                     ++next.IQStacks;
-                if (action is VulcanSkill.PreciseTouch or VulcanSkill.PreparatoryTouch or VulcanSkill.Reflect or VulcanSkill.RefinedTouch)
+                if (craft.StatLevel >= 11
+                    && action is VulcanSkill.PreciseTouch or VulcanSkill.PreparatoryTouch or VulcanSkill.Reflect or VulcanSkill.RefinedTouch)
                     ++next.IQStacks;
                 if (next.IQStacks > 10)
                     next.IQStacks = 10;

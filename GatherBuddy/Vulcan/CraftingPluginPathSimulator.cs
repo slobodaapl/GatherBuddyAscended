@@ -10,6 +10,7 @@ internal sealed record PluginPathSimulationScenario(
     ulong GameSeed,
     IReadOnlyDictionary<int, Condition>? ForcedConditions = null,
     IReadOnlyDictionary<int, VulcanSkill>? ManualActions = null,
+    IReadOnlyDictionary<int, StepState>? AuthoritativeStates = null,
     bool IsTrial = false);
 
 internal sealed record PluginPathSimulationTraceEntry(
@@ -188,6 +189,8 @@ internal static class CraftingPluginPathSimulator
                     return Failed(previous, trace, $"Forced condition at action {actionNumber} follows a zero-step action.");
                 actual.Condition = forcedCondition;
             }
+            if (scenario.AuthoritativeStates?.TryGetValue(actionNumber, out var authoritativeState) == true)
+                actual = authoritativeState with { };
             trace.Add(new(
                 actionNumber,
                 recommendation.Action,
