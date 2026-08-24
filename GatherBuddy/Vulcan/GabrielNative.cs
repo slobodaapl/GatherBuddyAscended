@@ -212,8 +212,6 @@ internal static partial class DonatelloNative
     internal static bool IsValidGabrielRecommendation(VulcanSkill action)
         => action.IsExecutableAction()
             && action is not VulcanSkill.FinalAppraisal
-            && action is not VulcanSkill.CarefulObservation
-            && action is not VulcanSkill.QuickInnovation
             && action is not VulcanSkill.StellarSteadyHand;
 
     private static (int MaxSteps, int MaxDecisions, int CurrentStep, int CurrentDecisions) CalculateHorizon(

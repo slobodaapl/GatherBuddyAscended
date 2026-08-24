@@ -286,12 +286,29 @@ internal static class PluginPathSimulationAcceptanceTests
         config.DonatelloCacheMemoryMiB = 64;
         var donatelloResults = new List<FiveStarRunResult>(seedCount);
         var gabrielResults = new List<FiveStarRunResult>(seedCount);
+        var craft = FiveStarCraft();
+        var solution = new CachedRaphaelSolution
+        {
+            ActionIds = FiveStarRaphaelSeed.Select(action => (uint)action).ToList(),
+        };
         try
         {
             for (var seed = seedStart; seed < seedStart + seedCount; ++seed)
             {
-                donatelloResults.Add(await RunFiveStarSeed(seed, FiveStarSolver.Donatello, require));
-                gabrielResults.Add(await RunFiveStarSeed(seed, FiveStarSolver.Gabriel, require));
+                donatelloResults.Add(await RunFiveStarSeed(
+                    seed,
+                    FiveStarSolver.Donatello,
+                    craft,
+                    solution,
+                    trace: false,
+                    require));
+                gabrielResults.Add(await RunFiveStarSeed(
+                    seed,
+                    FiveStarSolver.Gabriel,
+                    craft,
+                    solution,
+                    trace: false,
+                    require));
             }
         }
         finally
@@ -303,6 +320,130 @@ internal static class PluginPathSimulationAcceptanceTests
 
         ReportFiveStarResults("Donatello", seedStart, seedCount, donatelloResults);
         ReportFiveStarResults("Gabriel", seedStart, seedCount, gabrielResults);
+    }
+
+    internal static async Task RunFiveStarExactDistribution(
+        int seedStart,
+        int seedCount,
+        int craftsmanship,
+        int control,
+        int cp,
+        Action<bool, string> require)
+    {
+        require(seedStart > 0, "five-star exact plugin-path simulation requires a positive starting seed");
+        require(seedCount > 0, "five-star exact plugin-path simulation requires at least one seed");
+        require(craftsmanship > 0 && control > 0 && cp > 0,
+            "five-star exact plugin-path simulation requires positive crafter stats");
+        var craft = FiveStarExactCraft(craftsmanship, control, cp);
+        var root = GameStateBuilder.BuildInitialStepState(craft);
+        var raphael = DonatelloNative.SolveDetailed(
+            craft,
+            root,
+            allowSpecialistActions: true,
+            DonatelloNative.SolveMode.OptimizeQuality,
+            softDeadlineMillis: 30_000,
+            hardDeadlineMillis: 30_000,
+            bypassSolutionCache: true);
+        var raphaelPlan = DonatelloPlanEvaluator.Evaluate(craft, root, raphael.Actions);
+        require(raphael.Actions.Count > 0 && raphaelPlan.Completes,
+            "five-star exact Raphael must produce a completing incumbent through the native solver boundary");
+        var solution = new CachedRaphaelSolution
+        {
+            ActionIds = raphael.Actions.Select(action => (uint)action).ToList(),
+        };
+        Console.WriteLine(
+            $"five-star exact Raphael incumbent stats={craftsmanship}/{control}/{cp} "
+            + $"quality={raphaelPlan.Quality}/{craft.CraftQualityMax} steps={raphaelPlan.Steps} "
+            + $"duration={raphaelPlan.Duration} elapsedMs={raphael.ElapsedMillis} "
+            + $"optimal={raphael.Optimal} bound={raphael.QualityUpperBound} "
+            + $"actions=[{string.Join(",", raphael.Actions)}]");
+
+        var config = global::GatherBuddy.GatherBuddy.Config.RaphaelSolverConfig;
+        var previousCacheMemory = config.DonatelloCacheMemoryMiB;
+        config.DonatelloCacheMemoryMiB = 64;
+        var raphaelResults = new List<FiveStarRunResult>(seedCount);
+        var donatelloResults = new List<FiveStarRunResult>(seedCount);
+        var gabrielResults = new List<FiveStarRunResult>(seedCount);
+        try
+        {
+            for (var seed = seedStart; seed < seedStart + seedCount; ++seed)
+            {
+                var trace = seed == seedStart;
+                raphaelResults.Add(await RunFiveStarSeed(
+                    seed,
+                    FiveStarSolver.Raphael,
+                    craft,
+                    solution,
+                    trace,
+                    require));
+                donatelloResults.Add(await RunFiveStarSeed(
+                    seed,
+                    FiveStarSolver.Donatello,
+                    craft,
+                    solution,
+                    trace,
+                    require));
+                gabrielResults.Add(await RunFiveStarSeed(
+                    seed,
+                    FiveStarSolver.Gabriel,
+                    craft,
+                    solution,
+                    trace,
+                    require));
+            }
+        }
+        finally
+        {
+            CraftingProcessor.Dispose();
+            DonatelloNative.ClearCache();
+            config.DonatelloCacheMemoryMiB = previousCacheMemory;
+        }
+
+        ReportFiveStarResults("Raphael exact", seedStart, seedCount, raphaelResults);
+        ReportFiveStarResults("Donatello exact", seedStart, seedCount, donatelloResults);
+        ReportFiveStarResults("Gabriel exact", seedStart, seedCount, gabrielResults);
+    }
+
+    internal static async Task RunFiveStarExactGabrielDistribution(
+        int seedStart,
+        int seedCount,
+        int craftsmanship,
+        int control,
+        int cp,
+        Action<bool, string> require,
+        ulong? fixedPolicySeed = null)
+    {
+        require(seedStart > 0, "five-star exact Gabriel simulation requires a positive starting seed");
+        require(seedCount > 0, "five-star exact Gabriel simulation requires at least one seed");
+        require(craftsmanship > 0 && control > 0 && cp > 0,
+            "five-star exact Gabriel simulation requires positive crafter stats");
+        var craft = FiveStarExactCraft(craftsmanship, control, cp);
+        var results = new List<FiveStarRunResult>(seedCount);
+        var unusedRaphaelSolution = new CachedRaphaelSolution();
+        try
+        {
+            for (var seed = seedStart; seed < seedStart + seedCount; ++seed)
+            {
+                results.Add(await RunFiveStarSeed(
+                    seed,
+                    FiveStarSolver.Gabriel,
+                    craft,
+                    unusedRaphaelSolution,
+                    trace: seed == seedStart,
+                    require,
+                    fixedPolicySeed));
+            }
+        }
+        finally
+        {
+            CraftingProcessor.Dispose();
+        }
+
+        ReportFiveStarResults(
+            fixedPolicySeed.HasValue ? $"Gabriel exact policySeed={fixedPolicySeed.Value}" : "Gabriel exact",
+            seedStart,
+            seedCount,
+            results);
     }
 
     internal static async Task RunGabrielDistribution(
@@ -349,36 +490,50 @@ internal static class PluginPathSimulationAcceptanceTests
         var successful = results.Count(result => result.Successful);
         var terminalFailures = results.Count(result => result.TerminalFailure);
         var qualities = results.Where(result => result.SynthesisCompleted).Select(result => result.Quality).ToArray();
+        var finalQualities = results.Select(result => result.Quality).ToArray();
+        var successfulSeeds = results
+            .Select((result, index) => (result, seed: seedStart + index))
+            .Where(pair => pair.result.Successful)
+            .Select(pair => pair.seed)
+            .ToArray();
+        var outcomes = results.Select((result, index) =>
+            $"{seedStart + index}:{result.Quality}{(result.SynthesisCompleted ? 'C' : 'F')}");
         Console.WriteLine(
             $"five-star {solver} plugin distribution seedRange={seedStart}..{seedStart + seedCount - 1} "
             + $"synthesesCompleted={completed} successful={successful} "
-            + $"terminalFailures={terminalFailures} minQuality={(qualities.Length == 0 ? 0 : qualities.Min())} "
-            + $"avgQuality={(qualities.Length == 0 ? 0 : qualities.Average()):F1} "
-            + $"maxQuality={(qualities.Length == 0 ? 0 : qualities.Max())} "
+            + $"terminalFailures={terminalFailures} "
+            + $"completedQuality={(qualities.Length == 0 ? 0 : qualities.Min())}/"
+            + $"{(qualities.Length == 0 ? 0 : qualities.Average()):F1}/"
+            + $"{(qualities.Length == 0 ? 0 : qualities.Max())} "
+            + $"finalQuality={finalQualities.Min()}/{finalQualities.Average():F1}/{finalQualities.Max()} "
+            + $"successfulSeeds=[{string.Join(',', successfulSeeds)}] "
+            + $"outcomes=[{string.Join(',', outcomes)}] "
             + $"nativeReplans={results.Sum(result => result.NativeReplans)}");
     }
 
     private static async Task<FiveStarRunResult> RunFiveStarSeed(
         int seed,
         FiveStarSolver solver,
-        Action<bool, string> require)
+        CraftState craft,
+        CachedRaphaelSolution solution,
+        bool trace,
+        Action<bool, string> require,
+        ulong? gabrielPolicySeed = null)
     {
-        var craft = FiveStarCraft();
         var root = GameStateBuilder.BuildInitialStepState(craft);
-        var solution = new CachedRaphaelSolution
-        {
-            ActionIds = FiveStarRaphaelSeed.Select(action => (uint)action).ToList(),
-        };
         CraftingProcessor.Setup();
         CraftingProcessor.RegisterSolver(solver switch
         {
+            FiveStarSolver.Raphael => new SeededRaphaelDefinition(solution),
             FiveStarSolver.Donatello => new SeededDonatelloDefinition(solution),
-            FiveStarSolver.Gabriel => new SeededGabrielDefinition((ulong)(uint)seed),
+            FiveStarSolver.Gabriel => new SeededGabrielDefinition(
+                gabrielPolicySeed ?? MixFiveStarSeed((ulong)(uint)seed, 0xA076_1D64_78BD_642F)),
             _ => throw new ArgumentOutOfRangeException(nameof(solver)),
         });
         CraftingProcessor.OnCraftStarted(craft, root, craft.RecipeId, isTrial: false);
         require(solver switch
             {
+                FiveStarSolver.Raphael => CraftingProcessor.ActiveSolver is RaphaelMacroSolver,
                 FiveStarSolver.Donatello => CraftingProcessor.ActiveSolver is DonatelloSolver,
                 FiveStarSolver.Gabriel => CraftingProcessor.ActiveSolver is GabrielSolver,
                 _ => false,
@@ -397,10 +552,20 @@ internal static class PluginPathSimulationAcceptanceTests
         {
             for (var actionNumber = 1; actionNumber <= 100; ++actionNumber)
             {
+                var remainingBefore = activeDonatello == null
+                    ? ""
+                    : string.Join(",", activeDonatello.RemainingActions);
+                var replansBefore = activeDonatello?.NativeReplanCount ?? 0;
                 var recommendation = await AwaitRecommendation(
-                    solver == FiveStarSolver.Donatello
-                        ? TimeSpan.FromMinutes(6)
-                        : TimeSpan.FromSeconds(30));
+                    solver switch
+                    {
+                        FiveStarSolver.Donatello => TimeSpan.FromMinutes(6),
+                        _ => TimeSpan.FromSeconds(30),
+                    });
+                var remainingAfter = activeDonatello == null
+                    ? ""
+                    : string.Join(",", activeDonatello.RemainingActions);
+                var replansAfter = activeDonatello?.NativeReplanCount ?? 0;
                 if (recommendation.IsTerminalFailure || recommendation.Action == VulcanSkill.None)
                 {
                     terminalFailure = true;
@@ -412,6 +577,21 @@ internal static class PluginPathSimulationAcceptanceTests
                 var executed = game.SelectAction(recommendation.Action, out var manual);
                 require(!manual, $"five-star seed {seed}: random distribution run must not inject manual actions");
                 var actual = game.Execute(executed, require);
+                if (trace)
+                {
+                    Console.WriteLine(
+                        $"five-star exact trace solver={solver} seed={seed} action={actionNumber} "
+                        + $"skill={executed} condition={current.Condition}->{actual.Condition} "
+                        + $"progress={actual.Progress}/{craft.CraftProgress} "
+                        + $"quality={actual.Quality}/{craft.CraftQualityMax} "
+                        + $"durability={actual.Durability} cp={actual.RemainingCP} "
+                        + $"iq={actual.IQStacks} gs={actual.GreatStridesLeft} "
+                        + $"innovation={actual.InnovationLeft} "
+                        + $"delineations={actual.CrafterDelineationsLeft} "
+                        + $"carefulObservation={actual.CarefulObservationLeft} "
+                        + $"replans={replansBefore}->{replansAfter} "
+                        + $"planBefore=[{remainingBefore}] planAfter=[{remainingAfter}]");
+                }
 
                 if (actual.Progress >= craft.CraftProgress || actual.Durability <= 0)
                 {
@@ -437,8 +617,17 @@ internal static class PluginPathSimulationAcceptanceTests
         }
     }
 
+    private static ulong MixFiveStarSeed(ulong seed, ulong stream)
+    {
+        var value = seed + (stream + 1) * 0x9E37_79B9_7F4A_7C15UL;
+        value = (value ^ (value >> 30)) * 0xBF58_476D_1CE4_E5B9UL;
+        value = (value ^ (value >> 27)) * 0x94D0_49BB_1331_11EBUL;
+        return value ^ (value >> 31);
+    }
+
     private enum FiveStarSolver
     {
+        Raphael,
         Donatello,
         Gabriel,
     }
@@ -484,6 +673,15 @@ internal static class PluginPathSimulationAcceptanceTests
                 AllowSpecialistActions: true),
         };
     }
+
+    private static CraftState FiveStarExactCraft(int craftsmanship, int control, int cp)
+        => FiveStarCraft() with
+        {
+            StatCraftsmanship = craftsmanship,
+            StatControl = control,
+            StatCP = cp,
+            CrafterDelineations = 5,
+        };
 
     private static readonly VulcanSkill[] FiveStarRaphaelSeed =
     [
@@ -843,11 +1041,11 @@ internal static class PluginPathSimulationAcceptanceTests
                 "Gabriel's horizon, worker count, and faithful live specialist resources must reach the native request");
         }
         require(!DonatelloNative.IsValidGabrielRecommendation(VulcanSkill.FinalAppraisal)
-                && !DonatelloNative.IsValidGabrielRecommendation(VulcanSkill.CarefulObservation)
-                && !DonatelloNative.IsValidGabrielRecommendation(VulcanSkill.QuickInnovation)
                 && !DonatelloNative.IsValidGabrielRecommendation(VulcanSkill.StellarSteadyHand)
+                && DonatelloNative.IsValidGabrielRecommendation(VulcanSkill.CarefulObservation)
+                && DonatelloNative.IsValidGabrielRecommendation(VulcanSkill.QuickInnovation)
                 && DonatelloNative.IsValidGabrielRecommendation(VulcanSkill.HeartAndSoul),
-            "the managed Gabriel boundary must reject all forbidden actions without rejecting Heart and Soul");
+            "the managed Gabriel boundary must reject unsupported actions without rejecting specialist policy actions");
         require(DonatelloNative.ResolveGabrielWorkerThreads(0) == 1
                 && DonatelloNative.ResolveGabrielWorkerThreads(int.MaxValue)
                     == Math.Min(Math.Max(1, Environment.ProcessorCount), 256),
@@ -1063,7 +1261,7 @@ internal static class PluginPathSimulationAcceptanceTests
                 && root.QuickInnoAvailable
                 && root.CrafterDelineationsLeft == 2
                 && root.StellarSteadyHandCharges == 3,
-            "Gabriel specialist-action exclusion must be exercised with every forbidden action available in live state");
+            "Gabriel specialist-action handling must be exercised with every specialist resource available in live state");
         var result = CraftingPluginPathSimulator.Run(
             craft,
             root,
@@ -1099,10 +1297,10 @@ internal static class PluginPathSimulationAcceptanceTests
             "faithful plugin-path simulation must enforce Gabriel's opener and non-Normal Heart and Soul restriction through manual recovery");
         require(result.Trace.All(entry =>
                 entry.RecommendedAction is not
-                        (VulcanSkill.FinalAppraisal or VulcanSkill.CarefulObservation or VulcanSkill.QuickInnovation or VulcanSkill.StellarSteadyHand)
+                        (VulcanSkill.FinalAppraisal or VulcanSkill.StellarSteadyHand)
                     && entry.ExecutedAction is not
-                        (VulcanSkill.FinalAppraisal or VulcanSkill.CarefulObservation or VulcanSkill.QuickInnovation or VulcanSkill.StellarSteadyHand)),
-            "faithful Gabriel plugin execution must never recommend or execute a forbidden action");
+                        (VulcanSkill.FinalAppraisal or VulcanSkill.StellarSteadyHand)),
+            "faithful Gabriel plugin execution must never recommend or execute an unsupported action");
 
         var heartAndSoulResult = CraftingPluginPathSimulator.Run(
             craft,

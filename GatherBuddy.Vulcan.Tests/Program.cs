@@ -130,6 +130,87 @@ if (args is ["--five-star-plugin-simulation", var seedStartText, var rangedSeedC
     return;
 }
 
+if (args is
+    [
+        "--five-star-exact-gabriel-simulation",
+        var fixedGabrielSeedStartText,
+        var fixedGabrielSeedCountText,
+        var fixedGabrielCraftsmanshipText,
+        var fixedGabrielControlText,
+        var fixedGabrielCpText,
+        var fixedGabrielPolicySeedText,
+    ]
+    && int.TryParse(fixedGabrielSeedStartText, out var fixedGabrielSeedStart)
+    && int.TryParse(fixedGabrielSeedCountText, out var fixedGabrielSeedCount)
+    && int.TryParse(fixedGabrielCraftsmanshipText, out var fixedGabrielCraftsmanship)
+    && int.TryParse(fixedGabrielControlText, out var fixedGabrielControl)
+    && int.TryParse(fixedGabrielCpText, out var fixedGabrielCp)
+    && ulong.TryParse(fixedGabrielPolicySeedText, out var fixedGabrielPolicySeed))
+{
+    await PluginPathSimulationAcceptanceTests.RunFiveStarExactGabrielDistribution(
+        fixedGabrielSeedStart,
+        fixedGabrielSeedCount,
+        fixedGabrielCraftsmanship,
+        fixedGabrielControl,
+        fixedGabrielCp,
+        Require,
+        fixedGabrielPolicySeed);
+    Console.WriteLine($"Five-star exact fixed-policy Gabriel plugin-path simulation: {assertions} assertions passed");
+    return;
+}
+
+if (args is
+    [
+        "--five-star-exact-plugin-simulation",
+        var exactSeedStartText,
+        var exactSeedCountText,
+        var exactCraftsmanshipText,
+        var exactControlText,
+        var exactCpText,
+    ]
+    && int.TryParse(exactSeedStartText, out var exactSeedStart)
+    && int.TryParse(exactSeedCountText, out var exactSeedCount)
+    && int.TryParse(exactCraftsmanshipText, out var exactCraftsmanship)
+    && int.TryParse(exactControlText, out var exactControl)
+    && int.TryParse(exactCpText, out var exactCp))
+{
+    await PluginPathSimulationAcceptanceTests.RunFiveStarExactDistribution(
+        exactSeedStart,
+        exactSeedCount,
+        exactCraftsmanship,
+        exactControl,
+        exactCp,
+        Require);
+    Console.WriteLine($"Five-star exact plugin-path simulation: {assertions} assertions passed");
+    return;
+}
+
+if (args is
+    [
+        "--five-star-exact-gabriel-simulation",
+        var exactGabrielSeedStartText,
+        var exactGabrielSeedCountText,
+        var exactGabrielCraftsmanshipText,
+        var exactGabrielControlText,
+        var exactGabrielCpText,
+    ]
+    && int.TryParse(exactGabrielSeedStartText, out var exactGabrielSeedStart)
+    && int.TryParse(exactGabrielSeedCountText, out var exactGabrielSeedCount)
+    && int.TryParse(exactGabrielCraftsmanshipText, out var exactGabrielCraftsmanship)
+    && int.TryParse(exactGabrielControlText, out var exactGabrielControl)
+    && int.TryParse(exactGabrielCpText, out var exactGabrielCp))
+{
+    await PluginPathSimulationAcceptanceTests.RunFiveStarExactGabrielDistribution(
+        exactGabrielSeedStart,
+        exactGabrielSeedCount,
+        exactGabrielCraftsmanship,
+        exactGabrielControl,
+        exactGabrielCp,
+        Require);
+    Console.WriteLine($"Five-star exact Gabriel plugin-path simulation: {assertions} assertions passed");
+    return;
+}
+
 if (args is ["--gabriel-plugin-simulation", var gabrielSeedStartText, var gabrielSeedCountText]
     && int.TryParse(gabrielSeedStartText, out var gabrielSeedStart)
     && int.TryParse(gabrielSeedCountText, out var gabrielSeedCount))
