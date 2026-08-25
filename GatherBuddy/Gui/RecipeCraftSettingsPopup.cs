@@ -499,6 +499,7 @@ public class RecipeCraftSettingsPopup
                 or RaphaelAssessmentOutcome.NoQualityRequired
                 => ImGuiColors.ParsedGreen,
             RaphaelAssessmentState.Ready => ImGuiColors.DalamudYellow,
+            RaphaelAssessmentState.Queued => ImGuiColors.DalamudGrey,
             RaphaelAssessmentState.Generating => ImGuiColors.DalamudGrey,
             RaphaelAssessmentState.Failed => ImGuiColors.DalamudRed,
             RaphaelAssessmentState.Unavailable => ImGuiColors.DalamudYellow,

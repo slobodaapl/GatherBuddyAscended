@@ -530,12 +530,13 @@ internal static class PluginPathSimulationAcceptanceTests
     internal static async Task RunGabrielDistribution(
         int seedStart,
         int seedCount,
-        Action<bool, string> require)
+        Action<bool, string> require,
+        int workerThreads = DonatelloNative.DefaultGabrielWorkerThreads)
     {
         await Task.Yield();
         require(seedStart > 0, "Gabriel plugin-path simulation requires a positive starting seed");
         require(seedCount > 0, "Gabriel plugin-path simulation requires at least one seed");
-        var craft = FiveStarCraft();
+        var craft = FiveStarCraft() with { GabrielWorkerThreads = workerThreads };
         var estimate = CraftingPluginPathSimulator.EstimateGabriel(
             craft,
             GameStateBuilder.BuildInitialStepState(craft),
@@ -1425,15 +1426,39 @@ internal static class PluginPathSimulationAcceptanceTests
                         VulcanSkill.TricksOfTrade or VulcanSkill.IntensiveSynthesis or VulcanSkill.PreciseTouch),
             "faithful plugin-path execution must use Heart and Soul only on Normal and immediately consume it with an associated action");
 
+        var progress = new List<int>();
         var estimate = CraftingPluginPathSimulator.EstimateGabriel(
             craft,
             GameStateBuilder.BuildInitialStepState(craft),
             samples: 5,
-            seed: 13);
+            seed: 13,
+            progress: (completed, total) =>
+            {
+                require(total == 5, "Gabriel validation progress must retain the requested sample count");
+                progress.Add(completed);
+            });
         require(estimate.Samples == 5
                 && estimate.Successes <= estimate.SynthesisCompletions
-                && estimate.SynthesisCompletions <= estimate.Samples,
-            "Gabriel validation estimate must aggregate actual faithful plugin-path outcomes");
+                && estimate.SynthesisCompletions <= estimate.Samples
+                && progress.SequenceEqual([1, 2, 3, 4, 5]),
+            "Gabriel validation estimate must aggregate and report every faithful plugin-path outcome exactly once");
+        var oneWorkerEstimate = CraftingPluginPathSimulator.EstimateGabriel(
+            craft with { GabrielWorkerThreads = 1 },
+            GameStateBuilder.BuildInitialStepState(craft),
+            samples: 5,
+            seed: 13);
+        require(oneWorkerEstimate.Successes == estimate.Successes
+                && oneWorkerEstimate.Samples == estimate.Samples
+                && oneWorkerEstimate.SynthesisCompletions == estimate.SynthesisCompletions
+                && oneWorkerEstimate.DurabilityFailures == estimate.DurabilityFailures
+                && oneWorkerEstimate.SolverTerminalFailures == estimate.SolverTerminalFailures
+                && oneWorkerEstimate.MinFinalQuality == estimate.MinFinalQuality
+                && Math.Abs(oneWorkerEstimate.AverageFinalQuality - estimate.AverageFinalQuality) < 0.001
+                && oneWorkerEstimate.MaxFinalQuality == estimate.MaxFinalQuality
+                && oneWorkerEstimate.TerminalFailureReasons.OrderBy(entry => entry.Key)
+                    .SequenceEqual(estimate.TerminalFailureReasons.OrderBy(entry => entry.Key))
+                && Math.Abs(oneWorkerEstimate.Probability - estimate.Probability) < 0.000001,
+            "parallel faithful Gabriel validation must preserve the exact seeded aggregate produced by one worker");
 
         var unrestrictedCraft = craft with
         {

@@ -52,6 +52,7 @@ internal sealed class CraftingProcessorSession : IDisposable
     public bool IsActive => _activeSolver != null;
     public string FaultReason => _faultReason;
     internal Solver? ActiveSolver => _activeSolver;
+    internal Task? PendingSolveCompletion => _pendingSolve;
 
     public void Setup()
     {
@@ -364,7 +365,12 @@ internal sealed class CraftingProcessorSession : IDisposable
         var pending = _pendingSolve;
         cancellation?.Cancel();
         if (_activeSolver is IDisposable disposable)
-            disposable.Dispose();
+        {
+            if (_activeSolver is GabrielSolver && pending is { IsCompleted: false })
+                _ = pending.ContinueWith(_ => disposable.Dispose(), TaskScheduler.Default);
+            else
+                disposable.Dispose();
+        }
         if (cancellation != null)
         {
             if (pending is { IsCompleted: false })

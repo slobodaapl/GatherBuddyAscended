@@ -39,6 +39,7 @@ TimedLegendaryGpAcceptanceTests.Run(Require);
 CraftingMaterialSelectionAcceptanceTests.Run(Require);
 NativeRecipeCraftingTests.Run(Require);
 DevelopmentFeaturePolicyTests.Run(Require);
+AfkPreventionTests.Run(Require);
 FcMeshPhase0Tests.Run(Require);
 FcMeshPhase2Tests.Run(Require);
 FcMeshPhase3Tests.Run(Require);
@@ -209,6 +210,26 @@ if (args is
         exactGabrielCp,
         Require);
     Console.WriteLine($"Five-star exact Gabriel plugin-path simulation: {assertions} assertions passed");
+    return;
+}
+
+if (args is
+    [
+        "--gabriel-plugin-simulation",
+        var configuredGabrielSeedStartText,
+        var configuredGabrielSeedCountText,
+        var configuredGabrielWorkerThreadsText,
+    ]
+    && int.TryParse(configuredGabrielSeedStartText, out var configuredGabrielSeedStart)
+    && int.TryParse(configuredGabrielSeedCountText, out var configuredGabrielSeedCount)
+    && int.TryParse(configuredGabrielWorkerThreadsText, out var configuredGabrielWorkerThreads))
+{
+    await PluginPathSimulationAcceptanceTests.RunGabrielDistribution(
+        configuredGabrielSeedStart,
+        configuredGabrielSeedCount,
+        Require,
+        configuredGabrielWorkerThreads);
+    Console.WriteLine($"Gabriel plugin-path simulation: {assertions} assertions passed");
     return;
 }
 
@@ -1332,8 +1353,8 @@ Require(requestJson.RootElement.EnumerateObject().Select(property => property.Na
             .SetEquals(expectedRequestFields)
         && nativeRoot.EnumerateObject().Select(property => property.Name).ToHashSet()
             .SetEquals(expectedRootFields),
-    "Donatello requests must contain exactly the fields required by native ABI v13");
-Require(requestJson.RootElement.GetProperty("abiVersion").GetUInt32() == 13
+    "Donatello requests must contain exactly the fields required by native ABI v14");
+Require(requestJson.RootElement.GetProperty("abiVersion").GetUInt32() == 14
         && requestJson.RootElement.GetProperty("solveMode").GetInt32() == 0
         && !requestJson.RootElement.GetProperty("allowCarefulObservation").GetBoolean()
         && !requestJson.RootElement.GetProperty("progressFirst").GetBoolean()
@@ -1354,7 +1375,7 @@ Require(requestJson.RootElement.GetProperty("abiVersion").GetUInt32() == 13
         && nativeRoot.GetProperty("muscleMemory").GetInt32() == 0
         && nativeRoot.GetProperty("crafterDelineations").GetInt32() == 1
         && !nativeRoot.TryGetProperty("manipulationLeft", out _),
-    "Donatello requests must match every ABI v13 camelCase field name exactly");
+    "Donatello requests must match every ABI v14 camelCase field name exactly");
 
 using var poorObservationRequestJson = JsonDocument.Parse(DonatelloNative.SerializeRequest(
     observationCraft,

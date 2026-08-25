@@ -10,6 +10,7 @@ public enum RaphaelAssessmentState
     NotApplicable,
     Unavailable,
     NotGenerated,
+    Queued,
     Generating,
     Failed,
     Ready,
@@ -220,6 +221,7 @@ public static class RaphaelAssessmentService
                 {
                     GabrielAssessmentState.Unavailable => RaphaelAssessmentState.Unavailable,
                     GabrielAssessmentState.NotGenerated => RaphaelAssessmentState.NotGenerated,
+                    GabrielAssessmentState.Queued => RaphaelAssessmentState.Queued,
                     GabrielAssessmentState.Generating => RaphaelAssessmentState.Generating,
                     GabrielAssessmentState.Failed => RaphaelAssessmentState.Failed,
                     GabrielAssessmentState.Ready => RaphaelAssessmentState.Ready,

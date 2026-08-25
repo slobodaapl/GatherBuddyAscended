@@ -983,6 +983,7 @@ public partial class VulcanWindow
                 or RaphaelAssessmentOutcome.NoQualityRequired
                 => new Vector4(0.30f, 0.70f, 0.30f, 1f),
             RaphaelAssessmentState.Ready => new Vector4(0.90f, 0.75f, 0.20f, 1f),
+            RaphaelAssessmentState.Queued => new Vector4(0.65f, 0.65f, 0.65f, 1f),
             RaphaelAssessmentState.Generating => new Vector4(0.35f, 0.65f, 0.90f, 1f),
             RaphaelAssessmentState.Failed => new Vector4(0.90f, 0.35f, 0.35f, 1f),
             RaphaelAssessmentState.Unavailable => new Vector4(0.90f, 0.75f, 0.20f, 1f),

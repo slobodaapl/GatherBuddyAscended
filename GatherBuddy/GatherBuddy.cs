@@ -1247,6 +1247,7 @@ public partial class GatherBuddy : IDalamudPlugin
     private unsafe void Update(IFramework framework)
     {
         Config.SaveIfDirty();
+        AfkPrevention.Update(Config.PreventAfkWhileAutomating, HasActiveAutomation());
         if (DevelopmentFeatures.Allows(DevelopmentFeature.FcMeshRuntime))
         {
             try
@@ -1334,6 +1335,17 @@ public partial class GatherBuddy : IDalamudPlugin
             Log.Error($"Error while running auto gather: {e}");
         }
     }
+
+    private static bool HasActiveAutomation()
+        => AutoGather.Enabled
+            || AutoGather.TaskManager.IsBusy
+            || CollectableManager.IsRunning
+            || CraftingGatherBridge.HasActiveQueue && !CraftingGatherBridge.IsQueuePaused
+            || CraftingGameInterop.HasOwnedCraft && !CraftingGameInterop.AutomationPaused
+            || LiveAcquisitionExecutor?.IsRunning == true
+            || VendorPurchaseManager.IsRunning
+            || VendorBuyListManager.IsBusy
+            || MarketplaceBuyListManager?.IsBusy == true;
 
     private static void ProcessFcLocationRegistrationRequest()
     {

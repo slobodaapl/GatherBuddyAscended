@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Threading;
+using System.Threading.Tasks;
 using GatherBuddy.Crafting;
 
 namespace GatherBuddy.Vulcan;
@@ -55,7 +56,19 @@ internal static class CraftingPluginPathSimulator
         StepState root,
         int samples,
         ulong seed,
-        Func<bool>? cancellationRequested = null)
+        Func<bool>? cancellationRequested = null,
+        Action<int, int>? progress = null)
+        => EstimateGabrielAsync(craft, root, samples, seed, cancellationRequested, progress)
+            .GetAwaiter()
+            .GetResult();
+
+    internal static async Task<GabrielPluginPathEstimate> EstimateGabrielAsync(
+        CraftState craft,
+        StepState root,
+        int samples,
+        ulong seed,
+        Func<bool>? cancellationRequested = null,
+        Action<int, int>? progress = null)
     {
         if (samples <= 0)
             throw new ArgumentOutOfRangeException(nameof(samples));
@@ -63,6 +76,20 @@ internal static class CraftingPluginPathSimulator
             throw new InvalidOperationException(reason);
 
         var started = Stopwatch.StartNew();
+        var results = new PluginPathSimulationResult?[samples];
+        var nextSample = -1;
+        var completedSamples = 0;
+        var progressLock = new object();
+        var workerCount = Math.Min(
+            samples,
+            DonatelloNative.ResolveGabrielWorkerThreads(craft.GabrielWorkerThreads));
+        var workers = new Task[workerCount];
+        for (var worker = 0; worker < workers.Length; ++worker)
+        {
+            workers[worker] = RunSamplesAsync();
+        }
+        await Task.WhenAll(workers).ConfigureAwait(false);
+
         var successes = 0;
         var completions = 0;
         var durabilityFailures = 0;
@@ -73,15 +100,8 @@ internal static class CraftingPluginPathSimulator
         var terminalFailureReasons = new Dictionary<string, int>(StringComparer.Ordinal);
         for (var sample = 0; sample < samples; ++sample)
         {
-            ThrowIfCancelled(cancellationRequested);
-            var sampleSeed = Mix(seed, (ulong)(uint)sample);
-            var result = Run(
-                craft,
-                root,
-                new GabrielSolverDefinition(Mix(sampleSeed, 0xA076_1D64_78BD_642F)),
-                VulcanSolverMode.Gabriel,
-                new PluginPathSimulationScenario(Mix(sampleSeed, 0xE703_7ED1_A0B4_28DB)),
-                cancellationRequested);
+            var result = results[sample]
+                ?? throw new InvalidOperationException($"Gabriel sample {sample + 1} did not produce a result.");
             if (result.FailureReason != null && !result.SolverTerminalFailure)
                 throw new InvalidOperationException(result.FailureReason);
             if (result.FullQuality)
@@ -113,9 +133,42 @@ internal static class CraftingPluginPathSimulator
             terminalFailureReasons,
             (double)successes / samples,
             started.ElapsedMilliseconds);
+
+        async Task RunSamplesAsync()
+        {
+            while (true)
+            {
+                ThrowIfCancelled(cancellationRequested);
+                var sample = Interlocked.Increment(ref nextSample);
+                if (sample >= samples)
+                    return;
+                var sampleSeed = Mix(seed, (ulong)(uint)sample);
+                results[sample] = await RunAsync(
+                        craft,
+                        root,
+                        new GabrielSolverDefinition(Mix(sampleSeed, 0xA076_1D64_78BD_642F)),
+                        VulcanSolverMode.Gabriel,
+                        new PluginPathSimulationScenario(Mix(sampleSeed, 0xE703_7ED1_A0B4_28DB)),
+                        cancellationRequested)
+                    .ConfigureAwait(false);
+                lock (progressLock)
+                    progress?.Invoke(++completedSamples, samples);
+            }
+        }
     }
 
     internal static PluginPathSimulationResult Run(
+        CraftState craft,
+        StepState root,
+        ISolverDefinition solverDefinition,
+        VulcanSolverMode? liveRecoveryMode,
+        PluginPathSimulationScenario scenario,
+        Func<bool>? cancellationRequested = null)
+        => RunAsync(craft, root, solverDefinition, liveRecoveryMode, scenario, cancellationRequested)
+            .GetAwaiter()
+            .GetResult();
+
+    internal static async Task<PluginPathSimulationResult> RunAsync(
         CraftState craft,
         StepState root,
         ISolverDefinition solverDefinition,
@@ -146,7 +199,8 @@ internal static class CraftingPluginPathSimulator
         for (var actionNumber = 1; actionNumber <= MaximumActions; ++actionNumber)
         {
             ThrowIfCancelled(cancellationRequested);
-            var recommendation = AwaitRecommendation(processor, cancellationRequested);
+            var recommendation = await AwaitRecommendationAsync(processor, cancellationRequested)
+                .ConfigureAwait(false);
             if (recommendation.IsTerminalFailure || recommendation.Action == VulcanSkill.None)
             {
                 return new(
@@ -248,7 +302,7 @@ internal static class CraftingPluginPathSimulator
         return Failed(current, trace, $"Plugin path exceeded {MaximumActions} actions.");
     }
 
-    private static Solver.Recommendation AwaitRecommendation(
+    private static async Task<Solver.Recommendation> AwaitRecommendationAsync(
         CraftingProcessorSession processor,
         Func<bool>? cancellationRequested)
     {
@@ -260,7 +314,17 @@ internal static class CraftingPluginPathSimulator
             var recommendation = processor.NextRecommendation;
             if (recommendation.Action != VulcanSkill.None || recommendation.IsTerminalFailure)
                 return recommendation;
-            Thread.Sleep(1);
+            var pending = processor.PendingSolveCompletion;
+            if (pending == null)
+            {
+                await Task.Delay(1).ConfigureAwait(false);
+                continue;
+            }
+            var remaining = RecommendationTimeout - started.Elapsed;
+            if (remaining <= TimeSpan.Zero)
+                break;
+            await Task.WhenAny(pending, Task.Delay(TimeSpan.FromMilliseconds(Math.Min(100, remaining.TotalMilliseconds))))
+                .ConfigureAwait(false);
         }
         throw new TimeoutException($"Plugin solver did not produce a recommendation within {RecommendationTimeout}.");
     }

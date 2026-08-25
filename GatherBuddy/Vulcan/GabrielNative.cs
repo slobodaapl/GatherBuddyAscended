@@ -22,6 +22,12 @@ internal static partial class DonatelloNative
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
     private static extern unsafe IntPtr gabriel_solve_json(byte* data, nuint length);
 
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    private static extern void gabriel_session_open(ulong sessionId);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    private static extern void gabriel_session_close(ulong sessionId);
+
     private sealed class GabrielNativeResponse
     {
         public bool Ok { get; set; }
@@ -69,6 +75,16 @@ internal static partial class DonatelloNative
             response.RolloutCount,
             response.ElapsedMillis);
     }
+
+    internal static void OpenGabrielSession(ulong sessionId)
+    {
+        if (donatello_abi_version() != AbiVersion)
+            throw new InvalidOperationException("Unsupported Donatello native ABI version");
+        gabriel_session_open(sessionId);
+    }
+
+    internal static void CloseGabrielSession(ulong sessionId)
+        => gabriel_session_close(sessionId);
 
     internal static GabrielProbabilityEstimate EstimateGabriel(
         CraftState craft,

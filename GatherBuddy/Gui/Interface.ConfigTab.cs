@@ -93,6 +93,13 @@ public partial class Interface
                 GatherBuddy.Config.GoToInnBeforeCrafting,
                 b => GatherBuddy.Config.GoToInnBeforeCrafting = b);
 
+        public static void DrawPreventAfkWhileAutomatingBox()
+            => DrawCheckbox(
+                "Prevent AFK status while automating",
+                "Reset the game's automatic AFK timer while GatherBuddy owns active automation. Does nothing when automatic AFK is disabled in the game settings.",
+                GatherBuddy.Config.PreventAfkWhileAutomating,
+                b => GatherBuddy.Config.PreventAfkWhileAutomating = b);
+
         public static void DrawUseSkillsForFallabckBox()
             => DrawCheckbox("Use skills for fallback items", "Use skills when gathering items from fallback presets",
                 GatherBuddy.Config.AutoGatherConfig.UseSkillsForFallbackItems,
@@ -1595,6 +1602,10 @@ public partial class Interface
         new("Crafting", "Navigation",
         [
             new("Go to inn before crafting", ConfigFunctions.DrawCraftingInnNavigationBox),
+        ]),
+        new("General", "Automation",
+        [
+            new("Prevent AFK status while automating", ConfigFunctions.DrawPreventAfkWhileAutomatingBox),
         ]),
         new("General", "Set Names",
         [

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
 using GatherBuddy.Vulcan;
@@ -11,6 +12,7 @@ public enum GabrielAssessmentState
 {
     Unavailable,
     NotGenerated,
+    Queued,
     Generating,
     Failed,
     Ready,
@@ -28,9 +30,40 @@ public sealed record GabrielAssessment(
 
 public static class GabrielAssessmentService
 {
-    internal const int DefaultSamples = 100;
+    internal const int DefaultSamples = 50;
 
-    private sealed record CacheEntry(Task<GabrielPluginPathEstimate> Task);
+    private enum EstimateWorkState
+    {
+        Queued,
+        WaitingForCraft,
+        Running,
+        Completed,
+        Failed,
+    }
+
+    private sealed class CacheEntry
+    {
+        private readonly Lazy<Task<GabrielPluginPathEstimate>> _work;
+        private int _state = (int)EstimateWorkState.Queued;
+        private int _completedSamples;
+
+        public CacheEntry(Func<CacheEntry, Task<GabrielPluginPathEstimate>> work)
+        {
+            _work = new(() => work(this), LazyThreadSafetyMode.ExecutionAndPublication);
+        }
+
+        public Task<GabrielPluginPathEstimate> Work => _work.Value;
+        public EstimateWorkState State
+        {
+            get => (EstimateWorkState)Volatile.Read(ref _state);
+            set => Volatile.Write(ref _state, (int)value);
+        }
+        public int CompletedSamples
+        {
+            get => Volatile.Read(ref _completedSamples);
+            set => Volatile.Write(ref _completedSamples, value);
+        }
+    }
 
     private static readonly ConcurrentDictionary<string, CacheEntry> Cache = new();
     private static readonly SemaphoreSlim EstimateGate = new(1, 1);
@@ -131,40 +164,26 @@ public static class GabrielAssessmentService
         var workerThreads = DonatelloNative.ResolveGabrielWorkerThreads(craft.GabrielWorkerThreads);
         var key = $"gabriel/{(int)policy.Profile}/{context.RaphaelRequest.GetKey()}/{craft.RecipeLevelTableId}/{Simulator.BaseProgress(craft)}/{Simulator.BaseQuality(craft)}/{craft.CrafterDelineations}/{workerThreads}";
         if (Cache.TryGetValue(key, out var failedEntry)
-         && (failedEntry.Task.IsFaulted || failedEntry.Task.IsCanceled)
+         && (failedEntry.Work.IsFaulted || failedEntry.Work.IsCanceled)
          && queue)
         {
             Cache.TryRemove(key, out _);
         }
         if (!Cache.TryGetValue(key, out var entry) && queue)
         {
-            if (CraftingProcessor.IsActive)
-            {
-                assessment = Unavailable("Probability estimation is disabled while a craft is active.");
-                return false;
-            }
             var seed = StableSeed(key);
             var craftCopy = craft with { CraftConditionProbabilities = [.. craft.CraftConditionProbabilities] };
             var rootCopy = root with { };
             entry = Cache.GetOrAdd(
                 key,
-                _ => new(Task.Run(() =>
-                {
-                    EstimateGate.Wait();
-                    try
-                    {
-                        return CraftingPluginPathSimulator.EstimateGabriel(
-                            craftCopy,
-                            rootCopy,
-                            DefaultSamples,
-                            seed,
-                            cancellationRequested: () => CraftingProcessor.IsActive);
-                    }
-                    finally
-                    {
-                        EstimateGate.Release();
-                    }
-                })));
+                _ => new(cacheEntry => RunEstimateAsync(
+                    cacheEntry,
+                    craftCopy,
+                    rootCopy,
+                    seed,
+                    policy.Profile,
+                    workerThreads)));
+            _ = entry.Work;
         }
         if (entry == null)
         {
@@ -174,33 +193,46 @@ public static class GabrielAssessmentService
                 "Run the estimate to simulate this exact item, stat, tool, specialist, and condition-profile configuration.");
             return true;
         }
-        if (!entry.Task.IsCompleted)
+        var work = entry.Work;
+        if (!work.IsCompleted)
         {
+            if (entry.State != EstimateWorkState.Running)
+            {
+                assessment = new(
+                    GabrielAssessmentState.Queued,
+                    CraftingProcessor.IsActive
+                        ? "Gabriel validation queued until crafting finishes."
+                        : "Gabriel validation queued.",
+                    CraftingProcessor.IsActive
+                        ? "The faithful plugin-path estimate will start automatically after the active craft finishes."
+                        : "Waiting for the current Gabriel validation slot; it will start automatically.");
+                return true;
+            }
             assessment = new(
                 GabrielAssessmentState.Generating,
-                "Estimating chance to reach full quality...",
-                $"Running {DefaultSamples:N0} catalog-driven stochastic policy samples in the background.");
+                $"Estimating chance to reach full quality: {entry.CompletedSamples:N0}/{DefaultSamples:N0}",
+                $"Running faithful plugin-path samples with {workerThreads:N0} configured Gabriel worker thread(s).");
             return true;
         }
-        if (entry.Task.IsFaulted)
+        if (work.IsFaulted)
         {
-            var failure = entry.Task.Exception?.GetBaseException().Message ?? "Unknown Gabriel estimate failure.";
+            var failure = work.Exception?.GetBaseException().Message ?? "Unknown Gabriel estimate failure.";
             assessment = new(
                 GabrielAssessmentState.Failed,
                 "Chance estimate failed.",
                 failure);
             return false;
         }
-        if (entry.Task.IsCanceled)
+        if (work.IsCanceled)
         {
             assessment = new(
                 GabrielAssessmentState.Failed,
                 "Chance estimate cancelled.",
-                "A live craft started while the faithful plugin-path simulation was running. Retry after crafting stops.");
+                "The faithful plugin-path simulation was cancelled before completion.");
             return false;
         }
 
-        var estimate = entry.Task.Result;
+        var estimate = work.Result;
         var (low, high) = WilsonInterval(estimate.Successes, estimate.Samples);
         assessment = new(
             GabrielAssessmentState.Ready,
@@ -212,6 +244,87 @@ public static class GabrielAssessmentService
             low,
             high);
         return true;
+    }
+
+    private static async Task<GabrielPluginPathEstimate> RunEstimateAsync(
+        CacheEntry entry,
+        CraftState craft,
+        StepState root,
+        ulong seed,
+        GabrielPolicyProfile profile,
+        int workerThreads)
+    {
+        var identity = $"recipe={craft.RecipeId}, profile={profile}, samples={DefaultSamples}, workers={workerThreads}";
+        GatherBuddy.Log.Information($"[GabrielValidation] Queued {identity}");
+        try
+        {
+            while (true)
+            {
+                if (CraftingProcessor.IsActive)
+                {
+                    entry.State = EstimateWorkState.WaitingForCraft;
+                    GatherBuddy.Log.Information($"[GabrielValidation] Waiting for active craft to finish: {identity}");
+                    while (CraftingProcessor.IsActive)
+                        await Task.Delay(250).ConfigureAwait(false);
+                    entry.State = EstimateWorkState.Queued;
+                    GatherBuddy.Log.Information($"[GabrielValidation] Active craft finished; awaiting validation slot: {identity}");
+                }
+
+                await EstimateGate.WaitAsync().ConfigureAwait(false);
+                try
+                {
+                    if (CraftingProcessor.IsActive)
+                        continue;
+
+                    entry.CompletedSamples = 0;
+                    entry.State = EstimateWorkState.Running;
+                    var started = Stopwatch.StartNew();
+                    GatherBuddy.Log.Information($"[GabrielValidation] Started {identity}");
+                    try
+                    {
+                        var estimate = await CraftingPluginPathSimulator.EstimateGabrielAsync(
+                                craft,
+                                root,
+                                DefaultSamples,
+                                seed,
+                                cancellationRequested: () => CraftingProcessor.IsActive,
+                                progress: (completed, total) =>
+                                {
+                                    entry.CompletedSamples = completed;
+                                    var interval = Math.Max(1, total / 10);
+                                    if (completed < total && completed % interval == 0)
+                                    {
+                                        GatherBuddy.Log.Information(
+                                            $"[GabrielValidation] Progress {completed}/{total} ({completed * 100 / total}%), elapsed={started.Elapsed.TotalSeconds:F1}s: {identity}");
+                                    }
+                                })
+                            .ConfigureAwait(false);
+                        entry.State = EstimateWorkState.Completed;
+                        GatherBuddy.Log.Information(
+                            $"[GabrielValidation] Completed {estimate.Successes}/{estimate.Samples} full-quality, "
+                            + $"syntheses={estimate.SynthesisCompletions}, terminalFailures={estimate.SolverTerminalFailures}, "
+                            + $"elapsed={estimate.ElapsedMillis / 1000d:F1}s: {identity}");
+                        return estimate;
+                    }
+                    catch (OperationCanceledException) when (CraftingProcessor.IsActive)
+                    {
+                        entry.CompletedSamples = 0;
+                        entry.State = EstimateWorkState.WaitingForCraft;
+                        GatherBuddy.Log.Information($"[GabrielValidation] Active craft interrupted validation; requeued from the beginning: {identity}");
+                    }
+                }
+                finally
+                {
+                    EstimateGate.Release();
+                }
+            }
+        }
+        catch (Exception exception)
+        {
+            entry.State = EstimateWorkState.Failed;
+            GatherBuddy.Log.Error($"[GabrielValidation] Failed {identity}: {exception}");
+            throw;
+        }
     }
 
     internal static string FormatReadySummary(double confidenceLow, double confidenceHigh)

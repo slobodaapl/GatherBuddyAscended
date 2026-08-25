@@ -2297,6 +2297,7 @@ public class CraftingListEditor
                 or RaphaelAssessmentOutcome.NoQualityRequired
                 => new Vector4(0.30f, 0.70f, 0.30f, 1f),
             RaphaelAssessmentState.Ready => new Vector4(0.78f, 0.62f, 0.15f, 1f),
+            RaphaelAssessmentState.Queued => new Vector4(0.55f, 0.55f, 0.55f, 1f),
             RaphaelAssessmentState.Generating => new Vector4(0.35f, 0.65f, 0.90f, 1f),
             RaphaelAssessmentState.Failed => new Vector4(0.78f, 0.25f, 0.25f, 1f),
             RaphaelAssessmentState.Unavailable => new Vector4(0.78f, 0.62f, 0.15f, 1f),

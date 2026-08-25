@@ -13,7 +13,7 @@ namespace GatherBuddy.Vulcan;
 internal static partial class DonatelloNative
 {
     private const string LibraryName = "donatello_ffi.dll";
-    internal const uint AbiVersion = 13;
+    internal const uint AbiVersion = 14;
     private static readonly SemaphoreSlim NativeSolveGate = new(1, 1);
     private static readonly JsonSerializerOptions RequestSerializerOptions = new()
     {

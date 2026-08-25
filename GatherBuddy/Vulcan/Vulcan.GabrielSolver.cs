@@ -60,7 +60,7 @@ public sealed class GabrielSolverDefinition : ISolverDefinition
     }
 }
 
-public sealed class GabrielSolver : Solver
+public sealed class GabrielSolver : Solver, IDisposable
 {
     private static long _nextSessionId;
 
@@ -68,6 +68,7 @@ public sealed class GabrielSolver : Solver
     private readonly ulong _sessionId;
     private StepState? _lastSolvedRoot;
     private bool _hasRecommended;
+    private bool _sessionOpen;
     private int _decisions;
 
     public int NativeRecommendationCount { get; private set; }
@@ -95,6 +96,11 @@ public sealed class GabrielSolver : Solver
 
         try
         {
+            if (!_sessionOpen)
+            {
+                DonatelloNative.OpenGabrielSession(_sessionId);
+                _sessionOpen = true;
+            }
             var seed = MixSeed(_policySeed, _decisions);
             var recommendation = DonatelloNative.RecommendGabriel(
                 craft,
@@ -115,6 +121,14 @@ public sealed class GabrielSolver : Solver
                 $"Gabriel could not produce a usable action: {exception.Message}",
                 IsTerminalFailure: true);
         }
+    }
+
+    public void Dispose()
+    {
+        if (!_sessionOpen)
+            return;
+        DonatelloNative.CloseGabrielSession(_sessionId);
+        _sessionOpen = false;
     }
 
     private static ulong CreatePolicySeed(CraftState craft)
