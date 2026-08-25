@@ -92,7 +92,7 @@ jobs:
             throw 'dumpbin.exe is unavailable on the Windows runner.'
           }
           $headers = & $dumpbinCommand /headers $dll 2>&1
-          if ($LASTEXITCODE -ne 0 -or $headers -notmatch 'machine \(x64\)') {
+          if ($LASTEXITCODE -ne 0 -or -not ($headers -match 'machine \(x64\)')) {
             throw 'GatherMesh FFI is not an x64 PE image.'
           }
           $exports = & $dumpbinCommand /exports $dll 2>&1
@@ -100,7 +100,7 @@ jobs:
             throw 'dumpbin could not inspect GatherMesh FFI exports.'
           }
           foreach ($symbol in @('gbm_abi_version', 'gbm_create', 'gbm_destroy')) {
-            if ($exports -notmatch "\b$symbol\b") {
+            if (-not ($exports -match "\b$symbol\b")) {
               throw "GatherMesh FFI export missing: $symbol"
             }
           }
