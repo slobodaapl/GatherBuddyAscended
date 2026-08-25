@@ -20,7 +20,7 @@ namespace GatherBuddy.Config;
 
 public partial class Configuration : IPluginConfiguration
 {
-    public int Version { get; set; } = 19;
+    public int Version { get; set; } = 20;
 
     // Set Names
     public string BotanistSetName { get; set; } = "Botanist";
@@ -233,6 +233,7 @@ public partial class Configuration : IPluginConfiguration
                 config.Migrate16To17();
                 config.Migrate17To18();
                 config.Migrate18To19();
+                config.Migrate19To20();
                 changed |= config.HiddenGatherableLevelFilters == null;
                 config.HiddenGatherableLevelFilters ??= [];
                 changed |= config.HiddenGatherableFolkloreFilters == null;
@@ -447,6 +448,18 @@ public partial class Configuration : IPluginConfiguration
         // unchanged for migrated configurations.
         GoToInnBeforeCrafting = false;
         Version = 19;
+        Save();
+    }
+
+    public void Migrate19To20()
+    {
+        if (Version >= 20)
+            return;
+
+        RaphaelSolverConfig ??= new();
+        if (RaphaelSolverConfig.DonatelloImprovementQuietSeconds == 5)
+            RaphaelSolverConfig.DonatelloImprovementQuietSeconds = Vulcan.DonatelloSolver.DefaultImprovementQuietPeriodSeconds;
+        Version = 20;
         Save();
     }
 

@@ -1108,6 +1108,7 @@ internal static class PluginPathSimulationAcceptanceTests
                        seed: 1,
                        operation: 0,
                        samples: 0,
+                       sessionId: 17,
                        policy,
                        profile)))
         {
@@ -1115,11 +1116,12 @@ internal static class PluginPathSimulationAcceptanceTests
             require(request.RootElement.GetProperty("maxSteps").GetInt32() == 55
                     && request.RootElement.GetProperty("maxDecisions").GetInt32() == 64
                     && request.RootElement.GetProperty("workerThreads").GetInt32() == 1
+                    && request.RootElement.GetProperty("sessionId").GetUInt64() == 17
                     && nativeRoot.GetProperty("carefulObservationCharges").GetInt32() == 3
                     && nativeRoot.GetProperty("quickInnovationAvailable").GetBoolean()
                     && nativeRoot.GetProperty("crafterDelineations").GetInt32() == 2
                     && nativeRoot.GetProperty("heartAndSoulAvailable").GetBoolean(),
-                "Gabriel's horizon, worker count, and faithful live specialist resources must reach the native request");
+                "Gabriel's session, horizon, worker count, and faithful live specialist resources must reach the native request");
         }
         require(!DonatelloNative.IsValidGabrielRecommendation(VulcanSkill.FinalAppraisal)
                 && !DonatelloNative.IsValidGabrielRecommendation(VulcanSkill.StellarSteadyHand)
@@ -1139,6 +1141,7 @@ internal static class PluginPathSimulationAcceptanceTests
                        seed: 1,
                        operation: 0,
                        samples: 0,
+                       sessionId: 17,
                        policy,
                        profile)))
         {
@@ -1155,6 +1158,7 @@ internal static class PluginPathSimulationAcceptanceTests
                        seed: 1,
                        operation: 0,
                        samples: 0,
+                       sessionId: 17,
                        policy,
                        profile)))
         {

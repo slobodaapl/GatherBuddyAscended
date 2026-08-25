@@ -135,14 +135,17 @@ public partial class VulcanWindow
                     + "Disable this if another plugin owns manually started crafts.");
             }
 
-            var ctxMenuEntries = GatherBuddy.Config.VulcanContextMenuEntries;
-            if (ImGui.Checkbox("Context Menu Entries (Vs in context menus)", ref ctxMenuEntries))
+            if (GatherBuddy.DevelopmentFeatures.Allows(DevelopmentFeature.VulcanContextMenus))
             {
-                GatherBuddy.Config.VulcanContextMenuEntries = ctxMenuEntries;
-                GatherBuddy.Config.Save();
+                var ctxMenuEntries = GatherBuddy.Config.VulcanContextMenuEntries;
+                if (ImGui.Checkbox("Context Menu Entries (Vs in context menus)", ref ctxMenuEntries))
+                {
+                    GatherBuddy.Config.VulcanContextMenuEntries = ctxMenuEntries;
+                    GatherBuddy.Config.Save();
+                }
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip("Show Vulcan-related entries (Open in Vulcan, Add to Crafting List, Add to Vendor Buy List) in the in-game right-click menu.");
             }
-            if (ImGui.IsItemHovered())
-                ImGui.SetTooltip("Show Vulcan-related entries (Open in Vulcan, Add to Crafting List, Add to Vendor Buy List) in the in-game right-click menu.");
 
             var showRecipeBrowserTooltips = GatherBuddy.Config.ShowRecipeBrowserTooltips;
             if (ImGui.Checkbox("Show Recipe Browser Item Tooltips", ref showRecipeBrowserTooltips))

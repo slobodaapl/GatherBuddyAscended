@@ -94,6 +94,7 @@ public partial class GatherBuddy : IDalamudPlugin
     public static Crafting.RaphaelSolveCoordinator RaphaelSolveCoordinator { get; private set; } = null!;
     public static Crafting.RecipeBrowserSettings RecipeBrowserSettings { get; private set; } = null!;
     public static Crafting.ArtisanIpcShim? ArtisanShim { get; private set; }
+    internal static DevelopmentFeaturePolicy DevelopmentFeatures { get; private set; }
     public static FcChestFeasibilityProbe? FcChestProbe { get; private set; }
     public static FcMeshNativeCoordinator? FcMeshNative { get; private set; }
     public static FcPublishedListService? FcPublishedLists { get; private set; }
@@ -134,7 +135,7 @@ public partial class GatherBuddy : IDalamudPlugin
         }
     }
 
-    public static FcLiveChestEvidenceProvider FcLiveChestEvidence { get; } = new();
+    public static FcLiveChestEvidenceProvider? FcLiveChestEvidence { get; private set; }
     public static FcPublicChestNavigator? FcPublicChestNavigation { get; private set; }
     /// <summary>
     /// Developer-only in-memory FC world. It never reaches native mesh,
@@ -199,9 +200,14 @@ public partial class GatherBuddy : IDalamudPlugin
         try
         {
             Dalamud.Initialize(pluginInterface);
-            FcPublicChestNavigation = new FcPublicChestNavigator();
-            _fcGameVersionProvider = new FcGameVersionProvider(
-                Dalamud.PluginInterface.GetType().Assembly.Location);
+            DevelopmentFeatures = DevelopmentFeaturePolicy.ForPlugin(pluginInterface.IsDev);
+            if (DevelopmentFeatures.Allows(DevelopmentFeature.FcMeshRuntime))
+            {
+                FcLiveChestEvidence = new FcLiveChestEvidenceProvider();
+                FcPublicChestNavigation = new FcPublicChestNavigator();
+                _fcGameVersionProvider = new FcGameVersionProvider(
+                    Dalamud.PluginInterface.GetType().Assembly.Location);
+            }
             Icons.Init(Dalamud.GameData, Dalamud.Textures);
             Log     = new Logger();
             Version = Assembly.GetExecutingAssembly().GetName().Version?.ToString() ?? "";
@@ -250,9 +256,12 @@ public partial class GatherBuddy : IDalamudPlugin
             LiveAcquisitionExecutor = null;
             CraftingGameInterop.Initialize();
             CraftingGatherBridge.Initialize(this);
-            CraftingGatherBridge.FcGatherYieldObserved += OnFcGatherYieldObserved;
             CraftingGameInterop.CraftFinished += (recipe, cancelled) => CraftingGatherBridge.OnCraftFinished(recipe, cancelled);
-            CraftingGameInterop.CraftFinished += OnFcCraftFinished;
+            if (DevelopmentFeatures.Allows(DevelopmentFeature.FcMeshRuntime))
+            {
+                CraftingGatherBridge.FcGatherYieldObserved += OnFcGatherYieldObserved;
+                CraftingGameInterop.CraftFinished += OnFcCraftFinished;
+            }
             
             Task.Run(() =>
             {
@@ -273,9 +282,12 @@ public partial class GatherBuddy : IDalamudPlugin
             BiteTimerService = new AutoHookIntegration.BiteTimerService(pluginInterface.ConfigDirectory.FullName);
             AutoGather   = new AutoGather.AutoGather(this);
             CollectableManager = new AutoGather.Collectables.CollectableManager(Dalamud.Framework, Dalamud.Conditions, Config);
-            FcChestProbe = new FcChestFeasibilityProbe(Dalamud.Framework);
-            FcSyntheticFulfillment = new FcSyntheticFulfillmentDriver();
-            _fcMeshStorageDirectory = Path.Combine(pluginInterface.ConfigDirectory.FullName, "fcmesh");
+            if (DevelopmentFeatures.Allows(DevelopmentFeature.FcMeshRuntime))
+            {
+                FcChestProbe = new FcChestFeasibilityProbe(Dalamud.Framework);
+                FcSyntheticFulfillment = new FcSyntheticFulfillmentDriver();
+                _fcMeshStorageDirectory = Path.Combine(pluginInterface.ConfigDirectory.FullName, "fcmesh");
+            }
             global::GatherBuddy.AutoGather.Collectables.CollectableInventoryHelper.InitializeAsync();
             CraftingGatherBridge.BindCollectableManager(CollectableManager);
             ArtisanShim = new Crafting.ArtisanIpcShim(pluginInterface);
@@ -537,6 +549,9 @@ public partial class GatherBuddy : IDalamudPlugin
     /// </summary>
     private void UpdateFcMeshRuntime()
     {
+        if (!DevelopmentFeatures.Allows(DevelopmentFeature.FcMeshRuntime))
+            return;
+
         var scope = CurrentFcCharacterScope();
         if (scope is null)
         {
@@ -917,6 +932,8 @@ public partial class GatherBuddy : IDalamudPlugin
 
     public static FcNativeCallResult ConfigureFcMeshCharacterAuthor()
     {
+        if (!DevelopmentFeatures.Allows(DevelopmentFeature.FcMeshRuntime))
+            return new FcNativeCallResult((uint)FcNativeErrorCode.InvalidState, 0, 0);
         if (FcMeshNative is null)
             return new FcNativeCallResult((uint)FcNativeErrorCode.InvalidHandle, 0, 0);
         var scope = CurrentFcCharacterScope();
@@ -927,23 +944,28 @@ public partial class GatherBuddy : IDalamudPlugin
 
     public static FcChestLocationPublicationResult RegisterCurrentFcChestLocation()
     {
+        if (!DevelopmentFeatures.Allows(DevelopmentFeature.FcMeshRuntime))
+            return FcChestLocationPublicationResult.Blocked("FC mesh development features are unavailable.");
         if (Dalamud.Framework is null || !Dalamud.Framework.IsInFrameworkUpdateThread)
             return FcChestLocationPublicationResult.Blocked(
                 "FC chest location evidence must be captured on the Dalamud framework thread; queue a registration request instead.");
         var publication = FcChestLocationPublication;
         if (publication is null)
             return FcChestLocationPublicationResult.Blocked("FC chest location publication is unavailable.");
-        var liveObject = FcLiveChestEvidence.ResolveCurrentTarget();
+        var liveEvidenceProvider = FcLiveChestEvidence;
+        if (liveEvidenceProvider is null)
+            return FcChestLocationPublicationResult.Blocked("FC chest location evidence is unavailable.");
+        var liveObject = liveEvidenceProvider.ResolveCurrentTarget();
         if (!liveObject.Succeeded || liveObject.Object is not { } currentObject)
             return FcChestLocationPublicationResult.Blocked(liveObject.Error);
-        if (!FcLiveChestEvidence.TryResolveCurrentEnvironment(
+        if (!liveEvidenceProvider.TryResolveCurrentEnvironment(
                 currentObject,
                 out var environment,
                 out var environmentError))
             return FcChestLocationPublicationResult.Blocked(environmentError);
-        if (!FcLiveChestEvidence.TryResolveReadyChestAddon(out var addonError))
+        if (!liveEvidenceProvider.TryResolveReadyChestAddon(out var addonError))
             return FcChestLocationPublicationResult.Blocked(addonError);
-        if (!FcLiveChestEvidence.TryResolveCurrentHousingAddress(
+        if (!liveEvidenceProvider.TryResolveCurrentHousingAddress(
                 out var housing,
                 out var originalHouseTerritory,
                 out var housingError))
@@ -970,6 +992,8 @@ public partial class GatherBuddy : IDalamudPlugin
 
     public static bool QueueRegisterCurrentFcChestLocation()
     {
+        if (!DevelopmentFeatures.Allows(DevelopmentFeature.FcMeshRuntime))
+            return false;
         if (FcChestLocationPublication is null)
         {
             _fcLastLocationRegistrationResult = FcChestLocationPublicationResult.Blocked(
@@ -987,6 +1011,8 @@ public partial class GatherBuddy : IDalamudPlugin
 
     public static bool QueueFcPublicChestRoute(FcPublicChestDestination destination)
     {
+        if (!DevelopmentFeatures.Allows(DevelopmentFeature.FcMeshRuntime))
+            return false;
         if (destination is null || FcPublicChestNavigation is null)
             return false;
         _fcPublicRouteRequested = destination;
@@ -995,17 +1021,24 @@ public partial class GatherBuddy : IDalamudPlugin
     }
 
     public static void QueueStopFcPublicChestRoute()
-        => Interlocked.Exchange(ref _fcPublicRouteStopRequested, 1);
+    {
+        if (DevelopmentFeatures.Allows(DevelopmentFeature.FcMeshRuntime))
+            Interlocked.Exchange(ref _fcPublicRouteStopRequested, 1);
+    }
 
     public static FcChestLocationPublicationResult UnregisterCurrentFcChestLocation()
-        => FcChestLocationPublication?.Unregister()
-            ?? FcChestLocationPublicationResult.Blocked("FC chest location publication is unavailable.");
+        => DevelopmentFeatures.Allows(DevelopmentFeature.FcMeshRuntime)
+            ? FcChestLocationPublication?.Unregister()
+                ?? FcChestLocationPublicationResult.Blocked("FC chest location publication is unavailable.")
+            : FcChestLocationPublicationResult.Blocked("FC mesh development features are unavailable.");
 
     public static bool StartFcFulfillment(
         IEnumerable<Guid>? selectedListIds = null,
         bool useOwnStock = false,
         bool allPublishedLists = true)
     {
+        if (!DevelopmentFeatures.Allows(DevelopmentFeature.FcMeshRuntime))
+            return false;
         if (FcFulfillment is null || FcWorkerSessions is null)
             return false;
         var options = new FcFulfillmentSessionStartOptions(
@@ -1025,7 +1058,10 @@ public partial class GatherBuddy : IDalamudPlugin
     }
 
     public static void StopFcFulfillment()
-        => FcFulfillment?.RequestStop();
+    {
+        if (DevelopmentFeatures.Allows(DevelopmentFeature.FcMeshRuntime))
+            FcFulfillment?.RequestStop();
+    }
 
     private static FcWorkerSessionResult StartFcFulfillmentSession()
     {
@@ -1211,26 +1247,29 @@ public partial class GatherBuddy : IDalamudPlugin
     private unsafe void Update(IFramework framework)
     {
         Config.SaveIfDirty();
-        try
+        if (DevelopmentFeatures.Allows(DevelopmentFeature.FcMeshRuntime))
         {
-            UpdateFcMeshRuntime();
-            ProcessFcLocationRegistrationRequest();
-            ProcessFcPublicChestRouteRequest();
-            FcChestPublication?.ProcessFrameworkCommands();
-            FcPublishedLists?.ReconcileAuthoritativeState();
-            FcWorkerSessions?.ReconcileAuthoritativeState();
-            FcCapabilities?.Publication.ReconcileAuthoritativeState();
-            if (FcChestCoordinator is null)
-                FcPublicChestNavigation?.Tick();
-            FcChestCoordinator?.Tick();
-            FcWorkerSessions?.Tick();
-            FcCapabilities?.Tick();
-            NotifyFcFulfillmentWorldChanges();
-            FcFulfillment?.Tick();
-        }
-        catch (Exception exception)
-        {
-            Log.Error($"Error while running FC mesh update: {exception.Message}");
+            try
+            {
+                UpdateFcMeshRuntime();
+                ProcessFcLocationRegistrationRequest();
+                ProcessFcPublicChestRouteRequest();
+                FcChestPublication?.ProcessFrameworkCommands();
+                FcPublishedLists?.ReconcileAuthoritativeState();
+                FcWorkerSessions?.ReconcileAuthoritativeState();
+                FcCapabilities?.Publication.ReconcileAuthoritativeState();
+                if (FcChestCoordinator is null)
+                    FcPublicChestNavigation?.Tick();
+                FcChestCoordinator?.Tick();
+                FcWorkerSessions?.Tick();
+                FcCapabilities?.Tick();
+                NotifyFcFulfillmentWorldChanges();
+                FcFulfillment?.Tick();
+            }
+            catch (Exception exception)
+            {
+                Log.Error($"Error while running FC mesh update: {exception.Message}");
+            }
         }
         var prev = LastObjectsLength;
         LastObjectsLength = Dalamud.Objects.Length;
@@ -1467,6 +1506,7 @@ public partial class GatherBuddy : IDalamudPlugin
         CraftingGameInterop.Dispose();
         FcPublicChestNavigation?.Stop();
         FcPublicChestNavigation = null;
+        FcLiveChestEvidence = null;
         Interlocked.Exchange(ref _fcLocationRegistrationRequested, 0);
         _fcLastLocationRegistrationResult = null;
         _fcPublicRouteRequested = null;

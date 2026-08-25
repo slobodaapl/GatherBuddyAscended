@@ -46,22 +46,19 @@ public static class CraftingContextResolver
         var qualityPolicy = GetQualityPolicy(item, recipe);
         var hasCraftedBefore = HasRecipeCraftedBefore(recipe);
         var useQuickSynthesis = item.Options.NQOnly && recipe.CanQuickSynth && hasCraftedBefore;
-        var forceProgressOnlyUnlockCraft = item.Options.NQOnly
+        var cosmicCollectible = recipe.Number == 0 && recipe.ItemResult.Value.AlwaysCollectable;
+        var forceProgressOnlyUnlockCraft = !cosmicCollectible
+            && item.Options.NQOnly
             && recipe.CanQuickSynth
             && !hasCraftedBefore
             && qualityPolicy.OverrideMode == CraftingQualityOverrideMode.RequireNQOnly;
         var craftSolverOverride = forceProgressOnlyUnlockCraft
             ? SolverOverrideMode.ProgressOnlySolver
             : item.CraftSettings?.SolverOverride ?? SolverOverrideMode.Default;
-        var effectiveSolverMode = craftSolverOverride switch
-        {
-            SolverOverrideMode.StandardSolver => VulcanSolverMode.StandardSolver,
-            SolverOverrideMode.RaphaelSolver => VulcanSolverMode.PureRaphael,
-            SolverOverrideMode.ProgressOnlySolver => VulcanSolverMode.ProgressOnly,
-            SolverOverrideMode.DonatelloSolver => VulcanSolverMode.Donatello,
-            SolverOverrideMode.GabrielSolver => VulcanSolverMode.Gabriel,
-            _ => ResolveGlobalSolverMode(GatherBuddy.Config.RaphaelSolverConfig.SolverMode),
-        };
+        var effectiveSolverMode = ResolveEffectiveSolverMode(
+            craftSolverOverride,
+            GatherBuddy.Config.RaphaelSolverConfig.SolverMode,
+            cosmicCollectible);
         var selectedMacroId = forceProgressOnlyUnlockCraft ? null : item.CraftSettings?.SelectedMacroId;
         return new(
             consumableSettings,
@@ -118,6 +115,30 @@ public static class CraftingContextResolver
         => configuredMode == VulcanSolverMode.Gabriel
             ? VulcanSolverMode.Donatello
             : configuredMode;
+
+    internal static VulcanSolverMode ResolveEffectiveSolverMode(
+        SolverOverrideMode solverOverride,
+        VulcanSolverMode configuredMode,
+        bool cosmicCollectible)
+    {
+        var globalMode = ResolveGlobalSolverMode(configuredMode);
+        var effectiveMode = solverOverride switch
+        {
+            SolverOverrideMode.StandardSolver => VulcanSolverMode.StandardSolver,
+            SolverOverrideMode.RaphaelSolver => VulcanSolverMode.PureRaphael,
+            SolverOverrideMode.ProgressOnlySolver => VulcanSolverMode.ProgressOnly,
+            SolverOverrideMode.DonatelloSolver => VulcanSolverMode.Donatello,
+            SolverOverrideMode.GabrielSolver => VulcanSolverMode.Gabriel,
+            _ => globalMode,
+        };
+
+        if (cosmicCollectible && effectiveMode == VulcanSolverMode.ProgressOnly)
+            return globalMode == VulcanSolverMode.ProgressOnly
+                ? VulcanSolverMode.Donatello
+                : globalMode;
+
+        return effectiveMode;
+    }
 
     public static bool UsesSelectedMacro(CraftingExecutionContext executionContext)
         => !string.IsNullOrEmpty(executionContext.SelectedMacroId)

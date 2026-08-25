@@ -55,9 +55,10 @@ internal static partial class DonatelloNative
         CraftState craft,
         StepState root,
         int decisions,
+        ulong sessionId,
         ulong seed)
     {
-        var response = InvokeGabriel(craft, root, decisions, seed, operation: 0, samples: 0);
+        var response = InvokeGabriel(craft, root, decisions, seed, operation: 0, samples: 0, sessionId);
         if (!response.ActionId.HasValue || !IsValidGabrielRecommendation((VulcanSkill)response.ActionId.Value))
             throw new InvalidOperationException("Gabriel native response omitted a valid non-forbidden action");
         return new(
@@ -76,7 +77,7 @@ internal static partial class DonatelloNative
         ulong seed,
         int samples)
     {
-        var response = InvokeGabriel(craft, root, decisions, seed, operation: 1, samples);
+        var response = InvokeGabriel(craft, root, decisions, seed, operation: 1, samples, sessionId: null);
         if (response.Samples != samples || response.Successes < 0 || response.Successes > response.Samples)
             throw new InvalidOperationException("Gabriel native response contained an invalid probability estimate");
         return new(response.Successes, response.Samples, response.Probability, response.ElapsedMillis);
@@ -88,7 +89,8 @@ internal static partial class DonatelloNative
         int decisions,
         ulong seed,
         int operation,
-        int samples)
+        int samples,
+        ulong? sessionId)
     {
         if (donatello_abi_version() != AbiVersion)
             throw new InvalidOperationException("Unsupported Donatello native ABI version");
@@ -108,6 +110,7 @@ internal static partial class DonatelloNative
                 seed,
                 operation,
                 samples,
+                sessionId,
                 policy,
                 conditionProfile));
             IntPtr nativeResponse;
@@ -143,6 +146,7 @@ internal static partial class DonatelloNative
         ulong seed,
         int operation,
         int samples,
+        ulong? sessionId,
         GabrielPolicyDescriptor policy,
         ExpertConditionProfile conditionProfile)
     {
@@ -169,6 +173,7 @@ internal static partial class DonatelloNative
             MaxDecisions = maxDecisions,
             Samples = Math.Max(0, samples),
             Seed = seed,
+            SessionId = sessionId,
             Root = new
             {
                 Cp = root.RemainingCP,

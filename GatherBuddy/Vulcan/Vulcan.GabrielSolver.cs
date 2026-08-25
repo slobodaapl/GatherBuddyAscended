@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Threading;
 using GatherBuddy.Crafting;
 
 namespace GatherBuddy.Vulcan;
@@ -61,7 +62,10 @@ public sealed class GabrielSolverDefinition : ISolverDefinition
 
 public sealed class GabrielSolver : Solver
 {
+    private static long _nextSessionId;
+
     private readonly ulong _policySeed;
+    private readonly ulong _sessionId;
     private StepState? _lastSolvedRoot;
     private bool _hasRecommended;
     private int _decisions;
@@ -78,6 +82,7 @@ public sealed class GabrielSolver : Solver
         if (!GabrielPolicyCatalog.TryResolve(craft, out _, out var reason))
             throw new InvalidOperationException(reason);
         _policySeed = policySeed;
+        _sessionId = unchecked((ulong)Interlocked.Increment(ref _nextSessionId));
     }
 
     public override Recommendation Solve(CraftState craft, StepState step)
@@ -91,7 +96,12 @@ public sealed class GabrielSolver : Solver
         try
         {
             var seed = MixSeed(_policySeed, _decisions);
-            var recommendation = DonatelloNative.RecommendGabriel(craft, step, _decisions, seed);
+            var recommendation = DonatelloNative.RecommendGabriel(
+                craft,
+                step,
+                _decisions,
+                _sessionId,
+                seed);
             NativeRecommendationCount++;
             _hasRecommended = true;
             return new(

@@ -316,14 +316,18 @@ public class ContextMenu : IDisposable
             args.AddMenuItem(_menuItem);
         if (_lastGatherable is Gatherable)
             args.AddMenuItem(_menuItemAuto);
-        if (GatherBuddy.Config.VulcanContextMenuEntries && _lastRecipeId.HasValue)
+        if (GatherBuddy.DevelopmentFeatures.Allows(DevelopmentFeature.VulcanContextMenus)
+            && GatherBuddy.Config.VulcanContextMenuEntries
+            && _lastRecipeId.HasValue)
         {
             _menuItemCrafting.IsEnabled = true;
             _menuItemVulcanRecipe.IsEnabled = true;
             args.AddMenuItem(_menuItemCrafting);
             args.AddMenuItem(_menuItemVulcanRecipe);
         }
-        if (GatherBuddy.Config.VulcanContextMenuEntries && _lastVendorBuyListItemId.HasValue)
+        if (GatherBuddy.DevelopmentFeatures.Allows(DevelopmentFeature.VulcanContextMenus)
+            && GatherBuddy.Config.VulcanContextMenuEntries
+            && _lastVendorBuyListItemId.HasValue)
         {
             _menuItemVendorBuyList.IsEnabled = true;
             args.AddMenuItem(_menuItemVendorBuyList);

@@ -460,6 +460,9 @@ public partial class VulcanWindow
 
         ImGui.EndChild();
 
+        if (!GatherBuddy.DevelopmentFeatures.Allows(DevelopmentFeature.CraftingListPreviewActions))
+            return;
+
         ImGui.Separator();
         ImGui.Spacing();
 

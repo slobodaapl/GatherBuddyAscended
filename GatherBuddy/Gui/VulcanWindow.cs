@@ -26,16 +26,25 @@ public partial class VulcanWindow : Window, IDisposable
 {
     private const int CraftingListsTabIndex = 0;
     private const int FcListsTabIndex = 1;
-    private const int RecipesTabIndex = 2;
-    private const int WorkshopsTabIndex = 3;
-    private const int MacrosTabIndex = 4;
-    private const int StandardSolverTabIndex = 5;
-    private const int SolutionsTabIndex = 6;
-    private const int SettingsTabIndex = 7;
-    private const int DebugTabIndex = 8;
-    private const int MarketboardTabIndex = 9;
-    private const int VendorsTabIndex = 10;
-    private const int VulcanTabCount = 11;
+    private static int RecipesTabIndex => 1 + FcTabOffset;
+    private static int WorkshopsTabIndex => 2 + FcTabOffset;
+    private static int MacrosTabIndex => 3 + FcTabOffset;
+    private static int StandardSolverTabIndex => 4 + FcTabOffset;
+    private static int SolutionsTabIndex => 5 + FcTabOffset;
+    private static int SettingsTabIndex => 6 + FcTabOffset;
+    private static int DebugTabIndex => 7 + FcTabOffset;
+    private static int MarketboardTabIndex => 7 + FcTabOffset + DebugTabOffset;
+    private static int VendorsTabIndex => 8 + FcTabOffset + DebugTabOffset;
+    private static int VulcanTabCount => ResolveVulcanTabCount(GatherBuddy.DevelopmentFeatures);
+    private static int FcTabOffset
+        => GatherBuddy.DevelopmentFeatures.Allows(DevelopmentFeature.FcUserInterface) ? 1 : 0;
+    private static int DebugTabOffset
+        => GatherBuddy.DevelopmentFeatures.Allows(DevelopmentFeature.DebugUserInterface) ? 1 : 0;
+
+    internal static int ResolveVulcanTabCount(DevelopmentFeaturePolicy features)
+        => 9
+            + (features.Allows(DevelopmentFeature.FcUserInterface) ? 1 : 0)
+            + (features.Allows(DevelopmentFeature.DebugUserInterface) ? 1 : 0);
 
     // Shared state
     private CraftingListDefinition? _editingList  = null;
@@ -133,6 +142,8 @@ public partial class VulcanWindow : Window, IDisposable
 
     private void OpenToFcLists()
     {
+        if (!GatherBuddy.DevelopmentFeatures.Allows(DevelopmentFeature.FcUserInterface))
+            return;
         _pendingCollapseState = false;
         IsOpen = true;
         _fcListsTabRequestFocus = true;
@@ -343,14 +354,16 @@ public partial class VulcanWindow : Window, IDisposable
                 if (tab)
                 {
                     DrawCraftingListsTab();
-                    DrawFcListsTab();
+                    if (GatherBuddy.DevelopmentFeatures.Allows(DevelopmentFeature.FcUserInterface))
+                        DrawFcListsTab();
                     DrawRecipesTab();
                     DrawWorkshopsTab();
                     DrawMacrosTab();
                     DrawStandardSolverConfigTab();
                     DrawSolutionsTab();
                     DrawSettingsTab();
-                    DrawDebugTab();
+                    if (GatherBuddy.DevelopmentFeatures.Allows(DevelopmentFeature.DebugUserInterface))
+                        DrawDebugTab();
                     DrawMarketboardTab();
                     DrawVendorsTab();
                 }

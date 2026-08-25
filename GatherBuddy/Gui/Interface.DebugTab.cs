@@ -234,9 +234,12 @@ public partial class Interface
             if (ImGui.Button("Set All Fish Unlocked"))
                 GatherBuddy.FishLog.SetAllUnlocked();
 
-            DrawFcChestProbeDebug();
-            DrawFcMeshNativeDebug();
-            DrawFcSyntheticFulfillmentDebug();
+            if (GatherBuddy.DevelopmentFeatures.Allows(DevelopmentFeature.DebugUserInterface))
+            {
+                DrawFcChestProbeDebug();
+                DrawFcMeshNativeDebug();
+                DrawFcSyntheticFulfillmentDebug();
+            }
 
             if (FishTimerWindow.CollectableIcon.TryGetWrap(out var wrapCollectable, out _))
                 ImGui.Image(wrapCollectable.Handle, wrapCollectable.Size);

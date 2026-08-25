@@ -38,6 +38,7 @@ CollectableGpPlanningAcceptanceTests.Run(Require);
 TimedLegendaryGpAcceptanceTests.Run(Require);
 CraftingMaterialSelectionAcceptanceTests.Run(Require);
 NativeRecipeCraftingTests.Run(Require);
+DevelopmentFeaturePolicyTests.Run(Require);
 FcMeshPhase0Tests.Run(Require);
 FcMeshPhase2Tests.Run(Require);
 FcMeshPhase3Tests.Run(Require);
@@ -386,8 +387,11 @@ Require(qualityTimeOptions?.ImprovementQuietPeriodMillis == 9_000,
     "craft execution context must convert the per-item reset-window override to the runtime deadline");
 Require(qualityTimeOptions?.Objective == DonatelloSolveObjective.ProgressOnly,
     "the persisted quality/time override must preserve transient Donatello execution options");
-Require(new RaphaelSolveCoordinatorConfig().DonatelloImprovementQuietSeconds
-        == DonatelloSolver.DefaultImprovementQuietPeriodSeconds
+var defaultRaphaelConfig = new RaphaelSolveCoordinatorConfig();
+Require(defaultRaphaelConfig.DonatelloImprovementQuietSeconds == 16
+        && DonatelloSolver.ResolveImprovementQuietPeriodMillis(
+            Craft(),
+            defaultRaphaelConfig.DonatelloImprovementQuietSeconds) == 16_000
         && DonatelloSolver.ResolveImprovementQuietPeriodMillis(Craft(), 7) == 7_000
         && DonatelloSolver.ResolveImprovementQuietPeriodMillis(
             Craft() with
@@ -396,7 +400,7 @@ Require(new RaphaelSolveCoordinatorConfig().DonatelloImprovementQuietSeconds
                     ImprovementQuietPeriodMillis: 1_250),
             },
             7) == 1_250,
-    "continuous replanning must default to five seconds, use the global setting, and prefer the per-recipe runtime override");
+    "continuous replanning must default to sixteen seconds, use the global setting, and prefer the per-recipe runtime override");
 var specialistOverrideSettings = new RecipeCraftSettings
 {
     SpecialistActionOverride = SpecialistActionOverrideMode.Allow,
@@ -761,6 +765,37 @@ Require(ArtisanIpcShim.ResolveSolverOverride("Progress Only Solver") == SolverOv
         && ArtisanIpcShim.ResolveSolverOverride("Raphael Recipe Solver") == SolverOverrideMode.RaphaelSolver
         && ArtisanIpcShim.ResolveSolverOverride("Expert Recipe Solver") == SolverOverrideMode.DonatelloSolver,
     "Artisan solver selections must preserve supported solver semantics instead of silently forcing Donatello");
+Require(CraftingContextResolver.ResolveEffectiveSolverMode(
+            SolverOverrideMode.ProgressOnlySolver,
+            VulcanSolverMode.PureRaphael,
+            cosmicCollectible: true) == VulcanSolverMode.PureRaphael
+        && CraftingContextResolver.ResolveEffectiveSolverMode(
+            SolverOverrideMode.ProgressOnlySolver,
+            VulcanSolverMode.StandardSolver,
+            cosmicCollectible: true) == VulcanSolverMode.StandardSolver
+        && CraftingContextResolver.ResolveEffectiveSolverMode(
+            SolverOverrideMode.ProgressOnlySolver,
+            VulcanSolverMode.Donatello,
+            cosmicCollectible: true) == VulcanSolverMode.Donatello,
+    "Cosmic collectibles must ignore Progress Only overrides and use the configured quality-capable solver");
+Require(CraftingContextResolver.ResolveEffectiveSolverMode(
+            SolverOverrideMode.ProgressOnlySolver,
+            VulcanSolverMode.ProgressOnly,
+            cosmicCollectible: true) == VulcanSolverMode.Donatello
+        && CraftingContextResolver.ResolveEffectiveSolverMode(
+            SolverOverrideMode.Default,
+            VulcanSolverMode.ProgressOnly,
+            cosmicCollectible: true) == VulcanSolverMode.Donatello,
+    "Cosmic collectibles must fall back to Donatello when the configured solver is also Progress Only");
+Require(CraftingContextResolver.ResolveEffectiveSolverMode(
+            SolverOverrideMode.ProgressOnlySolver,
+            VulcanSolverMode.Donatello,
+            cosmicCollectible: false) == VulcanSolverMode.ProgressOnly
+        && CraftingContextResolver.ResolveEffectiveSolverMode(
+            SolverOverrideMode.GabrielSolver,
+            VulcanSolverMode.ProgressOnly,
+            cosmicCollectible: true) == VulcanSolverMode.Gabriel,
+    "solver normalization must preserve Progress Only outside Cosmic collectibles and explicit quality-capable overrides within them");
 var unsupportedArtisanSolverRejected = false;
 try
 {

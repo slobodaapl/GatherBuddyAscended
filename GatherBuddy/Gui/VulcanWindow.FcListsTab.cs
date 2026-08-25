@@ -511,6 +511,9 @@ public partial class VulcanWindow
 
     private void DrawFcListContextActions(CraftingListDefinition list, string listUiId)
     {
+        if (!GatherBuddy.DevelopmentFeatures.Allows(DevelopmentFeature.FcUserInterface))
+            return;
+
         ImGui.Separator();
         var service = GatherBuddy.FcPublishedLists;
         var ready = service is not null

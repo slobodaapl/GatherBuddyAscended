@@ -112,7 +112,7 @@ public class DonatelloSolver : Solver, IDisposable
 {
     internal const int DefaultLiveReplanDeadlineMillis = 2000;
     internal const int ProtectedRaphaelTakeoverDeadlineMillis = 30_000;
-    internal const int DefaultImprovementQuietPeriodSeconds = 5;
+    internal const int DefaultImprovementQuietPeriodSeconds = 16;
     internal const int MinimumImprovementQuietPeriodSeconds = 1;
     internal const int MaximumImprovementQuietPeriodSeconds = 30;
     internal const int DefaultImprovementQuietPeriodMillis = DefaultImprovementQuietPeriodSeconds * 1000;
