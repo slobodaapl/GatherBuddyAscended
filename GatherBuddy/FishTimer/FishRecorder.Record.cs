@@ -1,7 +1,6 @@
 ﻿using System;
 using System.Diagnostics;
 using System.Linq;
-using System.Threading.Tasks;
 using Dalamud.Game;
 using Dalamud.Plugin.Services;
 using FFXIVClientStructs.FFXIV.Client.Game.Event;
@@ -276,11 +275,6 @@ public partial class FishRecorder
 
     private void OnFrameworkUpdate(IFramework _)
     {
-        if (GatherBuddy.Config.AutoGatherConfig.FishDataCollection && UploadTaskReady && NextRemoteRecordsUpdate < DateTime.Now)
-        {
-            var token = RemoteRecordsCancellationTokenSource.Token;
-            RemoteRecordsUploadTask = Task.Run(() => UploadLocalRecords(token), token);
-        }
         TimedSave();
         UpdateLureStatus();
         var state = GatherBuddy.EventFramework.FishingState;

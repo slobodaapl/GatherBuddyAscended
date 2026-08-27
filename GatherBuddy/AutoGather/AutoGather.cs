@@ -819,19 +819,10 @@ namespace GatherBuddy.AutoGather
 
             if (next.Fish != null)
             {
-                if (!GatherBuddy.Config.AutoGatherConfig.FishDataCollection)
+                var unavailableReason = FishingAutomationUnavailableReason(AutoHook.Enabled);
+                if (unavailableReason != null)
                 {
-                    GatherBuddy.Log.Warning("[AutoGather] Fishing data collection opt-in is disabled. Enable fishing data collection in configuration or remove fish from auto-gather lists.");
-                    Communicator.PrintError(
-                        "You have fish on your auto-gather list but you have not opted in to fishing data collection. Auto-gather cannot continue. Please enable fishing data collection in your configuration options or remove fish from your auto-gather lists.");
-                    AbortAutoGather();
-                    return;
-                }
-
-                if (!AutoHook.Enabled)
-                {
-                    Communicator.PrintError(
-                        "[GatherBuddy Ascended] You have fish on your auto-gather list but AutoHook is not installed or enabled. Auto-gather cannot continue. Please install and enable AutoHook or remove fish from your auto-gather lists.");
+                    Communicator.PrintError(unavailableReason);
                     AbortAutoGather();
                     return;
                 }
@@ -1335,6 +1326,11 @@ namespace GatherBuddy.AutoGather
             AutoStatus = "Fell out of control loop unexpectedly. Please report this error.";
             return;
         }
+
+        internal static string? FishingAutomationUnavailableReason(bool autoHookAvailable)
+            => autoHookAvailable
+                ? null
+                : "[GatherBuddy Ascended] You have fish on your auto-gather list but AutoHook is not installed or enabled. Auto-gather cannot continue. Please install and enable AutoHook or remove fish from your auto-gather lists.";
 
         public readonly Dictionary<GatherTarget, (Vector3 Position, Angle Rotation, DateTime Expiration)> FishingSpotData = new();
         private readonly Dictionary<Vector3, DateTime> _fishingSpotDismountAttempts = new();

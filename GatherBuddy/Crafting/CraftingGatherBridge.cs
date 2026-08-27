@@ -59,6 +59,7 @@ public static class CraftingGatherBridge
     private static DateTime _nextStartupRecoveryAttemptUtc;
     private static FcGatherYieldBoundary? _fcGatherYieldBoundary;
     private static bool _fcGatherWasInProgress;
+    private static bool _queueGatherStageStarted;
     private static uint[] _fcGatherTargetOrder = Array.Empty<uint>();
 
     public static event Action<GatherYieldObserved>? FcGatherYieldObserved;
@@ -672,6 +673,7 @@ public static class CraftingGatherBridge
                 : null);
         SetFcGatherIntentProvider(executionPlan);
         _fcGatherWasInProgress = false;
+        _queueGatherStageStarted = false;
         _restoringPersistedCraft = restoringPersistedCraft;
         _restoredQueueCoverage = restoringPersistedCraft
             ? executionPlan.QueueView
@@ -922,6 +924,8 @@ public static class CraftingGatherBridge
     {
         try
         {
+            if (_isQueueMode)
+                _queueGatherStageStarted = false;
             if (_plugin == null)
                 throw new InvalidOperationException("Plugin is not initialized.");
 
@@ -993,6 +997,8 @@ public static class CraftingGatherBridge
                 }
                 else
                 {
+                    if (_isQueueMode)
+                        _queueGatherStageStarted = true;
                     _waitingForGatherComplete = true;
                     if (GatherBuddy.AutoGather == null)
                         throw new InvalidOperationException("AutoGather is not initialized.");
@@ -1373,9 +1379,13 @@ public static class CraftingGatherBridge
         {
             if (!TryCompleteFcGatherYieldBoundary())
                 return;
+            var hadGatheringSteps = _queueGatherStageStarted;
+            _queueGatherStageStarted = false;
             _waitingForGatherComplete = false;
-            GatherBuddy.Log.Debug($"[CraftingGatherBridge] Gather complete for queue mode");
-            _queueProcessor.OnGatherComplete();
+            GatherBuddy.Log.Debug(hadGatheringSteps
+                ? "[CraftingGatherBridge] Gather complete for queue mode"
+                : "[CraftingGatherBridge] Queue requires no gathering steps");
+            _queueProcessor.OnGatherComplete(hadGatheringSteps);
             return;
         }
         
@@ -2050,6 +2060,7 @@ public static class CraftingGatherBridge
 
     private static void RestoreQueueOwnedState()
     {
+        _queueGatherStageStarted = false;
         CraftingGameInterop.SetDonatelloOptions(null);
         try
         {

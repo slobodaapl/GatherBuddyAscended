@@ -171,7 +171,7 @@ public static class CraftingStateBuilder
                     return false;
 
                 return Dalamud.GameData.GetExcelSheet<Item>()?.TryGetRow(mainHand->ItemId, out var item) == true
-                    && IsSplendorCosmicTool(item.LevelEquip, item.Rarity);
+                    && IsSplendorCosmicTool(item.LevelEquip, checked((int)item.LevelItem.RowId), item.Rarity);
             }
         }
         catch
@@ -180,8 +180,10 @@ public static class CraftingStateBuilder
         }
     }
 
-    internal static bool IsSplendorCosmicTool(int levelEquip, int rarity)
-        => levelEquip is 90 or 100 && rarity >= 4;
+    internal static bool IsSplendorCosmicTool(int levelEquip, int itemLevel, int rarity)
+        => rarity >= 4
+            && ((levelEquip == 90 && itemLevel >= 620)
+                || (levelEquip == 100 && itemLevel >= 720));
 
     public static GameStateBuilder.RecipeInfo BuildRecipeInfo(
         Recipe recipe,

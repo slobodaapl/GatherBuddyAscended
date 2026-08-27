@@ -114,7 +114,10 @@ public static unsafe class GearsetStatsReader
                 if (!itemSheet.TryGetRow(actualItemId, out var item))
                     return null;
                 if (i == 0)
-                    splendorCosmic = CraftingStateBuilder.IsSplendorCosmicTool(item.LevelEquip, item.Rarity);
+                    splendorCosmic = CraftingStateBuilder.IsSplendorCosmicTool(
+                        item.LevelEquip,
+                        checked((int)item.LevelItem.RowId),
+                        item.Rarity);
                 var baseStats = new int[StatCount];
                 var meldStats = new int[StatCount];
 
@@ -528,7 +531,10 @@ public static unsafe class GearsetStatsReader
                     return null;
                 }
                 if (i == 0)
-                    splendorCosmic = CraftingStateBuilder.IsSplendorCosmicTool(item.LevelEquip, item.Rarity);
+                    splendorCosmic = CraftingStateBuilder.IsSplendorCosmicTool(
+                        item.LevelEquip,
+                        checked((int)item.LevelItem.RowId),
+                        item.Rarity);
                 var baseStats = new int[StatCount];
                 var meldStats = new int[StatCount];
 

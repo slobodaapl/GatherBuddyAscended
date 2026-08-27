@@ -86,12 +86,36 @@ public partial class Interface
                 b => GatherBuddy.Config.AutoGatherConfig.ShowAutoHomeChatWarning = b);
         }
 
-        public static void DrawCraftingInnNavigationBox()
-            => DrawCheckbox(
-                "Go to inn before crafting",
-                "When a crafting-list run finishes gathering and purchasing, use Lifestream to enter an inn before crafting. Disabled by default.",
-                GatherBuddy.Config.GoToInnBeforeCrafting,
-                b => GatherBuddy.Config.GoToInnBeforeCrafting = b);
+        public static void DrawCraftingReturnNavigationBox()
+        {
+            DrawCheckbox(
+                "Return before crafting",
+                "After AutoGather finishes gathering for a crafting-list run, return to the selected destination before crafting.",
+                GatherBuddy.Config.ReturnBeforeCrafting,
+                b => GatherBuddy.Config.ReturnBeforeCrafting = b);
+            ImGui.SameLine();
+            ImGuiEx.PluginAvailabilityIndicator([new("Lifestream")]);
+        }
+
+        public static void DrawCraftingReturnDestination()
+        {
+            var destination = GatherBuddy.Config.ReturnBeforeCraftingDestination;
+            if (ImGui.RadioButton(
+                    "To Cheapest Aetheryte",
+                    destination == CraftingReturnDestination.CheapestAetheryte))
+                GatherBuddy.Config.ReturnBeforeCraftingDestination = CraftingReturnDestination.CheapestAetheryte;
+            var hovered = ImGui.IsItemHovered();
+            ImGui.SameLine();
+            if (ImGui.RadioButton("To Inn", destination == CraftingReturnDestination.Inn))
+                GatherBuddy.Config.ReturnBeforeCraftingDestination = CraftingReturnDestination.Inn;
+            hovered |= ImGui.IsItemHovered();
+
+            if (destination != GatherBuddy.Config.ReturnBeforeCraftingDestination)
+                GatherBuddy.Config.Save();
+            if (hovered)
+                ImGui.SetTooltip(
+                    "Cheapest Aetheryte uses the lowest current teleport price among your attuned destinations. Inn enters an inn through Lifestream.");
+        }
 
         public static void DrawPreventAfkWhileAutomatingBox()
             => DrawCheckbox(
@@ -225,14 +249,6 @@ public partial class Interface
             ImGuiUtil.HoverTooltip(
                 "The command used when idling or done gathering. DO NOT include '/li'\nBe careful when changing this, GBR does not validate this command!");
         }
-
-        public static void DrawFishCollectionBox()
-            => DrawCheckbox("Opt-in to fishing data collection",
-                "With this enabled, whenever you catch a fish the data for that fish will be uploaded to a remote server\n"
-              + "The purpose of this data collection is to allow for a usable auto-fishing feature to be built\n"
-              + "No personal information about you or your character will be collected, only data relevant to the caught fish\n"
-              + "You can opt-out again at any time by simply disabling this checkbox.", GatherBuddy.Config.AutoGatherConfig.FishDataCollection,
-                b => GatherBuddy.Config.AutoGatherConfig.FishDataCollection = b);
 
         public static void DrawMaterialExtraction()
             => DrawCheckbox("Enable materia extraction",
@@ -1536,7 +1552,6 @@ public partial class Interface
             new("Use AutoHook Global Preset",                    ConfigFunctions.DrawUseAutoHookGlobalPresetBox),
             new("Use existing AutoHook presets",                  ConfigFunctions.DrawUseExistingAutoHookPresetsBox),
             new("Max Fishing Spot Minutes",                       ConfigFunctions.DrawFishingSpotMinutes),
-            new("Opt-in to fishing data collection",              ConfigFunctions.DrawFishCollectionBox),
             new("Auto Collectables",                              ConfigFunctions.DrawAutoCollectablesFishingBox),
             new("Defer repairs during fishing buffs",             ConfigFunctions.DrawDeferRepairDuringFishingBuffsBox),
             new("Defer aetherial reduction during fishing buffs", ConfigFunctions.DrawDeferReductionDuringFishingBuffsBox),
@@ -1601,7 +1616,13 @@ public partial class Interface
         ]),
         new("Crafting", "Navigation",
         [
-            new("Go to inn before crafting", ConfigFunctions.DrawCraftingInnNavigationBox),
+            new("Return before crafting To Cheapest Aetheryte To Inn",
+                layout =>
+                {
+                    ConfigFunctions.DrawCraftingReturnNavigationBox();
+                    if (GatherBuddy.Config.ReturnBeforeCrafting)
+                        layout.Child.Draw(ConfigFunctions.DrawCraftingReturnDestination);
+                }),
         ]),
         new("General", "Automation",
         [

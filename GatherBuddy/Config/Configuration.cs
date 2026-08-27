@@ -20,7 +20,7 @@ namespace GatherBuddy.Config;
 
 public partial class Configuration : IPluginConfiguration
 {
-    public int Version { get; set; } = 20;
+    public int Version { get; set; } = 21;
 
     // Set Names
     public string BotanistSetName { get; set; } = "Botanist";
@@ -98,7 +98,10 @@ public partial class Configuration : IPluginConfiguration
     public CraftingRecoveryTicket? CraftingRecovery { get; set; }
     public bool   SkipMacroStepIfUnable { get; set; } = true;
     public bool   MacroFallbackEnabled  { get; set; } = true;
-    public bool GoToInnBeforeCrafting { get; set; } = false;
+    public bool ReturnBeforeCrafting { get; set; } = true;
+    public CraftingReturnDestination ReturnBeforeCraftingDestination { get; set; } = CraftingReturnDestination.CheapestAetheryte;
+    [JsonProperty("GoToInnBeforeCrafting", NullValueHandling = NullValueHandling.Ignore)]
+    internal bool? LegacyGoToInnBeforeCrafting { get; set; }
     public Dictionary<string, uint> VendorNpcPreferences { get; set; } = new();
     public Dictionary<string, string> VendorRoutePreferences { get; set; } = new();
     [JsonProperty("VendorBuyListEntries", NullValueHandling = NullValueHandling.Ignore)]
@@ -200,6 +203,9 @@ public partial class Configuration : IPluginConfiguration
     public bool ShouldSerializeLegacyVendorBuyListEntries()
         => false;
 
+    public bool ShouldSerializeLegacyGoToInnBeforeCrafting()
+        => false;
+
 
     // Add missing colors to the dictionary if necessary.
     private void AddColors()
@@ -235,6 +241,7 @@ public partial class Configuration : IPluginConfiguration
                 config.Migrate17To18();
                 config.Migrate18To19();
                 config.Migrate19To20();
+                config.Migrate20To21();
                 changed |= config.HiddenGatherableLevelFilters == null;
                 config.HiddenGatherableLevelFilters ??= [];
                 changed |= config.HiddenGatherableFolkloreFilters == null;
@@ -445,9 +452,6 @@ public partial class Configuration : IPluginConfiguration
         if (Version >= 19)
             return;
 
-        // New navigation is opt-in. Existing crafting/gathering behavior is
-        // unchanged for migrated configurations.
-        GoToInnBeforeCrafting = false;
         Version = 19;
         Save();
     }
@@ -461,6 +465,20 @@ public partial class Configuration : IPluginConfiguration
         if (RaphaelSolverConfig.DonatelloImprovementQuietSeconds == 5)
             RaphaelSolverConfig.DonatelloImprovementQuietSeconds = Vulcan.DonatelloSolver.DefaultImprovementQuietPeriodSeconds;
         Version = 20;
+        Save();
+    }
+
+    public void Migrate20To21()
+    {
+        if (Version >= 21)
+            return;
+
+        ReturnBeforeCrafting = true;
+        ReturnBeforeCraftingDestination = LegacyGoToInnBeforeCrafting == true
+            ? CraftingReturnDestination.Inn
+            : CraftingReturnDestination.CheapestAetheryte;
+        LegacyGoToInnBeforeCrafting = null;
+        Version = 21;
         Save();
     }
 

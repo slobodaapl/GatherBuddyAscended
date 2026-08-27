@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Generic;
+using System.Linq;
 using Dalamud.Game.ClientState.Conditions;
 using Dalamud.Utility;
 using FFXIVClientStructs.FFXIV.Client.Game.Group;
@@ -119,6 +121,48 @@ public static unsafe class HomeNavigationHelper
         Lifestream.ExecuteCommand("inn");
         return true;
     }
+
+    public static bool TryStartCheapestAetheryte(out string? error)
+    {
+        error = null;
+        if (Dalamud.Conditions[ConditionFlag.BoundByDuty])
+        {
+            error = "Cannot go to an aetheryte while bound by duty.";
+            return false;
+        }
+        if (!Lifestream.Enabled)
+        {
+            error = "Lifestream is required to go to the cheapest aetheryte.";
+            return false;
+        }
+        if (Lifestream.IsBusy())
+            return true;
+
+        var candidates = Dalamud.Aetherytes
+            .Where(entry => entry != null
+                && entry.AetheryteId != 0
+                && GatherBuddy.GameData.Aetherytes.ContainsKey(entry.AetheryteId))
+            .Select(entry => (entry!.AetheryteId, entry.GilCost));
+        var aetheryteId = SelectCheapestAetheryte(candidates);
+        if (aetheryteId == 0
+            || !GatherBuddy.GameData.Aetherytes.TryGetValue(aetheryteId, out var aetheryte))
+        {
+            error = "No attuned aetheryte is available for crafting return.";
+            return false;
+        }
+
+        Lifestream.ExecuteCommand($"tp {aetheryte.Name}");
+        return true;
+    }
+
+    internal static uint SelectCheapestAetheryte(
+        IEnumerable<(uint AetheryteId, uint GilCost)> candidates)
+        => candidates
+            .Where(candidate => candidate.AetheryteId != 0)
+            .OrderBy(candidate => candidate.GilCost)
+            .ThenBy(candidate => candidate.AetheryteId)
+            .Select(candidate => candidate.AetheryteId)
+            .FirstOrDefault();
 
     public static bool IsAtHomeWorld()
     {

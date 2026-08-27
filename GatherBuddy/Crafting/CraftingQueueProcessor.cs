@@ -4,6 +4,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Dalamud.Game.ClientState.Conditions;
+using GatherBuddy.Config;
 using GatherBuddy.Crafting.Acquisition;
 using GatherBuddy.Automation;
 using GatherBuddy.FcMesh.Capabilities;
@@ -31,7 +32,7 @@ public class CraftingQueueProcessor : IDisposable
         WaitingForAcquisitionData,
         PurchasingDependencies,
         ReturningToHomeWorld,
-        ReturningToInn,
+        ReturningBeforeCrafting,
         WaitingForJobSwitch,
         Repairing,
         ExtractingMateria,
@@ -67,6 +68,7 @@ public class CraftingQueueProcessor : IDisposable
     private readonly Dictionary<uint, (int NQ, int HQ)> _acquisitionInventoryBefore = new();
     private readonly Dictionary<uint, int> _acquisitionPlannedQuantities = new();
     private bool _navigationStarted;
+    private bool _configuredReturnAllowed;
 
     private readonly record struct AcquisitionRunSnapshot(
         long Generation,
@@ -166,6 +168,7 @@ public class CraftingQueueProcessor : IDisposable
         _retainerBellNavigator = null;
         CancelAcquisition();
         _navigationStarted = false;
+        _configuredReturnAllowed = false;
         var hasRetainerWork = _retainerRestock && AllaganTools.Enabled
             && (MaterialTargets.Count > 0 || RetainerPrecraftTargets.Count > 0);
 
@@ -228,17 +231,19 @@ public class CraftingQueueProcessor : IDisposable
         return true;
     }
 
-    public void OnGatherComplete()
+    public void OnGatherComplete(bool hadGatheringSteps)
     {
         if (_currentState != QueueState.WaitingForGather)
             return;
 
-        GatherBuddy.Log.Debug("[CraftingQueueProcessor] Gather complete, preparing post-acquisition navigation");
+        GatherBuddy.Log.Debug(hadGatheringSteps
+            ? "[CraftingQueueProcessor] Gather complete, preparing post-gather navigation"
+            : "[CraftingQueueProcessor] No gathering steps required, continuing to crafting preflight");
         YesAlready.Lock();
         CraftingGatherBridge.DeleteTemporaryGatherList();
         if (_executionPlan != null)
             _executionPlan.RefreshFromCurrentInventory();
-        BeginPostGatherNavigation();
+        BeginPostGatherNavigation(hadGatheringSteps);
     }
 
     private void BeginAcquisitionOrGather()
@@ -456,9 +461,10 @@ public class CraftingQueueProcessor : IDisposable
         return deficits;
     }
 
-    private void BeginPostGatherNavigation()
+    private void BeginPostGatherNavigation(bool hadGatheringSteps)
     {
         _navigationStarted = false;
+        _configuredReturnAllowed = hadGatheringSteps;
         if (_executionPlan?.ReturnToHomeWorldBeforeCrafting == true && !HomeNavigationHelper.IsAtHomeWorld())
         {
             _currentState = QueueState.ReturningToHomeWorld;
@@ -466,9 +472,9 @@ public class CraftingQueueProcessor : IDisposable
             return;
         }
 
-        if (GatherBuddy.Config.GoToInnBeforeCrafting)
+        if (ShouldUseConfiguredReturnBeforeCrafting(hadGatheringSteps, GatherBuddy.Config.ReturnBeforeCrafting))
         {
-            _currentState = QueueState.ReturningToInn;
+            _currentState = QueueState.ReturningBeforeCrafting;
             StateChanged?.Invoke(_currentState);
             return;
         }
@@ -483,13 +489,17 @@ public class CraftingQueueProcessor : IDisposable
 
         if (!_navigationStarted)
         {
-            string? homeError;
+            string? navigationError;
             var started = _currentState == QueueState.ReturningToHomeWorld
-                ? HomeNavigationHelper.TryStartReturnHomeWorld(out homeError)
-                : HomeNavigationHelper.TryStartInn(out homeError);
+                ? HomeNavigationHelper.TryStartReturnHomeWorld(out navigationError)
+                : GatherBuddy.Config.ReturnBeforeCraftingDestination switch
+                {
+                    CraftingReturnDestination.Inn => HomeNavigationHelper.TryStartInn(out navigationError),
+                    _ => HomeNavigationHelper.TryStartCheapestAetheryte(out navigationError),
+                };
             if (!started)
             {
-                FailQueue(homeError ?? "Lifestream navigation could not be started.");
+                FailQueue(navigationError ?? "Lifestream navigation could not be started.");
                 return;
             }
 
@@ -500,7 +510,8 @@ public class CraftingQueueProcessor : IDisposable
         if (Lifestream.Enabled && Lifestream.IsBusy())
             return;
 
-        if (_currentState == QueueState.ReturningToHomeWorld && GatherBuddy.Config.GoToInnBeforeCrafting)
+        if (_currentState == QueueState.ReturningToHomeWorld
+            && ShouldUseConfiguredReturnBeforeCrafting(_configuredReturnAllowed, GatherBuddy.Config.ReturnBeforeCrafting))
         {
             if (!HomeNavigationHelper.IsAtHomeWorld())
             {
@@ -508,7 +519,7 @@ public class CraftingQueueProcessor : IDisposable
                 return;
             }
             _navigationStarted = false;
-            _currentState = QueueState.ReturningToInn;
+            _currentState = QueueState.ReturningBeforeCrafting;
             StateChanged?.Invoke(_currentState);
             return;
         }
@@ -521,6 +532,9 @@ public class CraftingQueueProcessor : IDisposable
 
         BeginFinalPreflight();
     }
+
+    internal static bool ShouldUseConfiguredReturnBeforeCrafting(bool hadGatheringSteps, bool enabled)
+        => hadGatheringSteps && enabled;
 
     private void BeginFinalPreflight()
     {
@@ -785,7 +799,7 @@ public class CraftingQueueProcessor : IDisposable
                 UpdateAcquisition();
                 break;
             case QueueState.ReturningToHomeWorld:
-            case QueueState.ReturningToInn:
+            case QueueState.ReturningBeforeCrafting:
                 UpdatePostGatherNavigation();
                 break;
             case QueueState.WaitingForJobSwitch:
@@ -2348,6 +2362,8 @@ public class CraftingQueueProcessor : IDisposable
         _retainerExecutor = null;
         _retainerBellNavigator?.Stop();
         _retainerBellNavigator = null;
+        _navigationStarted = false;
+        _configuredReturnAllowed = false;
     }
     
     public void TestRepair()

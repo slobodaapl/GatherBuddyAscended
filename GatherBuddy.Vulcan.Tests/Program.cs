@@ -40,6 +40,8 @@ CraftingMaterialSelectionAcceptanceTests.Run(Require);
 NativeRecipeCraftingTests.Run(Require);
 DevelopmentFeaturePolicyTests.Run(Require);
 AfkPreventionTests.Run(Require);
+CraftingReturnNavigationTests.Run(Require);
+FishingAutomationTests.Run(Require);
 FcMeshPhase0Tests.Run(Require);
 FcMeshPhase2Tests.Run(Require);
 FcMeshPhase3Tests.Run(Require);
@@ -335,11 +337,17 @@ Require(GearsetStatsReader.TryResolveUncappedSpecialistStat(13, 20, 0, out var s
         && specialistCraftsmanship == 20
         && !GearsetStatsReader.TryResolveUncappedSpecialistStat(12, 20, 0, out _),
     "saved specialist soul-crystal stats must remain usable without a normal equipment-slot cap table");
-Require(CraftingStateBuilder.IsSplendorCosmicTool(90, 4)
-        && CraftingStateBuilder.IsSplendorCosmicTool(100, 4)
-        && !CraftingStateBuilder.IsSplendorCosmicTool(80, 4)
-        && !CraftingStateBuilder.IsSplendorCosmicTool(100, 3),
-    "Splendorous/Cosmic tool detection must preserve its level and rarity boundaries");
+Require(CraftingStateBuilder.IsSplendorCosmicTool(90, 620, 4)
+        && CraftingStateBuilder.IsSplendorCosmicTool(90, 640, 4)
+        && CraftingStateBuilder.IsSplendorCosmicTool(100, 720, 4)
+        && CraftingStateBuilder.IsSplendorCosmicTool(100, 780, 4)
+        && !CraftingStateBuilder.IsSplendorCosmicTool(90, 1, 4)
+        && !CraftingStateBuilder.IsSplendorCosmicTool(90, 590, 4)
+        && !CraftingStateBuilder.IsSplendorCosmicTool(100, 1, 4)
+        && !CraftingStateBuilder.IsSplendorCosmicTool(100, 690, 4)
+        && !CraftingStateBuilder.IsSplendorCosmicTool(80, 620, 4)
+        && !CraftingStateBuilder.IsSplendorCosmicTool(100, 720, 3),
+    "Splendorous/Cosmic tool detection must include effect-bearing tiers and reject replicas and prototypes");
 var requiredQualityCraft = GameStateBuilder.BuildCraftState(
     new GameStateBuilder.RecipeInfo(
         RecipeId: 38247,

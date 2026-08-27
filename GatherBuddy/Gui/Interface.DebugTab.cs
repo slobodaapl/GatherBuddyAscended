@@ -342,12 +342,6 @@ public partial class Interface
         if (!ImGui.CollapsingHeader("Fishing State"))
             return;
 
-        ImGui.Text($"Remote Task State (Upload): {_plugin.FishRecorder.RemoteRecordsUploadTask.Status}");
-        if (ImGui.Button("Force Cancellation"))
-        {
-            _plugin.FishRecorder.StopRemoteRecordsRequests();
-        }
-
         using var table = ImRaii.Table("##Framework", 2);
         if (!table)
             return;

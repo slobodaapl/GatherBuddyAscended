@@ -304,7 +304,7 @@ public class CraftingStatusWindow : Window
             CraftingQueueProcessor.QueueState.WaitingForAcquisitionData => "Loading acquisition data",
             CraftingQueueProcessor.QueueState.PurchasingDependencies => "Purchasing dependencies",
             CraftingQueueProcessor.QueueState.ReturningToHomeWorld => "Returning to Home World",
-            CraftingQueueProcessor.QueueState.ReturningToInn => "Going to inn",
+            CraftingQueueProcessor.QueueState.ReturningBeforeCrafting => "Returning before crafting",
             CraftingQueueProcessor.QueueState.Failed => "Stopped",
             CraftingQueueProcessor.QueueState.Complete => "Complete",
             _ => "Unknown"
