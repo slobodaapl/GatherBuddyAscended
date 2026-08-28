@@ -54,10 +54,10 @@ internal sealed class CraftingProcessorSession : IDisposable
     internal Solver? ActiveSolver => _activeSolver;
     internal Task? PendingSolveCompletion => _pendingSolve;
 
-    public void Setup()
+    public void Setup(bool allowTrainedEyeOverride = true)
     {
         _solverDefinitions.Clear();
-        _solverDefinitions.Add(new ProgressOnlySolverDefinition());
+        _solverDefinitions.Add(new ProgressOnlySolverDefinition(allowTrainedEyeOverride));
     }
 
     public void Dispose()
@@ -584,7 +584,7 @@ public static class CraftingProcessor
     public static string FaultReason => Live.FaultReason;
     internal static Solver? ActiveSolver => Live.ActiveSolver;
 
-    public static void Setup() => Live.Setup();
+    public static void Setup(bool allowTrainedEyeOverride = true) => Live.Setup(allowTrainedEyeOverride);
     public static void Dispose() => Live.Dispose();
     public static IEnumerable<ISolverDefinition.Desc> GetAvailableSolversForCraft(
         CraftState craft,

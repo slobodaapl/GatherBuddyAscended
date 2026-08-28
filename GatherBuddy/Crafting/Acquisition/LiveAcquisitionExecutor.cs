@@ -9,9 +9,9 @@ namespace GatherBuddy.Crafting.Acquisition;
 
 /// <summary>
 /// Executes a precomputed acquisition plan against authoritative in-game
-/// sources. Vendor purchases run before market purchases. A missing or stale
-/// market listing invalidates the complete remaining plan and asks the caller
-/// for a fresh global plan; this executor never repairs a stale plan greedily.
+/// sources. Vendor purchases run before market purchases. A fresh live listing
+/// may replace the planned listing only when it satisfies the same transaction
+/// constraints without increasing its cost.
 /// </summary>
 public sealed class LiveAcquisitionExecutor : IDisposable
 {
@@ -28,6 +28,7 @@ public sealed class LiveAcquisitionExecutor : IDisposable
     private readonly Dictionary<uint, int> _currentPlanPurchasedNqQuantities = new();
     private readonly Dictionary<string, int> _purchasedByTransaction = new(StringComparer.Ordinal);
     private readonly Dictionary<string, long> _gilSpentByTransaction = new(StringComparer.Ordinal);
+    private readonly HashSet<long> _purchasedMarketListingIds = new();
     private readonly Dictionary<uint, int> _requiredQuantities = new();
     private readonly Dictionary<uint, int> _requiredHqQuantities = new();
     private readonly Dictionary<uint, int> _requiredNqQuantities = new();
@@ -135,6 +136,7 @@ public sealed class LiveAcquisitionExecutor : IDisposable
                         partial: _purchasedQuantities.Count > 0 || _hasIndeterminatePurchases));
                 }
 
+                GatherBuddy.Log.Warning($"[Acquisition] Replanning: {pass.Message}");
                 AddDiagnostic(LiveAcquisitionStage.Market, pass.Message, pass.ItemId, pass.ItemName, pass.WorldName, pass.EstimatedGil, pass.LiveGil, pass.ListingId);
                 // The failed listing is no longer authoritative. Invalidate it
                 // before the framework-side planner reads the market cache;
@@ -372,7 +374,7 @@ public sealed class LiveAcquisitionExecutor : IDisposable
             }
 
             Stage = LiveAcquisitionStage.Market;
-            if (!await _environment.NavigateToMarketBoardAsync(route, _options.MarketBoardTimeout, cancellationToken))
+            if (!await _environment.NavigateToMarketBoardAsync(route, cancellationToken))
             {
                 return PassResult.Finished(Failure(
                     LiveAcquisitionFailureKind.MarketUnavailable,
@@ -400,7 +402,6 @@ public sealed class LiveAcquisitionExecutor : IDisposable
                     cancellationToken);
                 if (!listingsResponse.IsFresh)
                 {
-                    await _environment.CloseMarketBoardAsync(cancellationToken);
                     return PassResult.ReplanRequested(
                         listingsResponse.FailureReason,
                         transaction.ItemId,
@@ -420,14 +421,13 @@ public sealed class LiveAcquisitionExecutor : IDisposable
                         candidate));
                 if (listing == null)
                 {
-                    await _environment.CloseMarketBoardAsync(cancellationToken);
                     var plannedListingId = long.TryParse(transaction.SourceId, out var parsedListingId)
                         ? parsedListingId
                         : (long?)null;
                     return PassResult.ReplanRequested(
                         candidates.Count == 0
-                            ? $"The exact planned market listing for {transaction.ItemName} is unavailable or changed."
-                            : $"The exact live market listing for {transaction.ItemName} exceeds its planned price, quantity, or original estimate ceiling.",
+                            ? $"No live market listing for {transaction.ItemName} matched the required quantity and quality."
+                            : $"Every matching live market listing for {transaction.ItemName} exceeds its planned price or purchase budget.",
                         transaction.ItemId,
                         transaction.ItemName,
                         route.WorldName,
@@ -457,7 +457,6 @@ public sealed class LiveAcquisitionExecutor : IDisposable
 
                 if (purchase.IsStale)
                 {
-                    await _environment.CloseMarketBoardAsync(cancellationToken);
                     return PassResult.ReplanRequested(
                         purchase.Message,
                         transaction.ItemId,
@@ -496,7 +495,6 @@ public sealed class LiveAcquisitionExecutor : IDisposable
                     }
 
                     RecordKnownMarketPurchase(transaction, transactionIndex, listing, purchase);
-                    await _environment.CloseMarketBoardAsync(cancellationToken);
                     return PassResult.ReplanRequested(
                         $"Live market purchase for {transaction.ItemName} was accepted but underfilled ({purchase.QuantityPurchased:N0}/{listing.Quantity:N0}); refreshing the global acquisition plan.",
                         transaction.ItemId,
@@ -531,6 +529,7 @@ public sealed class LiveAcquisitionExecutor : IDisposable
 
                 var marketGil = ActualGilSpent(purchase.GilBefore, purchase.GilAfter, purchase.GilSpent);
                 RecordPurchase(transaction, transactionIndex, purchase.QuantityPurchased, marketGil, null, null, listing.IsHq);
+                _purchasedMarketListingIds.Add(listing.ListingId);
                 AddDiagnostic(Stage, purchase.Message, transaction.ItemId, transaction.ItemName, route.WorldName, transaction.GilCost, marketGil, listing.ListingId);
             }
 
@@ -741,14 +740,12 @@ public sealed class LiveAcquisitionExecutor : IDisposable
     {
         if (remaining <= 0)
             return Array.Empty<LiveMarketListing>();
-        if (!long.TryParse(transaction.SourceId, out var plannedListingId) || plannedListingId <= 0)
-            return Array.Empty<LiveMarketListing>();
 
         return listings
             .Where(listing => listing.ItemId == transaction.ItemId
-                && listing.ListingId == plannedListingId
                 && listing.Quantity > 0
                 && listing.Quantity == remaining
+                && !_purchasedMarketListingIds.Contains(listing.ListingId)
                 && !listing.IsMannequin
                 && !listing.IsSellingAsSet
                 && listing.WorldId != 0
@@ -1215,7 +1212,11 @@ public sealed class LiveAcquisitionExecutor : IDisposable
         var quantity = System.Math.Max(0, purchase.QuantityPurchased);
         var gil = TryGetObservedGilSpent(purchase.GilBefore, purchase.GilAfter, purchase.GilSpent);
         if (quantity > 0 || gil > 0)
+        {
             RecordPurchase(transaction, transactionIndex, quantity, gil, null, null, listing.IsHq);
+            if (purchase.Verified && quantity > 0)
+                _purchasedMarketListingIds.Add(listing.ListingId);
+        }
     }
 
     private static bool TryGetActualGilSpent(
@@ -1399,6 +1400,7 @@ public sealed class LiveAcquisitionExecutor : IDisposable
         _currentPlanPurchasedNqQuantities.Clear();
         _purchasedByTransaction.Clear();
         _gilSpentByTransaction.Clear();
+        _purchasedMarketListingIds.Clear();
         _requiredQuantities.Clear();
         _requiredHqQuantities.Clear();
         _requiredNqQuantities.Clear();

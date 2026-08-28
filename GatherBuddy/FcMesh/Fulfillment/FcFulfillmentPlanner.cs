@@ -354,7 +354,6 @@ public static class FcFulfillmentPlanner
             Name = "FC fulfillment",
             UseAllHQ = records.Any(record => record.FinalTargets
                 .Any(target => IsFinalHq(record, target))),
-            PreferHQ = false,
         };
         foreach (var record in records)
         {

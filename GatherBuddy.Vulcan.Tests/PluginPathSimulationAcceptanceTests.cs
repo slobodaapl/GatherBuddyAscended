@@ -16,6 +16,7 @@ internal static class PluginPathSimulationAcceptanceTests
     {
         ValidateNormalConditionDistribution(require);
         ValidateDonatelloLiveBootstrapGate(require);
+        await ValidateTrainedEyeProgressOnlyRouting(require);
         ValidateLowLevelInnerQuietPluginPath(require);
         ValidateManualSynthesisTakeoverPluginPath(require);
         ValidateGabrielCatalog(require);
@@ -34,6 +35,56 @@ internal static class PluginPathSimulationAcceptanceTests
         await ValidateManualCarefulObservationRecovery(require);
         await ValidateScriptedConditionAndManualActionRecovery(require);
         await ValidateImprovedRivetsMaterialMiracleRecovery(require);
+    }
+
+    private static async Task ValidateTrainedEyeProgressOnlyRouting(Action<bool, string> require)
+    {
+        var craft = Craft() with
+        {
+            StatLevel = 80,
+            CraftLevel = 70,
+            CraftExpert = false,
+            CraftCollectible = false,
+        };
+        require(ProgressOnlySolverDefinition.ShouldForceTrainedEye(craft)
+                && !ProgressOnlySolverDefinition.ShouldForceTrainedEye(craft with { StatLevel = 79, CraftLevel = 69 })
+                && !ProgressOnlySolverDefinition.ShouldForceTrainedEye(craft with { CraftLevel = 71 })
+                && !ProgressOnlySolverDefinition.ShouldForceTrainedEye(craft with { CraftExpert = true }),
+            "Trained Eye ProgressOnly routing must require level 80, a ten-level recipe gap, and a non-expert craft");
+
+        var root = GameStateBuilder.BuildInitialStepState(craft);
+        CraftingProcessor.Setup();
+        try
+        {
+            CraftingProcessor.RegisterSolver(new StandardSolverDefinition());
+            CraftingProcessor.OnCraftStarted(craft, root, craft.RecipeId, isTrial: false);
+            var recommendation = await AwaitRecommendation();
+            var (result, afterEye) = Simulator.Execute(craft, root, recommendation.Action, 0, 1);
+            require(CraftingProcessor.ActiveSolver is ProgressOnlySolver
+                    && recommendation.Action == VulcanSkill.TrainedEye
+                    && result == Simulator.ExecuteResult.Succeeded
+                    && afterEye.Quality == craft.CraftQualityMax,
+                "eligible plugin-runtime crafts must override the quality solver with ProgressOnly and force Trained Eye first");
+            CraftingProcessor.OnCraftFinished(craft, afterEye, craft.RecipeId, cancelled: true);
+        }
+        finally
+        {
+            CraftingProcessor.Dispose();
+        }
+
+        CraftingProcessor.Setup(allowTrainedEyeOverride: false);
+        try
+        {
+            CraftingProcessor.RegisterSolver(new StandardSolverDefinition());
+            CraftingProcessor.OnCraftStarted(craft, root, craft.RecipeId, isTrial: false);
+            require(CraftingProcessor.ActiveSolver is StandardSolver,
+                "explicit NQ-only routing must suppress the automatic Trained Eye ProgressOnly override");
+            CraftingProcessor.OnCraftFinished(craft, root, craft.RecipeId, cancelled: true);
+        }
+        finally
+        {
+            CraftingProcessor.Dispose();
+        }
     }
 
     private static void ValidateLowLevelInnerQuietPluginPath(Action<bool, string> require)

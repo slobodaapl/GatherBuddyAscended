@@ -21,6 +21,8 @@ public partial class VulcanWindow
         if (list.QuickSynthAll)
             GatherBuddy.Log.Debug($"[VulcanWindow] Quick Synth All active (PreferNQ={list.QuickSynthAllPreferNQ}, PrecraftsOnly={list.QuickSynthAllPrecraftsOnly})");
         var executionPlan = CraftingExecutionPlan.Create(list);
+        if (_listEditor?.PurchaseConfigurationList.ID == list.ID)
+            executionPlan.AcquisitionPlanningPublished = _listEditor.PublishAcquisitionPlanningResult;
 
         GatherBuddy.Log.Information($"[VulcanWindow] Starting crafting list '{list.Name}' with {executionPlan.QueueView.Count} crafts from {executionPlan.ResolvedPlan.Recipes.Count} planned recipes");
         CraftingGatherBridge.StartQueueCraftAndGather(

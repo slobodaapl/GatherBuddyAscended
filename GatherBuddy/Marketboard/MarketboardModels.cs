@@ -27,3 +27,15 @@ public sealed class MarketItemData
 }
 
 public sealed record MarketSearchResult(uint ItemId, string Name, uint IconId, int Score);
+
+public enum MarketAvailabilityState
+{
+    Unknown,
+    Available,
+    Unavailable,
+}
+
+public sealed record MarketAvailability(
+    uint ItemId,
+    MarketAvailabilityState State,
+    string Reason);

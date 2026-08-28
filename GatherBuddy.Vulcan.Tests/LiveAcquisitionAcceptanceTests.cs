@@ -1041,6 +1041,7 @@ internal static class LiveAcquisitionAcceptanceTests
 
         var repeatedItem = new FakeEnvironment
         {
+            RetainPurchasedListings = true,
             Listings = new[]
             {
                 new LiveMarketListing(7, 700, 10, "World A", 1, 5, 0, false),
@@ -1060,7 +1061,8 @@ internal static class LiveAcquisitionAcceptanceTests
             .GetResult();
         Require(repeatedResult.Status == LiveAcquisitionStatus.Completed
             && repeatedResult.PurchasedQuantities[7] == 2
-            && repeatedItem.MarketPurchaseCalls == 2,
+            && repeatedItem.MarketPurchaseCalls == 2
+            && repeatedItem.PurchasedListingIds.SetEquals(new[] { 700L, 701L }),
             "repeated same-item transactions must retain independent fulfillment state");
 
         var replanAllocation = new FakeEnvironment
@@ -1465,6 +1467,7 @@ internal static class LiveAcquisitionAcceptanceTests
         public IReadOnlyDictionary<uint, long> VendorCurrencySpendPerCall { get; init; }
             = new Dictionary<uint, long>();
         public bool ListingsFresh { get; init; } = true;
+        public bool RetainPurchasedListings { get; init; }
         public int StaleOnListingsRequest { get; init; }
         public IReadOnlyList<LiveMarketListing>? ReplanListings { get; set; }
         public int ListingsRequestCalls { get; private set; }
@@ -1500,7 +1503,7 @@ internal static class LiveAcquisitionAcceptanceTests
             return true;
         }
 
-        public async Task<bool> NavigateToMarketBoardAsync(AcquisitionWorldRoute route, TimeSpan timeout, CancellationToken cancellationToken)
+        public async Task<bool> NavigateToMarketBoardAsync(AcquisitionWorldRoute route, CancellationToken cancellationToken)
         {
             ActionOrder.Add("market");
             LastMarketRoute = route;
@@ -1519,7 +1522,8 @@ internal static class LiveAcquisitionAcceptanceTests
             var available = ReplanListings ?? Listings;
             return Task.FromResult(new LiveMarketListingsResponse(
                 isFresh,
-                available.Where(listing => listing.ItemId == itemId && !PurchasedListingIds.Contains(listing.ListingId)).ToArray()));
+                available.Where(listing => listing.ItemId == itemId
+                    && (RetainPurchasedListings || !PurchasedListingIds.Contains(listing.ListingId))).ToArray()));
         }
 
         public Task<LiveMarketPurchaseResult> PurchaseMarketListingAsync(LiveMarketListing listing, TimeSpan timeout, CancellationToken cancellationToken)

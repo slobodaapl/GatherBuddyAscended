@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Text.Json;
 using System.Threading;
 using GatherBuddy.AutoGather;
 using GatherBuddy.Crafting;
@@ -53,6 +52,11 @@ public static class AcquisitionAcceptanceTests
         CappedDpHandlesDenseAtomicListings(require);
         CappedDpHandlesLargeAtomicListingSets(require);
         AcquisitionPlanningHonorsCancellation(require);
+        ItemPoliciesConstrainSourcesCurrenciesAndHq(require);
+        PurchaseConfigurationRulesEnforceHqEligibility(require);
+        ImplicitPurchasePolicyWaitsForMarketProbe(require);
+        ImplicitPurchasePolicyCannotLockPlannerToVendor(require);
+        PurchasePlanPreviewGroupsTransactions(require);
         AcquisitionSettingsRoundTrip(require);
     }
 
@@ -1511,26 +1515,234 @@ public static class AcquisitionAcceptanceTests
         {
             PreferBestClassForMultiRecipeItems = true,
             AutoPurchaseBlockedDependencies = true,
-            PreferMarketForSpecialCurrency = false,
-            PreferHQ = true,
-            PreferVendors = true,
+            PurchaseItemPolicies = new Dictionary<uint, AcquisitionItemPurchasePolicy>
+            {
+                [500] = new()
+                {
+                    Source = AcquisitionSourceSelection.Either,
+                    CurrencyIds = new uint[] { 700, 701 },
+                    PreferHQ = true,
+                    UserConfigured = true,
+                },
+            },
             CurrentWorldOnly = true,
             MaximumGilSpend = 123_456,
             ReturnToHomeWorldBeforeCrafting = true,
         };
-        var serialized = JsonSerializer.Serialize(source);
-        var roundTrip = JsonSerializer.Deserialize<CraftingListDefinition>(serialized);
+        var serialized = Newtonsoft.Json.JsonConvert.SerializeObject(source);
+        var roundTrip = Newtonsoft.Json.JsonConvert.DeserializeObject<CraftingListDefinition>(serialized);
 
         require(roundTrip != null
             && roundTrip.PreferBestClassForMultiRecipeItems
             && roundTrip.AutoPurchaseBlockedDependencies
-            && !roundTrip.PreferMarketForSpecialCurrency
-            && roundTrip.PreferHQ
-            && roundTrip.PreferVendors
+            && roundTrip.PurchaseItemPolicies.TryGetValue(500, out var policy)
+            && policy.Source == AcquisitionSourceSelection.Either
+            && policy.CurrencyIds?.SequenceEqual(new uint[] { 700, 701 }) == true
+            && policy.PreferHQ
+            && policy.UserConfigured
             && roundTrip.CurrentWorldOnly
             && roundTrip.MaximumGilSpend == 123_456
             && roundTrip.ReturnToHomeWorldBeforeCrafting,
             "acquisition settings and enabled best-class preference must survive list persistence round-trip");
+
+        const string legacy = """
+        { "AutoPurchaseBlockedDependencies": true, "PreferHQ": true, "PreferVendors": true,
+          "PreferMarketForSpecialCurrency": false }
+        """;
+        var migrated = Newtonsoft.Json.JsonConvert.DeserializeObject<CraftingListDefinition>(legacy);
+        require(migrated != null
+                && migrated.AutoPurchaseBlockedDependencies
+                && migrated.PurchaseItemPolicies.Count == 0,
+            "legacy global purchase preferences must be discarded instead of silently changing new per-item defaults");
+    }
+
+    private static void ItemPoliciesConstrainSourcesCurrenciesAndHq(Action<bool, string> require)
+    {
+        const uint itemId = 940;
+        const uint tokenId = 9_940;
+        var input = new AcquisitionPlanningInput
+        {
+            Dependencies = new[] { Blocked(itemId, 2) },
+            VendorOffers = new[]
+            {
+                new AcquisitionVendorOffer
+                {
+                    ItemId = itemId,
+                    OfferId = "token-vendor",
+                    ReceiveQuantity = 1,
+                    Costs = new[] { Currency(tokenId, 1, true) },
+                },
+                Vendor(itemId, "gil-vendor", 1),
+            },
+            MarketListings = new[]
+            {
+                new AcquisitionMarketListing
+                {
+                    ItemId = itemId,
+                    ListingId = 940_001,
+                    WorldId = 10,
+                    WorldName = "Test World",
+                    Quantity = 1,
+                    PricePerUnit = 20,
+                    IsHq = true,
+                },
+                Listing(itemId, 940_002, 1, 2),
+            },
+            CurrencyBalances = new Dictionary<uint, long> { [tokenId] = 2 },
+            GilBalance = 1_000,
+        };
+
+        var marketplace = AcquisitionPlanner.Plan(input, new AcquisitionPlanningSettings
+        {
+            AutoPurchaseBlockedDependencies = true,
+            DefaultItemPolicy = new AcquisitionItemPurchasePolicy(),
+            ItemPolicies = new Dictionary<uint, AcquisitionItemPurchasePolicy>
+            {
+                [itemId] = new()
+                {
+                    Source = AcquisitionSourceSelection.Marketplace,
+                    CurrencyIds = new[] { AcquisitionCurrency.GilId },
+                    PreferHQ = true,
+                },
+            },
+        });
+        require(marketplace.IsSuccess
+                && marketplace.SelectedPlan?.Transactions.All(transaction => transaction.SourceKind == AcquisitionSourceKind.Market) == true
+                && marketplace.SelectedPlan.Transactions.Any(transaction => transaction.IsHq),
+            "marketplace plus Gil policy must exclude vendors and maximize HQ coverage");
+
+        var vendor = AcquisitionPlanner.Plan(input, new AcquisitionPlanningSettings
+        {
+            AutoPurchaseBlockedDependencies = true,
+            DefaultItemPolicy = new AcquisitionItemPurchasePolicy(),
+            ItemPolicies = new Dictionary<uint, AcquisitionItemPurchasePolicy>
+            {
+                [itemId] = new()
+                {
+                    Source = AcquisitionSourceSelection.Vendor,
+                    CurrencyIds = new[] { tokenId },
+                },
+            },
+        });
+        require(vendor.IsSuccess
+                && vendor.SelectedPlan?.Transactions.Single().SourceId == "token-vendor"
+                && vendor.SelectedPlan.Estimate.TotalGil == 0,
+            "vendor currency policy must retain the complete selected currency vector and exclude Gil alternatives");
+
+        var invalid = AcquisitionPlanner.Plan(input, new AcquisitionPlanningSettings
+        {
+            AutoPurchaseBlockedDependencies = true,
+            DefaultItemPolicy = new AcquisitionItemPurchasePolicy(),
+            ItemPolicies = new Dictionary<uint, AcquisitionItemPurchasePolicy>
+            {
+                [itemId] = new()
+                {
+                    Source = AcquisitionSourceSelection.Marketplace,
+                    CurrencyIds = new[] { tokenId },
+                },
+            },
+        });
+        require(!invalid.IsSuccess
+                && invalid.Blockers.Single().Reason.Contains("require Gil", StringComparison.Ordinal),
+            "invalid persisted marketplace currency policy must fail closed");
+    }
+
+    private static void PurchaseConfigurationRulesEnforceHqEligibility(Action<bool, string> require)
+    {
+        require(CraftingPurchaseConfigurationWindow.AllowsPreferHq(
+                    AcquisitionSourceSelection.Either, null, itemCanBeHq: true)
+                && CraftingPurchaseConfigurationWindow.AllowsPreferHq(
+                    AcquisitionSourceSelection.Marketplace, new[] { AcquisitionCurrency.GilId }, itemCanBeHq: true)
+                && !CraftingPurchaseConfigurationWindow.AllowsPreferHq(
+                    AcquisitionSourceSelection.Vendor, new[] { AcquisitionCurrency.GilId }, itemCanBeHq: true)
+                && !CraftingPurchaseConfigurationWindow.AllowsPreferHq(
+                    AcquisitionSourceSelection.Either, new uint[] { 10 }, itemCanBeHq: true)
+                && !CraftingPurchaseConfigurationWindow.AllowsPreferHq(
+                    AcquisitionSourceSelection.Either, null, itemCanBeHq: false),
+            "Prefer HQ must be available only for HQ-capable marketplace access with Auto or Gil currency");
+    }
+
+    private static void ImplicitPurchasePolicyWaitsForMarketProbe(Action<bool, string> require)
+    {
+        var offers = new[] { Vendor(500, "gil-vendor", 1) };
+        require(CraftingPurchaseConfigurationWindow.CreateImplicitPolicy(offers, true, false, false) == null,
+            "implicit purchase source must remain unresolved while market availability is unknown");
+
+        var both = CraftingPurchaseConfigurationWindow.CreateImplicitPolicy(offers, true, true, true);
+        require(both is { Source: AcquisitionSourceSelection.Either, CurrencyIds: null, UserConfigured: false },
+            "implicit purchase source must default to either after both vendor and market availability resolve");
+
+        var vendorOnly = CraftingPurchaseConfigurationWindow.CreateImplicitPolicy(offers, true, false, true);
+        require(vendorOnly is { Source: AcquisitionSourceSelection.Vendor, UserConfigured: false },
+            "implicit purchase source may collapse to vendor only after marketplace unavailability resolves");
+    }
+
+    private static void ImplicitPurchasePolicyCannotLockPlannerToVendor(Action<bool, string> require)
+    {
+        var list = new CraftingListDefinition
+        {
+            AutoPurchaseBlockedDependencies = true,
+            CurrentWorldOnly = true,
+            PurchaseItemPolicies = new Dictionary<uint, AcquisitionItemPurchasePolicy>
+            {
+                [500] = new() { Source = AcquisitionSourceSelection.Vendor },
+            },
+        };
+        var result = AcquisitionPlanner.Plan(
+            new AcquisitionPlanningInput
+            {
+                Dependencies = new[] { Blocked(500, 1) },
+                VendorOffers = new[] { Vendor(500, "expensive-vendor", 10_000) },
+                MarketListings = new[] { Listing(500, 5000, 1, 500) },
+                GilBalance = 100_000,
+                CurrentWorldId = 10,
+            },
+            list.GetAcquisitionSettings());
+
+        require(result.SelectedPlan?.Transactions.Single().SourceKind == AcquisitionSourceKind.Market
+                && result.SelectedPlan.Estimate.TotalGil == 500,
+            "an implicit UI vendor default must not override a cheaper current-world marketplace listing");
+    }
+
+    private static void PurchasePlanPreviewGroupsTransactions(Action<bool, string> require)
+    {
+        var plan = new AcquisitionPlan
+        {
+            Transactions = new[]
+            {
+                new AcquisitionTransaction
+                {
+                    ItemId = 950,
+                    ItemName = "Preview Item",
+                    SourceKind = AcquisitionSourceKind.Market,
+                    WorldId = 10,
+                    WorldName = "Test World",
+                    Costs = new[] { Currency(0, 30, false) },
+                },
+                new AcquisitionTransaction
+                {
+                    ItemId = 950,
+                    ItemName = "Preview Item",
+                    SourceKind = AcquisitionSourceKind.Market,
+                    WorldId = 10,
+                    WorldName = "Test World",
+                    Costs = new[] { Currency(0, 20, false) },
+                },
+                new AcquisitionTransaction
+                {
+                    ItemId = 950,
+                    ItemName = "Preview Item",
+                    SourceKind = AcquisitionSourceKind.Vendor,
+                    Costs = new[] { Currency(9000, 2, true) },
+                },
+            },
+        };
+        var rows = CraftingPurchasePlanWindow.BuildRows(plan, new[] { Blocked(950, 1) });
+        var itemEstimates = CraftingPurchasePlanWindow.BuildItemEstimates(plan);
+        require(rows.Count == 2
+                && rows.Single(row => row.Source == "Test World marketplace").Costs.Single().Amount == 50
+                && itemEstimates.Single().Costs.Select(cost => cost.Amount).SequenceEqual(new long[] { 50, 2 }),
+            "purchase previews must group identical transactions and expose per-item currency totals");
     }
 
     private static AcquisitionVendorOffer Vendor(uint itemId, string offerId, long gil)

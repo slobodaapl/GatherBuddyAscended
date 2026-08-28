@@ -262,6 +262,12 @@ public static class AcquisitionPlanner
         out bool limitExceeded)
     {
         limitExceeded = false;
+        var policy = settings.ItemPolicies.TryGetValue(dependency.ItemId, out var configuredPolicy)
+            ? configuredPolicy
+            : settings.DefaultItemPolicy;
+        if (!ValidatePolicy(policy, out failureReason))
+            return new List<Candidate>();
+        var preferHq = policy?.PreferHQ ?? settings.PreferHQ;
         var vendors = input.VendorOffers
             .Where(offer => offer.IsAvailable
                 && offer.EffectiveOutputs.Any(output => output is not null
@@ -283,6 +289,20 @@ public static class AcquisitionPlanner
             .ThenBy(listing => listing.WorldId)
             .ThenBy(listing => listing.ListingId)
             .ToList();
+
+        if (policy?.Source == AcquisitionSourceSelection.Marketplace)
+            vendors.Clear();
+        else if (policy?.Source == AcquisitionSourceSelection.Vendor)
+            markets.Clear();
+
+        if (policy?.CurrencyIds != null)
+        {
+            var acceptedCurrencies = NormalizeCurrencyIds(policy.CurrencyIds);
+            vendors.RemoveAll(offer => !NormalizeCurrencyIds(offer.Costs.Select(cost => cost.CurrencyId))
+                .SequenceEqual(acceptedCurrencies));
+            if (!acceptedCurrencies.SequenceEqual(new[] { AcquisitionCurrency.GilId }))
+                markets.Clear();
+        }
 
         var sourceChoices = new List<SourceChoice>(vendors.Count + markets.Count);
         var requiredQuantity = dependency.RequiredQuantity;
@@ -375,6 +395,7 @@ public static class AcquisitionPlanner
                 requiredQuantity,
                 requiredHq,
                 requiredNq,
+                preferHq,
                 cancellationToken,
                 out var searchLimitExceeded);
             limitExceeded = searchLimitExceeded;
@@ -413,7 +434,7 @@ public static class AcquisitionPlanner
 
                 if (acquired >= requiredQuantity && hq >= requiredHq && nq >= requiredNq)
                 {
-                    results.Add(Candidate.Create(dependency, current));
+                    results.Add(Candidate.Create(dependency, current, preferHq));
                     return;
                 }
 
@@ -480,6 +501,40 @@ public static class AcquisitionPlanner
         return unique;
     }
 
+    private static bool ValidatePolicy(
+        AcquisitionItemPurchasePolicy? policy,
+        out string failureReason)
+    {
+        failureReason = string.Empty;
+        if (policy == null)
+            return true;
+
+        if (policy.CurrencyIds is { Count: 0 })
+        {
+            failureReason = "The selected purchase currency is invalid.";
+            return false;
+        }
+
+        if (policy.Source == AcquisitionSourceSelection.Either)
+            return true;
+
+        if (policy.Source == AcquisitionSourceSelection.Marketplace
+            && policy.CurrencyIds is { } marketCurrencies
+            && NormalizeCurrencyIds(marketCurrencies).SequenceEqual(new[] { AcquisitionCurrency.GilId }))
+            return true;
+
+        if (policy.Source == AcquisitionSourceSelection.Vendor && policy.CurrencyIds != null)
+            return true;
+
+        failureReason = policy.Source == AcquisitionSourceSelection.Marketplace
+            ? "Marketplace purchases require Gil."
+            : "Vendor purchases require a selected vendor currency.";
+        return false;
+    }
+
+    private static uint[] NormalizeCurrencyIds(IEnumerable<uint> currencyIds)
+        => currencyIds.Distinct().OrderBy(currencyId => currencyId).ToArray();
+
     private static List<Candidate> BuildIndependentCandidates(
         AcquisitionDependency dependency,
         AcquisitionPlanningInput input,
@@ -488,12 +543,13 @@ public static class AcquisitionPlanner
         int requiredQuantity,
         int requiredHq,
         int requiredNq,
+        bool preferHq,
         CancellationToken cancellationToken,
         out bool limitExceeded)
     {
         var states = 0;
         limitExceeded = false;
-        if (!settings.PreferHQ && requiredHq == 0 && requiredNq == 0)
+        if (!preferHq && requiredHq == 0 && requiredNq == 0)
         {
             var frontier = BuildQuantityFrontier(
                 dependency,
@@ -501,6 +557,7 @@ public static class AcquisitionPlanner
                 settings,
                 sourceChoices,
                 requiredQuantity,
+                preferHq,
                 cancellationToken,
                 ref states,
                 ref limitExceeded);
@@ -513,6 +570,7 @@ public static class AcquisitionPlanner
             settings,
             sourceChoices.Where(choice => choice.IsHq),
             requiredQuantity,
+            preferHq,
             cancellationToken,
             ref states,
             ref limitExceeded);
@@ -524,6 +582,7 @@ public static class AcquisitionPlanner
             settings,
             sourceChoices.Where(choice => !choice.IsHq),
             requiredQuantity,
+            preferHq,
             cancellationToken,
             ref states,
             ref limitExceeded);
@@ -546,7 +605,7 @@ public static class AcquisitionPlanner
                     limitExceeded = true;
                     return new List<Candidate>();
                 }
-                var combined = Candidate.Combine(dependency, hqCandidate, nqCandidate);
+                var combined = Candidate.Combine(dependency, hqCandidate, nqCandidate, preferHq);
                 if (combined.AcquiredQuantity < requiredQuantity
                     || combined.AcquiredQuantity - combined.NonHqQuantity < requiredHq
                     || combined.NonHqQuantity < requiredNq)
@@ -564,6 +623,7 @@ public static class AcquisitionPlanner
         AcquisitionPlanningSettings settings,
         IEnumerable<SourceChoice> sourceChoices,
         int target,
+        bool preferHq,
         CancellationToken cancellationToken,
         ref int states,
         ref bool limitExceeded)
@@ -592,7 +652,7 @@ public static class AcquisitionPlanner
                         limitExceeded = true;
                         return frontier.Select(FlattenCandidateBuckets).ToArray();
                     }
-                    var extended = candidate.CloneAndAdd(dependency, choice, uses);
+                    var extended = candidate.CloneAndAdd(dependency, choice, uses, preferHq);
                     if (!FitsKnownCurrencyBalances(extended, input))
                         continue;
                     var nextQuantity = Math.Min(target, extended.AcquiredQuantity);
@@ -1033,11 +1093,12 @@ public static class AcquisitionPlanner
                 .Select(transaction => transaction.WorldId)
                 .Distinct()
                 .OrderBy(worldId => worldId));
-            var preferredSpecialCount = settings.PreferMarketForSpecialCurrency
+            var usesItemPolicies = settings.DefaultItemPolicy != null || settings.ItemPolicies.Count != 0;
+            var preferredSpecialCount = usesItemPolicies ? 0 : settings.PreferMarketForSpecialCurrency
                 ? SpecialCurrencyVendorCount
                 : SpecialCurrencyMarketCount;
-            return $"{currencies};w={worlds};hq={(settings.PreferHQ ? NqTargetCoverage : 0)};"
-                + $"v={(settings.PreferVendors ? MarketTransactionCount : 0)};s={preferredSpecialCount}";
+            return $"{currencies};w={worlds};hq={NqTargetCoverage};"
+                + $"v={(!usesItemPolicies && settings.PreferVendors ? MarketTransactionCount : 0)};s={preferredSpecialCount}";
         }
 
         public Candidate()
@@ -1058,7 +1119,10 @@ public static class AcquisitionPlanner
             Signature = source.Signature;
         }
 
-        public static Candidate Create(AcquisitionDependency dependency, IEnumerable<ChosenSource> selected)
+        public static Candidate Create(
+            AcquisitionDependency dependency,
+            IEnumerable<ChosenSource> selected,
+            bool preferHq)
         {
             var candidate = new Candidate();
             var selectedSources = selected
@@ -1066,24 +1130,26 @@ public static class AcquisitionPlanner
                 .Select(group => (choice: group.First().Choice, units: group.Count()))
                 .ToArray();
             foreach (var (choice, units) in selectedSources)
-                candidate.Add(dependency, choice, units);
+                candidate.Add(dependency, choice, units, preferHq);
             return candidate;
         }
 
         public Candidate CloneAndAdd(
             AcquisitionDependency dependency,
             SourceChoice choice,
-            int units)
+            int units,
+            bool preferHq)
         {
             var clone = new Candidate(this);
-            clone.Add(dependency, choice, units);
+            clone.Add(dependency, choice, units, preferHq);
             return clone;
         }
 
         public static Candidate Combine(
             AcquisitionDependency dependency,
             Candidate left,
-            Candidate right)
+            Candidate right,
+            bool preferHq)
         {
             var combined = new Candidate(left);
             combined.Transactions.AddRange(right.Transactions);
@@ -1095,11 +1161,15 @@ public static class AcquisitionPlanner
                 left.SpecialCurrencyVendorCount + right.SpecialCurrencyVendorCount);
             combined.SpecialCurrencyMarketCount = checked(
                 left.SpecialCurrencyMarketCount + right.SpecialCurrencyMarketCount);
-            combined.RefreshDerived(dependency.RequiredQuantity, dependency.RequiredNqQuantity);
+            combined.RefreshDerived(dependency.RequiredQuantity, dependency.RequiredNqQuantity, preferHq);
             return combined;
         }
 
-        private void Add(AcquisitionDependency dependency, SourceChoice choice, int units)
+        private void Add(
+            AcquisitionDependency dependency,
+            SourceChoice choice,
+            int units,
+            bool preferHq)
         {
             if (units <= 0)
                 return;
@@ -1158,12 +1228,19 @@ public static class AcquisitionPlanner
                 SpecialCurrencyMarketCount = checked(SpecialCurrencyMarketCount + units);
             foreach (var cost in ScaleCosts(choice.Costs, units))
                 CurrencyCosts[cost.CurrencyId] = checked(CurrencyCosts.GetValueOrDefault(cost.CurrencyId) + cost.Amount);
-            RefreshDerived(dependency.RequiredQuantity, dependency.RequiredNqQuantity);
+            RefreshDerived(dependency.RequiredQuantity, dependency.RequiredNqQuantity, preferHq);
         }
 
-        private void RefreshDerived(int requiredQuantity, int requiredNqQuantity)
+        private void RefreshDerived(int requiredQuantity, int requiredNqQuantity, bool preferHq)
         {
             Overbuy = Math.Max(0, AcquiredQuantity - requiredQuantity);
+            if (!preferHq)
+            {
+                NqTargetCoverage = 0;
+                Signature = string.Join("|", Transactions.Select(transaction =>
+                    $"{transaction.SourceKind}:{transaction.SourceId}:{transaction.Quantity}:{transaction.PurchaseUnits}:{transaction.IsHq}"));
+                return;
+            }
             var hardNqCoverage = Math.Clamp(requiredNqQuantity, 0, requiredQuantity);
             var hqQuantity = Math.Max(0, AcquiredQuantity - NonHqQuantity);
             var usableHqCoverage = Math.Min(hqQuantity, requiredQuantity - hardNqCoverage);
@@ -1518,7 +1595,7 @@ public static class AcquisitionPlanner
             if ((left.HasCoProductTransactions || right.HasCoProductTransactions)
                 && !string.Equals(left.TransactionStateSignature, right.TransactionStateSignature, StringComparison.Ordinal))
                 return false;
-            if (_settings.PreferHQ && left.NqTargetCoverage > right.NqTargetCoverage
+            if (left.NqTargetCoverage > right.NqTargetCoverage
                 || left.NonHqQuantity > right.NonHqQuantity
                 || left.SpecialCurrencyVendorCount > right.SpecialCurrencyVendorCount
                 || left.SpecialCurrencyMarketCount > right.SpecialCurrencyMarketCount
@@ -1533,7 +1610,7 @@ public static class AcquisitionPlanner
                 if (left.CurrencyCosts.GetValueOrDefault(currencyId) > right.CurrencyCosts.GetValueOrDefault(currencyId))
                     return false;
 
-            return _settings.PreferHQ && left.NqTargetCoverage < right.NqTargetCoverage
+            return left.NqTargetCoverage < right.NqTargetCoverage
                 || left.NonHqQuantity < right.NonHqQuantity
                 || left.SpecialCurrencyVendorCount < right.SpecialCurrencyVendorCount
                 || left.SpecialCurrencyMarketCount < right.SpecialCurrencyMarketCount
@@ -1564,9 +1641,10 @@ public static class AcquisitionPlanner
 
         private int ComparePreferred(CandidatePlan left, CandidatePlan right)
         {
-            if (_settings.PreferHQ && left.NqTargetCoverage != right.NqTargetCoverage)
+            if (left.NqTargetCoverage != right.NqTargetCoverage)
                 return left.NqTargetCoverage.CompareTo(right.NqTargetCoverage);
-            if (_settings.PreferVendors)
+            var usesItemPolicies = _settings.DefaultItemPolicy != null || _settings.ItemPolicies.Count != 0;
+            if (!usesItemPolicies && _settings.PreferVendors)
             {
                 var leftMarket = left.Transactions.Count(transaction => transaction.SourceKind == AcquisitionSourceKind.Market);
                 var rightMarket = right.Transactions.Count(transaction => transaction.SourceKind == AcquisitionSourceKind.Market);
@@ -1574,10 +1652,10 @@ public static class AcquisitionPlanner
                     return leftMarket.CompareTo(rightMarket);
             }
 
-            var leftSpecial = _settings.PreferMarketForSpecialCurrency
+            var leftSpecial = usesItemPolicies ? 0 : _settings.PreferMarketForSpecialCurrency
                 ? left.SpecialCurrencyVendorCount
                 : left.SpecialCurrencyMarketCount;
-            var rightSpecial = _settings.PreferMarketForSpecialCurrency
+            var rightSpecial = usesItemPolicies ? 0 : _settings.PreferMarketForSpecialCurrency
                 ? right.SpecialCurrencyVendorCount
                 : right.SpecialCurrencyMarketCount;
             if (leftSpecial != rightSpecial)

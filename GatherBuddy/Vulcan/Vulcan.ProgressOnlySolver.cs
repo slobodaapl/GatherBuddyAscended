@@ -7,26 +7,52 @@ namespace GatherBuddy.Vulcan;
 
 public class ProgressOnlySolverDefinition : ISolverDefinition
 {
+    private readonly bool _allowTrainedEyeOverride;
+
+    public ProgressOnlySolverDefinition(bool allowTrainedEyeOverride = true)
+        => _allowTrainedEyeOverride = allowTrainedEyeOverride;
+
     public IEnumerable<ISolverDefinition.Desc> Flavors(CraftState craft)
     {
+        if (_allowTrainedEyeOverride && ShouldForceTrainedEye(craft))
+        {
+            yield return new(this, 1, 500, "Trained Eye + Progress Only");
+            yield break;
+        }
         if (!craft.CraftExpert && !craft.CraftCollectible)
             yield return new(this, 0, 1, "Progress Only Solver");
     }
 
-    public Solver Create(CraftState craft, int flavor) => new ProgressOnlySolver();
+    public Solver Create(CraftState craft, int flavor) => new ProgressOnlySolver(flavor == 1);
+
+    internal static bool ShouldForceTrainedEye(CraftState craft)
+        => !craft.CraftExpert
+            && craft.StatLevel >= 80
+            && craft.StatLevel >= craft.CraftLevel + 10;
 }
 
 /// User-facing completion solver backed by Donatello's exact Complete/Fastest frontier.
 /// The legacy greedy policy survives only as an emergency path after synthesis has begun.
 public class ProgressOnlySolver : Solver
 {
+    private readonly bool _forceTrainedEye;
     private List<VulcanSkill> _plan = [];
     private int _actionIndex;
     private StepState? _expectedState;
     private readonly GreedyEmergencySolver _emergency = new();
 
+    public ProgressOnlySolver(bool forceTrainedEye = false)
+        => _forceTrainedEye = forceTrainedEye;
+
     public override Recommendation Solve(CraftState craft, StepState step)
     {
+        if (_forceTrainedEye && step.Index == 1)
+        {
+            if (!Simulator.CanUseAction(craft, step, VulcanSkill.TrainedEye))
+                return new(VulcanSkill.None, "Forced Trained Eye is unusable", IsTerminalFailure: true);
+            return new(VulcanSkill.TrainedEye, "Forced Trained Eye opener");
+        }
+
         if (_expectedState == null || !Equivalent(_expectedState, step) || _actionIndex >= _plan.Count)
         {
             try

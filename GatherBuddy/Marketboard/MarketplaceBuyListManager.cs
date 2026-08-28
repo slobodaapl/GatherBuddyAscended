@@ -20,6 +20,8 @@ public sealed class MarketplaceBuyListManager
     private bool _evaluationDirty = true;
     private Guid? _runningListId;
     private bool _startWhenReady;
+    private bool _pauseRequested;
+    private bool _paused;
 
     public AcquisitionPlanningInputBuilder.BuildResult? Snapshot { get; private set; }
     public AcquisitionPlanningResult? Planning { get; private set; }
@@ -29,8 +31,14 @@ public sealed class MarketplaceBuyListManager
     public bool IsRunning
         => _execution is { IsCompleted: false };
 
+    public bool IsPaused
+        => _pauseRequested || _paused;
+
+    public bool CanResume
+        => _paused;
+
     public bool IsBusy
-        => _execution != null;
+        => _startWhenReady || _execution != null || _paused;
 
     public bool IsEstimateReady
         => !_evaluationDirty && Snapshot?.IsReady == true && Planning != null;
@@ -200,6 +208,7 @@ public sealed class MarketplaceBuyListManager
             if (entry == null)
                 return false;
             list.Entries.Remove(entry);
+            list.PurchaseItemPolicies.Remove(itemId);
         }
         else if (entry == null)
         {
@@ -240,6 +249,19 @@ public sealed class MarketplaceBuyListManager
         return true;
     }
 
+    public bool SetItemPolicy(Guid id, uint itemId, AcquisitionItemPurchasePolicy policy)
+    {
+        if (IsBusy || policy == null)
+            return false;
+        var list = Find(id);
+        if (list == null || list.IsManaged || list.Entries.All(entry => entry.ItemId != itemId))
+            return false;
+        list.PurchaseItemPolicies[itemId] = policy;
+        Save();
+        InvalidateEvaluation();
+        return true;
+    }
+
     public void Update()
     {
         if (_execution is { IsCompleted: true })
@@ -257,6 +279,7 @@ public sealed class MarketplaceBuyListManager
                 GatherBuddy.Log.Error($"[MarketplaceBuyListManager] Marketplace list execution failed: {ex}");
             }
 
+            var pauseRequested = _pauseRequested;
             if (_executor != null)
                 _executor.Diagnostic -= OnExecutorDiagnostic;
             GatherBuddy.ReleaseLiveAcquisitionExecutor(_executor);
@@ -264,11 +287,19 @@ public sealed class MarketplaceBuyListManager
             _execution = null;
             _runningListId = null;
             InvalidateEvaluation();
+            _pauseRequested = false;
+            if (pauseRequested && LastResult?.Status != LiveAcquisitionStatus.Completed)
+            {
+                _paused = true;
+                StatusText = "Marketplace list paused.";
+            }
         }
 
+        if (_paused || _pauseRequested)
+            return;
         if (Snapshot != null && DateTime.UtcNow >= _nextEvaluation)
             _evaluationDirty = true;
-        if (IsBusy || !_evaluationDirty || DateTime.UtcNow < _nextEvaluation)
+        if (_execution != null || !_evaluationDirty || DateTime.UtcNow < _nextEvaluation)
             return;
 
         Evaluate(ActiveList);
@@ -307,6 +338,7 @@ public sealed class MarketplaceBuyListManager
             StatusText = "Marketplace list is empty.";
             return false;
         }
+        LastResult = null;
         if (_evaluationDirty || Snapshot == null || Snapshot.IsLoading)
         {
             _startWhenReady = true;
@@ -341,9 +373,7 @@ public sealed class MarketplaceBuyListManager
         var options = new LiveAcquisitionOptions
         {
             CurrentWorldOnly = list.CurrentWorldOnly,
-            PreferHQ = list.PreferHQ,
-            PreferVendors = list.PreferVendors,
-            PreferMarketForSpecialCurrency = list.PreferMarketForSpecialCurrency,
+            PreferMarketForSpecialCurrency = true,
             MaximumGilSpend = list.MaximumGilSpend,
         };
         var executor = GatherBuddy.CreateLiveAcquisitionExecutor(
@@ -393,13 +423,53 @@ public sealed class MarketplaceBuyListManager
     public void Stop()
     {
         if (!IsBusy)
+            return;
+        GatherBuddy.Log.Information(
+            $"[MarketplaceBuyListManager] Stop requested (pending={_startWhenReady}, running={_execution != null}, paused={_paused}, pausing={_pauseRequested}).");
+        if (_execution == null)
         {
             _startWhenReady = false;
+            _pauseRequested = false;
+            _paused = false;
+            StatusText = "Marketplace list stopped.";
             return;
         }
+        _pauseRequested = false;
+        _paused = false;
         _executor?.Cancel();
         _startWhenReady = false;
         StatusText = "Marketplace list stopping...";
+    }
+
+    public void Pause()
+    {
+        if (IsPaused)
+            return;
+        GatherBuddy.Log.Information(
+            $"[MarketplaceBuyListManager] Pause requested (pending={_startWhenReady}, running={_execution != null}).");
+        if (_startWhenReady)
+        {
+            _startWhenReady = false;
+            _paused = true;
+            StatusText = "Marketplace list paused.";
+            return;
+        }
+        if (_execution == null)
+            return;
+        _pauseRequested = true;
+        _executor?.Cancel();
+        StatusText = "Pausing marketplace list...";
+    }
+
+    public void Resume()
+    {
+        if (!_paused || _execution != null)
+            return;
+        _paused = false;
+        LastResult = null;
+        _startWhenReady = true;
+        StatusText = "Resuming marketplace list...";
+        InvalidateEvaluation();
     }
 
     public void Clear()
@@ -410,6 +480,7 @@ public sealed class MarketplaceBuyListManager
         if (list.Entries.Count == 0)
             return;
         list.Entries.Clear();
+        list.PurchaseItemPolicies.Clear();
         Save();
         StatusText = $"Cleared marketplace list '{list.Name}'.";
         InvalidateEvaluation();
@@ -423,6 +494,8 @@ public sealed class MarketplaceBuyListManager
         GatherBuddy.ReleaseLiveAcquisitionExecutor(_executor);
         _executor = null;
         _execution = null;
+        _pauseRequested = false;
+        _paused = false;
     }
 
     private void Evaluate(MarketplaceBuyListDefinition? list)
@@ -476,10 +549,9 @@ public sealed class MarketplaceBuyListManager
         {
             AutoPurchaseBlockedDependencies = true,
             CurrentWorldOnly = list.CurrentWorldOnly,
-            PreferHQ = list.PreferHQ,
-            PreferVendors = list.PreferVendors,
-            PreferMarketForSpecialCurrency = list.PreferMarketForSpecialCurrency,
+            PreferMarketForSpecialCurrency = true,
             MaximumGilSpend = list.MaximumGilSpend,
+            ItemPolicies = list.PurchaseItemPolicies,
         };
 
     private void InvalidateEvaluation()
@@ -504,8 +576,12 @@ public sealed class MarketplaceBuyListManager
         foreach (var list in _config.MarketplaceBuyLists)
         {
             list.Entries ??= new List<MarketplaceBuyListEntry>();
+            list.PurchaseItemPolicies ??= new Dictionary<uint, AcquisitionItemPurchasePolicy>();
             list.Name = string.IsNullOrWhiteSpace(list.Name) ? "Marketplace List" : list.Name;
             list.Entries.RemoveAll(entry => entry == null || entry.ItemId == 0 || entry.TargetQuantity <= 0);
+            var itemIds = list.Entries.Select(entry => entry.ItemId).ToHashSet();
+            foreach (var itemId in list.PurchaseItemPolicies.Keys.Where(itemId => !itemIds.Contains(itemId)).ToArray())
+                list.PurchaseItemPolicies.Remove(itemId);
         }
     }
 

@@ -90,15 +90,12 @@ public class CraftingListEditor
     private MarketplaceBuyListDefinition? _managedMarketplaceProjection;
     private IReadOnlyDictionary<uint, MarketplacePurchaseReason> _marketplacePurchaseReasons
         = new Dictionary<uint, MarketplacePurchaseReason>();
-    private DateTime _lastAcquisitionRefresh = DateTime.MinValue;
-    private bool _acquisitionEstimateDirty = true;
     private bool _acquisitionEstimateLoading;
     private Task<CraftingAcquisitionService.Evaluation>? _acquisitionEstimateTask;
     private CancellationTokenSource? _acquisitionEstimateCancellationSource;
     private long _acquisitionEstimateGeneration;
     private long _acquisitionEstimateTaskGeneration;
     private string _acquisitionStatus = string.Empty;
-    private static readonly TimeSpan AcquisitionEstimateTtl = TimeSpan.FromMinutes(15);
     private static readonly TimeSpan AcquisitionEstimateTimeout = TimeSpan.FromSeconds(10);
     private const double InventoryRefreshIntervalSeconds = 0.5;
     private const double RetainerSnapshotRetryIntervalSeconds = 1.0;
@@ -190,8 +187,16 @@ public class CraftingListEditor
     private CraftingListDefinition GetPlanningList()
         => GetActiveExecutionPlan()?.PlanningSnapshot ?? _list;
 
-    private CraftingListDefinition CreatePlanningSnapshot()
+    internal CraftingListDefinition CreatePlanningSnapshot()
         => GetPlanningList().CreateRetainerPlanningSnapshot();
+
+    internal CraftingListDefinition PurchaseConfigurationList => _list;
+
+    internal void SavePurchaseConfiguration()
+    {
+        InvalidateAcquisitionEstimate();
+        GatherBuddy.CraftingListManager.SaveList(_list);
+    }
 
     private QueueCacheSnapshot? GetQueueCache()
         => Volatile.Read(ref _queueCache);
@@ -219,6 +224,7 @@ public class CraftingListEditor
         Volatile.Write(ref _queueCache, null);
         Interlocked.Increment(ref _queueGenerationVersion);
         InvalidateAcquisitionEstimate();
+        GatherBuddy.CraftingPurchaseConfigurationWindow?.Invalidate(this);
     }
 
     private void PublishMaterialCache(MaterialCacheSnapshot snapshot)
@@ -268,6 +274,7 @@ public class CraftingListEditor
         _inventoryRefreshTimes.Clear();
         InvalidateRetainerSnapshot();
         InvalidateAcquisitionEstimate();
+        GatherBuddy.CraftingPurchaseConfigurationWindow?.Invalidate(this);
     }
 
     internal void RefreshFromExternalListChange()
@@ -288,7 +295,7 @@ public class CraftingListEditor
         _acquisitionStatus = string.Empty;
     }
 
-    internal void PublishAcquisitionPlanningResult(AcquisitionPlanningResult result)
+    internal void PublishAcquisitionPlanningResult(AcquisitionPlanningResult? result)
         => _acquisitionPlanningResult = result;
 
     private void HandleEditorSettingsSaved()
@@ -320,7 +327,6 @@ public class CraftingListEditor
     public void Draw()
     {
         ProcessPendingInventoryChanges();
-        RefreshAcquisitionEstimate();
         RefreshRaphaelAssessmentCaches();
         var availableWidth = ImGui.GetContentRegionAvail().X;
         var availableHeight = ImGui.GetContentRegionAvail().Y;
@@ -765,95 +771,32 @@ public class CraftingListEditor
         {
             _list.AutoPurchaseBlockedDependencies = autoPurchase;
             SaveAcquisitionSettings();
-            if (!autoPurchase)
+            if (autoPurchase)
+                GatherBuddy.CraftingPurchaseConfigurationWindow?.Probe(this);
+            else
+            {
                 _acquisitionPlanningResult = null;
+                GatherBuddy.CraftingPurchaseConfigurationWindow?.Disable(this);
+            }
         }
         if (ImGui.IsItemHovered())
             ImGui.SetTooltip("Purchase only missing precraft dependencies whose selected craft/gather path is unusable. Final list outputs are never purchased.");
 
         if (_list.AutoPurchaseBlockedDependencies)
         {
-            ImGui.Indent();
-
-            var preferMarketForSpecialCurrency = _list.PreferMarketForSpecialCurrency;
-            if (ImGui.Checkbox("Prefer market for special-currency purchases##acqPreferMarketCurrency", ref preferMarketForSpecialCurrency))
+            if (ImGui.Button("Purchase configuration##purchaseConfiguration"))
+                GatherBuddy.CraftingPurchaseConfigurationWindow?.OpenOrRestore(this);
+            ImGui.SameLine();
+            using (ImRaii.Disabled(_acquisitionEstimateTask != null))
             {
-                _list.PreferMarketForSpecialCurrency = preferMarketForSpecialCurrency;
-                SaveAcquisitionSettings();
+                var estimateLabel = _acquisitionEstimateTask == null ? "Estimate" : "Estimating...";
+                if (ImGui.Button($"{estimateLabel}##purchaseEstimate"))
+                    RequestAcquisitionEstimate();
             }
-
-            var preferHq = _list.PreferHQ;
-            if (ImGui.Checkbox("Prefer HQ##acqPreferHq", ref preferHq))
-            {
-                _list.PreferHQ = preferHq;
-                SaveAcquisitionSettings();
-            }
-
-            var preferVendors = _list.PreferVendors;
-            if (ImGui.Checkbox("Prefer vendors##acqPreferVendors", ref preferVendors))
-            {
-                _list.PreferVendors = preferVendors;
-                SaveAcquisitionSettings();
-            }
-
-            var currentWorldOnly = _list.CurrentWorldOnly;
-            if (ImGui.Checkbox("Current world only##acqCurrentWorldOnly", ref currentWorldOnly))
-            {
-                _list.CurrentWorldOnly = currentWorldOnly;
-                SaveAcquisitionSettings();
-            }
-
-            var hasMaximumGilSpend = _list.MaximumGilSpend.HasValue;
-            var automaticEstimate = _acquisitionPlanningResult?.PreferredEstimate?.TotalGil
-                ?? _acquisitionPlanningResult?.MinimumGilEstimate?.TotalGil
-                ?? 0;
-            var minimumEstimate = _acquisitionPlanningResult?.MinimumGilEstimate?.TotalGil ?? 0;
-            if (ImGui.Checkbox("Set maximum Gil spend##acqSetMaxGil", ref hasMaximumGilSpend))
-            {
-                _list.MaximumGilSpend = hasMaximumGilSpend
-                    ? Math.Max(minimumEstimate, automaticEstimate)
-                    : null;
-                SaveAcquisitionSettings();
-            }
-
-            if (hasMaximumGilSpend)
-            {
-                var maximumGilSpend = (int)Math.Clamp(_list.MaximumGilSpend ?? Math.Max(minimumEstimate, automaticEstimate), 0, int.MaxValue);
-                var clampedMinimum = (int)Math.Clamp(minimumEstimate, 0, int.MaxValue);
-                if (minimumEstimate > 0 && maximumGilSpend < clampedMinimum)
-                {
-                    maximumGilSpend = clampedMinimum;
-                    _list.MaximumGilSpend = minimumEstimate;
-                    SaveAcquisitionSettings();
-                }
-                ImGui.SetNextItemWidth(VulcanUiScaling.Scaled(180f));
-                if (ImGui.InputInt("Maximum Gil##acqMaximumGil", ref maximumGilSpend))
-                {
-                    _list.MaximumGilSpend = Math.Max(minimumEstimate, maximumGilSpend);
-                    SaveAcquisitionSettings();
-                }
-                if (minimumEstimate > 0)
-                    ImGui.TextColored(ImGuiColors.DalamudGrey3, $"Minimum estimate: {minimumEstimate:N0} Gil");
-            }
-
-            if (ImGui.TreeNode("Estimates##acquisitionEstimates"))
-            {
-                DrawAcquisitionEstimates();
-                ImGui.TreePop();
-            }
-
-            ImGui.Unindent();
+            DrawPurchaseEstimatePreview();
         }
         var buttonHeight = VulcanUiScaling.Scaled(22f);
-        var acquisitionStatusText = string.IsNullOrWhiteSpace(_acquisitionStatus)
-            ? string.Empty
-            : $"Preview: {_acquisitionStatus}";
-        var acquisitionStatusHeight = acquisitionStatusText.Length == 0
-            ? 0f
-            : ImGui.CalcTextSize(acquisitionStatusText, false, ImGui.GetContentRegionAvail().X).Y;
         var footerButtonHeight = ImGui.GetStyle().ItemSpacing.Y + buttonHeight * 2f;
-        if (acquisitionStatusText.Length > 0)
-            footerButtonHeight += ImGui.GetStyle().ItemSpacing.Y + acquisitionStatusHeight;
         var buttonStartY = ImGui.GetWindowHeight() - ImGui.GetStyle().WindowPadding.Y - footerButtonHeight;
         ImGui.SetCursorPosY(Math.Max(ImGui.GetCursorPosY(), buttonStartY));
 
@@ -878,13 +821,6 @@ public class CraftingListEditor
                     ImGui.OpenPopup("ConfirmFailedMacros##startCraft");
                 else
                     OnStartCrafting?.Invoke(_list);
-            }
-
-            if (acquisitionStatusText.Length > 0)
-            {
-                ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.DalamudOrange);
-                ImGui.TextWrapped(acquisitionStatusText);
-                ImGui.PopStyleColor();
             }
 
             if (hardFails > 0 || warnings > 0)
@@ -935,6 +871,35 @@ public class CraftingListEditor
         ImGui.EndChild();
     }
 
+    private void DrawPurchaseEstimatePreview()
+    {
+        ConsumeAcquisitionEstimate();
+        if (GetActiveExecutionPlan()?.LatestAcquisitionPlanning is { } activePlanning)
+            _acquisitionPlanningResult = activePlanning;
+        var plan = _acquisitionPlanningResult?.SelectedPlan;
+        if (plan == null)
+        {
+            ImGui.TextDisabled(_acquisitionEstimateTask != null || _acquisitionEstimateLoading
+                ? "Estimating purchase plan..."
+                : string.IsNullOrWhiteSpace(_acquisitionStatus)
+                    ? "Estimate not run."
+                    : _acquisitionStatus);
+            return;
+        }
+
+        var open = ImGui.TreeNode("Estimate:##purchaseEstimatePreview");
+        foreach (var currency in plan.Estimate.Currencies)
+        {
+            ImGui.SameLine(0, VulcanUiScaling.Scaled(10f));
+            CraftingPurchasePlanWindow.DrawCurrency(currency.IconId, currency.Required, currency.CurrencyName);
+        }
+        if (!open)
+            return;
+        foreach (var row in CraftingPurchasePlanWindow.BuildItemEstimates(plan))
+            CraftingPurchasePlanWindow.DrawEstimateItem(row);
+        ImGui.TreePop();
+    }
+
     private void SaveAcquisitionSettings()
     {
         InvalidateAcquisitionEstimate();
@@ -943,9 +908,18 @@ public class CraftingListEditor
 
     private void InvalidateAcquisitionEstimate()
     {
-        _acquisitionEstimateDirty = true;
         Interlocked.Increment(ref _acquisitionEstimateGeneration);
         _acquisitionEstimateCancellationSource?.Cancel();
+    }
+
+    internal void RequestAcquisitionEstimate()
+    {
+        ConsumeAcquisitionEstimate();
+        if (!_list.AutoPurchaseBlockedDependencies || _acquisitionEstimateTask != null)
+            return;
+
+        InvalidateAcquisitionEstimate();
+        StartAcquisitionEstimate(Volatile.Read(ref _acquisitionEstimateGeneration));
     }
 
     private static void ObserveAcquisitionEstimateTask(Task task)
@@ -989,7 +963,6 @@ public class CraftingListEditor
             return;
         }
 
-        _acquisitionEstimateDirty = false;
         _acquisitionEstimateLoading = false;
         _acquisitionStatus = $"Acquisition estimate unavailable: {exception.Message}";
         _acquisitionPlanningResult = null;
@@ -1036,13 +1009,12 @@ public class CraftingListEditor
 
             try
             {
-                _acquisitionEstimateDirty = false;
                 _acquisitionEstimateLoading = evaluation.IsLoading;
                 _acquisitionStatus = evaluation.Status;
                 _acquisitionPlanningResult = evaluation.Planning;
                 _marketplacePurchaseReasons = BuildMarketplacePurchaseReasons(
                     evaluation,
-                    _list.PreferMarketForSpecialCurrency);
+                    preferMarketForSpecialCurrency: true);
                 _managedMarketplaceProjection = evaluation.Planning == null
                     ? null
                     : GatherBuddy.MarketplaceBuyListManager?.CreateManagedList(
@@ -1050,9 +1022,6 @@ public class CraftingListEditor
                         new LiveAcquisitionOptions
                         {
                             CurrentWorldOnly = _list.CurrentWorldOnly,
-                            PreferHQ = _list.PreferHQ,
-                            PreferVendors = _list.PreferVendors,
-                            PreferMarketForSpecialCurrency = _list.PreferMarketForSpecialCurrency,
                             MaximumGilSpend = _list.MaximumGilSpend,
                         });
             }
@@ -1100,16 +1069,20 @@ public class CraftingListEditor
         var solveToken = timeoutSource.Token;
         try
         {
-            var capture = await GatherBuddy.RunOnFrameworkThreadAsync(
-                    () => CraftingAcquisitionService.Capture(
-                        CraftingExecutionPlan.Create(planningSnapshot)),
-                    solveToken)
-                .ConfigureAwait(false);
-            solveToken.ThrowIfCancellationRequested();
-            return await Task.Run(
-                    () => CraftingAcquisitionService.Evaluate(capture, solveToken),
-                    solveToken)
-                .ConfigureAwait(false);
+            while (true)
+            {
+                var capture = await GatherBuddy.RunOnFrameworkThreadAsync(
+                        () => CraftingAcquisitionService.Capture(
+                            CraftingExecutionPlan.Create(planningSnapshot)),
+                        solveToken)
+                    .ConfigureAwait(false);
+                if (!capture.Snapshot.IsLoading)
+                    return await Task.Run(
+                            () => CraftingAcquisitionService.Evaluate(capture, solveToken),
+                            solveToken)
+                        .ConfigureAwait(false);
+                await Task.Delay(250, solveToken).ConfigureAwait(false);
+            }
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested
             && timeoutSource.IsCancellationRequested)
@@ -1117,35 +1090,6 @@ public class CraftingListEditor
             throw new TimeoutException(
                 $"Acquisition estimate did not complete within {AcquisitionEstimateTimeout.TotalSeconds:0} seconds.");
         }
-    }
-
-    private void RefreshAcquisitionEstimate()
-    {
-        ConsumeAcquisitionEstimate();
-
-        if (!_list.AutoPurchaseBlockedDependencies)
-        {
-            _acquisitionEstimateCancellationSource?.Cancel();
-            _acquisitionPlanningResult = null;
-            _managedMarketplaceProjection = null;
-            _marketplacePurchaseReasons = new Dictionary<uint, MarketplacePurchaseReason>();
-            _acquisitionStatus = string.Empty;
-            _acquisitionEstimateLoading = false;
-            return;
-        }
-
-        var now = DateTime.UtcNow;
-        if (!_acquisitionEstimateDirty
-            && !_acquisitionEstimateLoading
-            && now - _lastAcquisitionRefresh < AcquisitionEstimateTtl)
-            return;
-        if (_acquisitionEstimateTask != null)
-            return;
-        if ((now - _lastAcquisitionRefresh).TotalSeconds < 1)
-            return;
-        _lastAcquisitionRefresh = now;
-
-        StartAcquisitionEstimate(Volatile.Read(ref _acquisitionEstimateGeneration));
     }
 
     private void DrawAcquisitionEstimates()

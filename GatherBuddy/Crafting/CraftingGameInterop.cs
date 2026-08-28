@@ -398,7 +398,7 @@ public static partial class CraftingGameInterop
     {
         GatherBuddy.Log.Debug($"[CraftingGameInterop] ReloadSolversForCraft: {mode}");
         _currentSolverMode = mode;
-        CraftingProcessor.Setup();
+        CraftingProcessor.Setup(_currentQualityPolicy?.OverrideMode != CraftingQualityOverrideMode.RequireNQOnly);
         if (registerUserMacroSolver && _userMacroLibrary != null)
         {
             if (_userMacroLibrary != null)

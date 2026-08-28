@@ -3,7 +3,6 @@ using System.Linq;
 using System.Numerics;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface.Colors;
-using Dalamud.Interface.Textures;
 using Dalamud.Interface.Windowing;
 using ElliLib.Raii;
 using GatherBuddy.Crafting.Acquisition;
@@ -101,44 +100,96 @@ public sealed class MarketplaceBuyListWindow : Window, IDisposable
         ImGui.Separator();
         DrawItemAdder(manager, list);
         ImGui.Separator();
-        var preferHq = list.PreferHQ;
+
+        var availableHeight = Math.Max(1f, ImGui.GetContentRegionAvail().Y);
+        var controlsHeight = ImGui.GetFrameHeightWithSpacing();
+        var panelHeight = Math.Max(1f, availableHeight - controlsHeight - ImGui.GetStyle().ItemSpacing.Y * 4f);
+        var plannerHeight = panelHeight * 0.52f;
+        var estimateHeight = panelHeight * 0.20f;
+        var targetsHeight = panelHeight - plannerHeight - estimateHeight;
+
+        DrawPlanner(manager, list, plannerHeight);
+        DrawPlannerFooter(manager, list);
+        ImGui.Separator();
+        ImGui.BeginChild("##marketplaceEstimate", new Vector2(0, estimateHeight), true,
+            ImGuiWindowFlags.HorizontalScrollbar);
+        DrawEstimate(manager, list);
+        ImGui.EndChild();
+        ImGui.Separator();
+        ImGui.BeginChild("##marketplaceTargets", new Vector2(0, targetsHeight), true,
+            ImGuiWindowFlags.HorizontalScrollbar);
+        DrawInventoryTargets(manager, list);
+        ImGui.EndChild();
+    }
+
+    private static void DrawPlanner(MarketplaceBuyListManager manager, MarketplaceBuyListDefinition list, float height)
+    {
+        var snapshot = manager.Snapshot;
+        var availability = snapshot?.Input.Dependencies.ToDictionary(
+            dependency => dependency.ItemId,
+            dependency => ResolveMarketAvailability(snapshot, list, dependency.ItemId))
+            ?? new System.Collections.Generic.Dictionary<uint, MarketAvailability>();
         using (ImRaii.Disabled(list.IsReadOnly || manager.IsBusy))
-        if (ImGui.Checkbox("Prefer HQ", ref preferHq))
-            manager.UpdateSettings(list.Id, preferHq: preferHq);
+        {
+            CraftingPurchaseConfigurationWindow.DrawPurchaseTable(
+                new CraftingPurchaseConfigurationWindow.PurchaseTableContext(
+                    snapshot,
+                    availability,
+                    manager.Planning?.SelectedPlan,
+                    itemId => list.PurchaseItemPolicies.TryGetValue(itemId, out var policy) ? policy : null,
+                    (itemId, policy) => manager.SetItemPolicy(list.Id, itemId, policy),
+                    "##marketplacePurchaseConfigurationTable"),
+                height);
+        }
+    }
+
+    private static MarketAvailability ResolveMarketAvailability(
+        AcquisitionPlanningInputBuilder.BuildResult snapshot,
+        MarketplaceBuyListDefinition list,
+        uint itemId)
+    {
+        if (snapshot.IsLoading)
+            return new MarketAvailability(itemId, MarketAvailabilityState.Unknown, snapshot.LoadingReason);
+        var service = GatherBuddy.MarketboardService;
+        var scope = list.CurrentWorldOnly ? service?.GetCurrentWorld() : service?.GetDataCenter();
+        if (service != null && !string.IsNullOrWhiteSpace(scope) && service.HasError(itemId, scope))
+            return new MarketAvailability(itemId, MarketAvailabilityState.Unknown, "Market availability could not be checked.");
+        return snapshot.Input.MarketListings.Any(listing => listing.ItemId == itemId && listing.IsAvailable)
+            ? new MarketAvailability(itemId, MarketAvailabilityState.Available, "Available on the market.")
+            : new MarketAvailability(itemId, MarketAvailabilityState.Unavailable, "No market listing is available.");
+    }
+
+    private static void DrawPlannerFooter(MarketplaceBuyListManager manager, MarketplaceBuyListDefinition list)
+    {
+        var maxGil = (int)Math.Clamp(list.MaximumGilSpend ?? 0, 0, int.MaxValue);
+        ImGui.SetNextItemWidth(VulcanUiScaling.Scaled(150f));
+        using (ImRaii.Disabled(list.IsReadOnly || manager.IsBusy))
+        if (ImGui.InputInt("Max Gil##marketplaceMaxGil", ref maxGil))
+            manager.UpdateSettings(list.Id,
+                maximumGilSpend: Math.Max(0, maxGil),
+                clearMaximumGilSpend: maxGil <= 0);
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("0 means unlimited.");
+        ImGui.SameLine();
         var currentWorldOnly = list.CurrentWorldOnly;
         using (ImRaii.Disabled(list.IsReadOnly || manager.IsBusy))
-        if (ImGui.Checkbox("Current world only", ref currentWorldOnly))
+        if (ImGui.Checkbox("Current World Only##marketplaceCurrentWorld", ref currentWorldOnly))
             manager.UpdateSettings(list.Id, currentWorldOnly: currentWorldOnly);
-        var preferVendors = list.PreferVendors;
-        using (ImRaii.Disabled(list.IsReadOnly || manager.IsBusy))
-        if (ImGui.Checkbox("Prefer vendors", ref preferVendors))
-            manager.UpdateSettings(list.Id, preferVendors: preferVendors);
-        var preferCurrency = list.PreferMarketForSpecialCurrency;
-        using (ImRaii.Disabled(list.IsReadOnly || manager.IsBusy))
-        if (ImGui.Checkbox("Prefer market for special currency", ref preferCurrency))
-            manager.UpdateSettings(list.Id, preferMarketForSpecialCurrency: preferCurrency);
-        var maxSpend = list.MaximumGilSpend is long value ? (int)Math.Clamp(value, 0, int.MaxValue) : 0;
-        var hasMax = list.MaximumGilSpend.HasValue;
-        using (ImRaii.Disabled(list.IsReadOnly || manager.IsBusy))
-        if (ImGui.Checkbox("Set maximum Gil spend", ref hasMax))
-            manager.UpdateSettings(list.Id, clearMaximumGilSpend: !hasMax);
-        if (hasMax)
-        {
-            ImGui.SetNextItemWidth(VulcanUiScaling.Scaled(180f));
-            using (ImRaii.Disabled(list.IsReadOnly || manager.IsBusy))
-            if (ImGui.InputInt("Maximum Gil", ref maxSpend))
-                manager.UpdateSettings(list.Id, maximumGilSpend: Math.Max(0, maxSpend));
-        }
 
-        ImGui.Spacing();
-        ImGui.Separator();
-        DrawEstimate(manager, list);
-        ImGui.Separator();
+        var refreshWidth = ImGui.CalcTextSize("Refresh Estimate").X + ImGui.GetStyle().FramePadding.X * 2f;
+        ImGui.SameLine(Math.Max(ImGui.GetCursorPosX(), ImGui.GetWindowContentRegionMax().X - refreshWidth));
+        using (ImRaii.Disabled(manager.IsBusy))
+        if (ImGui.Button("Refresh Estimate"))
+            manager.RefreshEstimate();
+    }
+
+    private static void DrawInventoryTargets(MarketplaceBuyListManager manager, MarketplaceBuyListDefinition list)
+    {
         ImGui.TextColored(ImGuiColors.DalamudGrey3, "Inventory targets (Have / Target / Need)");
         foreach (var entry in list.Entries.ToArray())
         {
             ImGui.PushID($"marketplaceEntry_{entry.ItemId}");
-            ImGui.Text(entry.ItemName.Length == 0 ? $"Item #{entry.ItemId}" : entry.ItemName);
+            ImGui.TextUnformatted(entry.ItemName.Length == 0 ? $"Item #{entry.ItemId}" : entry.ItemName);
             ImGui.SameLine();
             var have = Math.Max(0, Vulcan.Vendors.VendorBuyListManager.GetCurrentInventoryAndArmoryCount(entry.ItemId));
             var target = entry.TargetQuantity;
@@ -147,7 +198,8 @@ public sealed class MarketplaceBuyListWindow : Window, IDisposable
             if (ImGui.InputInt("##target", ref target))
                 manager.SetTarget(list.Id, entry.ItemId, target);
             ImGui.SameLine();
-            ImGui.TextColored(ImGuiColors.DalamudGrey3, $"{have:N0} / {Math.Max(0, target):N0} / {Math.Max(0, target - have):N0}");
+            ImGui.TextColored(ImGuiColors.DalamudGrey3,
+                $"{have:N0} / {Math.Max(0, target):N0} / {Math.Max(0, target - have):N0}");
             ImGui.SameLine();
             using (ImRaii.Disabled(list.IsReadOnly || manager.IsBusy))
             if (ImGui.SmallButton("Remove"))
@@ -171,7 +223,10 @@ public sealed class MarketplaceBuyListWindow : Window, IDisposable
         {
             using (ImRaii.Disabled(list.IsReadOnly || list.Entries.Count == 0))
             if (ImGui.Button("Start List", VulcanUiScaling.Scaled(120f, 0f)))
-                manager.Start();
+            {
+                if (manager.Start())
+                    GatherBuddy.CraftingStatusWindow?.SetMarketplaceBuyListManager(manager);
+            }
             ImGui.SameLine();
             using (ImRaii.Disabled(list.IsReadOnly || list.Entries.Count == 0))
             if (ImGui.Button("Clear List", VulcanUiScaling.Scaled(120f, 0f)))
@@ -230,57 +285,47 @@ public sealed class MarketplaceBuyListWindow : Window, IDisposable
 
     private static void DrawEstimate(MarketplaceBuyListManager manager, MarketplaceBuyListDefinition list)
     {
-        ImGui.TextColored(ImGuiColors.DalamudYellow, "Estimate");
         var snapshot = manager.Snapshot;
         if (snapshot?.IsLoading == true)
         {
+            ImGui.TextColored(ImGuiColors.DalamudYellow, "Estimate");
             ImGui.TextColored(ImGuiColors.DalamudGrey3, snapshot.LoadingReason);
             return;
         }
         var planning = manager.Planning;
         if (!manager.IsEstimateReady)
         {
+            ImGui.TextColored(ImGuiColors.DalamudYellow, "Estimate");
             ImGui.TextColored(ImGuiColors.DalamudGrey3, "Refreshing estimate...");
             return;
         }
         if (planning == null)
         {
+            ImGui.TextColored(ImGuiColors.DalamudYellow, "Estimate");
             ImGui.TextColored(ImGuiColors.DalamudGrey3, "Waiting for game/vendor/market data.");
             return;
         }
         if (!planning.IsSuccess)
         {
+            ImGui.TextColored(ImGuiColors.DalamudYellow, "Estimate");
             ImGui.TextColored(ImGuiColors.DalamudYellow, manager.StatusText);
             return;
         }
-        var preferred = planning.PreferredEstimate;
-        var minimum = planning.MinimumGilEstimate;
-        if (preferred == null && minimum == null)
+        var plan = planning.SelectedPlan;
+        if (plan == null)
         {
+            ImGui.TextColored(ImGuiColors.DalamudYellow, "Estimate");
             ImGui.TextColored(ImGuiColors.DalamudGrey3, list.Entries.Count == 0 ? "List is empty." : "All targets already satisfied.");
             return;
         }
-        if (preferred != null)
-            ImGui.TextColored(ImGuiColors.ParsedGold, $"Preferred estimate: {preferred.TotalGil:N0} Gil");
-        if (minimum != null && (preferred == null || minimum.TotalGil != preferred.TotalGil))
-            ImGui.TextColored(ImGuiColors.DalamudGrey3, $"Minimum-Gil estimate: {minimum.TotalGil:N0} Gil");
-
-        var estimate = preferred ?? minimum!;
-        foreach (var currency in estimate.Currencies.Where(currency => !currency.IsSpecialCurrency || currency.Required > 0))
+        ImGui.TextColored(ImGuiColors.DalamudYellow, "Estimate:");
+        foreach (var currency in plan.Estimate.Currencies)
         {
-            var color = currency.Available >= currency.Required ? ImGuiColors.HealerGreen : ImGuiColors.DalamudYellow;
-            if (currency.IconId != 0)
-            {
-                var icon = Icons.DefaultStorage.TextureProvider.GetFromGameIcon(new GameIconLookup(currency.IconId));
-                if (icon.TryGetWrap(out var wrap, out _))
-                {
-                    var iconSize = VulcanUiScaling.Scaled(18f);
-                    ImGui.Image(wrap.Handle, new Vector2(iconSize, iconSize));
-                    ImGui.SameLine(0, VulcanUiScaling.Scaled(4f));
-                }
-            }
-            ImGui.TextColored(color, $"{currency.CurrencyName}: {currency.Available:N0} / {currency.Required:N0}");
+            ImGui.SameLine(0, VulcanUiScaling.Scaled(10f));
+            CraftingPurchasePlanWindow.DrawCurrency(currency.IconId, currency.Required, currency.CurrencyName);
         }
+        foreach (var row in CraftingPurchasePlanWindow.BuildItemEstimates(plan))
+            CraftingPurchasePlanWindow.DrawEstimateItem(row);
     }
 
     public void BeginRename(MarketplaceBuyListDefinition list)

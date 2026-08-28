@@ -261,6 +261,8 @@ public class CraftingQueueProcessor : IDisposable
             return;
 
         var evaluation = CraftingAcquisitionService.Evaluate(_executionPlan);
+        if (evaluation.Planning != null)
+            _executionPlan.PublishAcquisitionPlanning(evaluation.Planning);
         if (evaluation.IsLoading)
         {
             var stateChanged = _currentState != QueueState.WaitingForAcquisitionData;
@@ -311,9 +313,6 @@ public class CraftingQueueProcessor : IDisposable
         var executor = GatherBuddy.CreateLiveAcquisitionExecutor(new LiveAcquisitionOptions
         {
             CurrentWorldOnly = _executionPlan.CurrentWorldOnly,
-            PreferHQ = _executionPlan.PreferHQ,
-            PreferVendors = _executionPlan.PreferVendors,
-            PreferMarketForSpecialCurrency = _executionPlan.PreferMarketForSpecialCurrency,
             MaximumGilSpend = _executionPlan.MaximumGilSpend,
         });
         if (executor == null)
@@ -2183,6 +2182,13 @@ public class CraftingQueueProcessor : IDisposable
         _resumeRequest.Cancel();
         CraftingGameInterop.SetAutomationPaused(true);
         _pauseReason = reason ?? string.Empty;
+        if (_currentState == QueueState.PurchasingDependencies)
+        {
+            GatherBuddy.Log.Debug("[CraftingQueueProcessor] Cancelling automatic acquisition while paused");
+            CancelAcquisition();
+            _currentState = QueueState.WaitingForAcquisitionData;
+            StateChanged?.Invoke(_currentState);
+        }
         if (_currentState == QueueState.NavigatingToRetainerBell)
         {
             GatherBuddy.Log.Debug("[CraftingQueueProcessor] Pausing retainer bell navigation");

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using GatherBuddy.Crafting.Acquisition;
 
 namespace GatherBuddy.Marketboard;
 
@@ -30,6 +31,7 @@ public sealed class MarketplaceBuyListDefinition
     public bool PreferVendors { get; set; }
     public bool PreferMarketForSpecialCurrency { get; set; } = true;
     public long? MaximumGilSpend { get; set; }
+    public Dictionary<uint, AcquisitionItemPurchasePolicy> PurchaseItemPolicies { get; set; } = new();
 
     /// <summary>
     /// Managed lists are intentionally not serialized. They are useful for a
@@ -62,6 +64,7 @@ public sealed class MarketplaceBuyListDefinition
             PreferVendors = PreferVendors,
             PreferMarketForSpecialCurrency = PreferMarketForSpecialCurrency,
             MaximumGilSpend = MaximumGilSpend,
+            PurchaseItemPolicies = new Dictionary<uint, AcquisitionItemPurchasePolicy>(PurchaseItemPolicies),
             IsManaged = managed,
         };
 }

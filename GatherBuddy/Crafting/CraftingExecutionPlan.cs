@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using GatherBuddy.Crafting.Acquisition;
 using GatherBuddy.FcMesh.Fulfillment;
 using GatherBuddy.FcMesh.Protocol;
 using GatherBuddy.FcMesh.State;
@@ -34,9 +35,6 @@ public sealed class CraftingExecutionPlan
     public bool SkipFinalIfEnough { get; }
     public bool RetainerRestock { get; }
     public bool AutoPurchaseBlockedDependencies { get; }
-    public bool PreferMarketForSpecialCurrency { get; }
-    public bool PreferHQ { get; }
-    public bool PreferVendors { get; }
     public bool CurrentWorldOnly { get; }
     public long? MaximumGilSpend { get; }
     public bool ReturnToHomeWorldBeforeCrafting { get; }
@@ -69,6 +67,14 @@ public sealed class CraftingExecutionPlan
     public IReadOnlyDictionary<uint, int> RetainerConsumedCraftablesView => RetainerConsumedCraftables;
     public IReadOnlyDictionary<uint, IngredientQualityDemand> IngredientDemandsView => IngredientDemands;
     public IReadOnlyDictionary<uint, AcquiredDependencyAvailability> AcquiredAvailabilityView => _acquiredAvailability;
+    internal AcquisitionPlanningResult? LatestAcquisitionPlanning { get; private set; }
+    internal Action<AcquisitionPlanningResult>? AcquisitionPlanningPublished { get; set; }
+
+    internal void PublishAcquisitionPlanning(AcquisitionPlanningResult planning)
+    {
+        LatestAcquisitionPlanning = planning;
+        AcquisitionPlanningPublished?.Invoke(planning);
+    }
 
     /// <summary>
     /// Applies the FC-only advisory intent order to the already-resolved
@@ -234,9 +240,6 @@ public sealed class CraftingExecutionPlan
         SkipFinalIfEnough = planningSnapshot.SkipFinalIfEnough;
         RetainerRestock = planningSnapshot.RetainerRestock;
         AutoPurchaseBlockedDependencies = planningSnapshot.AutoPurchaseBlockedDependencies;
-        PreferMarketForSpecialCurrency = planningSnapshot.PreferMarketForSpecialCurrency;
-        PreferHQ = planningSnapshot.PreferHQ;
-        PreferVendors = planningSnapshot.PreferVendors;
         CurrentWorldOnly = planningSnapshot.CurrentWorldOnly;
         MaximumGilSpend = planningSnapshot.MaximumGilSpend;
         ReturnToHomeWorldBeforeCrafting = planningSnapshot.ReturnToHomeWorldBeforeCrafting;

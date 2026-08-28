@@ -3,12 +3,15 @@ using System.Collections.Generic;
 using Dalamud.Interface.Windowing;
 using Dalamud.Bindings.ImGui;
 using GatherBuddy.Crafting;
+using GatherBuddy.Crafting.Acquisition;
+using GatherBuddy.Marketboard;
 
 namespace GatherBuddy.Gui;
 
 public class CraftingStatusWindow : Window
 {
     private CraftingQueueProcessor? _queueProcessor;
+    private MarketplaceBuyListManager? _marketplaceBuyListManager;
     private bool? _pendingCollapseState = null;
     private bool _requestFocus = false;
     private bool _wasFocusedLastFrame = false;
@@ -29,7 +32,11 @@ public class CraftingStatusWindow : Window
 
     public void SetQueueProcessor(CraftingQueueProcessor? processor)
     {
+        if (processor == null && _marketplaceBuyListManager != null)
+            return;
         _queueProcessor = processor;
+        if (processor != null)
+            _marketplaceBuyListManager = null;
         ResetRemainingEstimateCache();
         if (processor == null)
         {
@@ -43,11 +50,18 @@ public class CraftingStatusWindow : Window
     }
 
     public bool HasActiveQueue
-        => _queueProcessor != null;
+        => _queueProcessor != null || _marketplaceBuyListManager?.IsBusy == true;
+
+    public void SetMarketplaceBuyListManager(MarketplaceBuyListManager manager)
+    {
+        _queueProcessor = null;
+        _marketplaceBuyListManager = manager;
+        OpenOrRestore();
+    }
 
     public void OpenOrRestore()
     {
-        if (_queueProcessor == null)
+        if (_queueProcessor == null && _marketplaceBuyListManager == null)
             return;
 
         IsOpen = true;
@@ -57,13 +71,17 @@ public class CraftingStatusWindow : Window
 
     public override bool DrawConditions()
     {
-        return _queueProcessor != null && IsOpen;
+        return (_queueProcessor != null || _marketplaceBuyListManager != null) && IsOpen;
     }
 
     public override void PreDraw()
     {
         if (!IsOpen)
             return;
+
+        WindowName = _marketplaceBuyListManager == null
+            ? "Crafting Status###GatherBuddyCraftingStatus"
+            : "Buy List Status###GatherBuddyCraftingStatus";
 
         if (_pendingCollapseState.HasValue)
         {
@@ -80,6 +98,11 @@ public class CraftingStatusWindow : Window
 
     public override void Draw()
     {
+        if (_marketplaceBuyListManager != null)
+        {
+            DrawMarketplaceBuyListStatus(_marketplaceBuyListManager);
+            return;
+        }
         if (_queueProcessor == null)
             return;
         
@@ -213,6 +236,56 @@ public class CraftingStatusWindow : Window
                     GatherBuddy.VulcanWindow.IsOpen = true;
                 }
             }
+        }
+    }
+
+    private void DrawMarketplaceBuyListStatus(MarketplaceBuyListManager manager)
+    {
+        ImGui.TextColored(new System.Numerics.Vector4(0.0f, 1.0f, 0.8f, 1.0f), "Buy List Active");
+        ImGui.Separator();
+        ImGui.Spacing();
+        ImGui.Text($"State: {(manager.CanResume ? "Paused" : manager.IsPaused ? "Pausing" : manager.IsBusy ? manager.Stage.ToString() : "Stopped")}");
+        ImGui.TextWrapped(manager.StatusText);
+        ImGui.Spacing();
+        ImGui.Separator();
+        ImGui.Spacing();
+
+        if (manager.IsBusy)
+        {
+            var drewControl = false;
+            if (manager.CanResume)
+            {
+                if (ImGui.Button("Resume"))
+                    manager.Resume();
+                drewControl = true;
+            }
+            else if (!manager.IsPaused)
+            {
+                if (ImGui.Button("Pause"))
+                    manager.Pause();
+                drewControl = true;
+            }
+            if (drewControl)
+                ImGui.SameLine();
+            if (ImGui.Button("Stop"))
+                manager.Stop();
+            return;
+        }
+
+        if (manager.LastResult is { } result)
+        {
+            ImGui.TextColored(
+                result.Status == LiveAcquisitionStatus.Completed
+                    ? new System.Numerics.Vector4(0.0f, 1.0f, 0.0f, 1.0f)
+                    : new System.Numerics.Vector4(1.0f, 0.25f, 0.25f, 1.0f),
+                result.Status == LiveAcquisitionStatus.Completed
+                    ? "Buy List Complete!"
+                    : "Buy List Stopped");
+        }
+        if (ImGui.Button("Close"))
+        {
+            IsOpen = false;
+            _marketplaceBuyListManager = null;
         }
     }
 

@@ -116,9 +116,15 @@ public class CraftingListManager
             existing.Ephemeral = list.Ephemeral;
             existing.RetainerRestock = list.RetainerRestock;
             existing.AutoPurchaseBlockedDependencies = list.AutoPurchaseBlockedDependencies;
-            existing.PreferMarketForSpecialCurrency = list.PreferMarketForSpecialCurrency;
-            existing.PreferHQ = list.PreferHQ;
-            existing.PreferVendors = list.PreferVendors;
+            existing.PurchaseItemPolicies = list.PurchaseItemPolicies.ToDictionary(
+                pair => pair.Key,
+                pair => new Acquisition.AcquisitionItemPurchasePolicy
+                {
+                    Source = pair.Value.Source,
+                    CurrencyIds = pair.Value.CurrencyIds?.ToArray(),
+                    PreferHQ = pair.Value.PreferHQ,
+                    UserConfigured = pair.Value.UserConfigured,
+                });
             existing.CurrentWorldOnly = list.CurrentWorldOnly;
             existing.MaximumGilSpend = list.MaximumGilSpend;
             existing.ReturnToHomeWorldBeforeCrafting = list.ReturnToHomeWorldBeforeCrafting;
@@ -625,9 +631,15 @@ public class CraftingListManager
             newList.RepairPercent         = source.RepairPercent;
             newList.RetainerRestock       = source.RetainerRestock;
             newList.AutoPurchaseBlockedDependencies = source.AutoPurchaseBlockedDependencies;
-            newList.PreferMarketForSpecialCurrency = source.PreferMarketForSpecialCurrency;
-            newList.PreferHQ              = source.PreferHQ;
-            newList.PreferVendors         = source.PreferVendors;
+            newList.PurchaseItemPolicies = source.PurchaseItemPolicies.ToDictionary(
+                pair => pair.Key,
+                pair => new Acquisition.AcquisitionItemPurchasePolicy
+                {
+                    Source = pair.Value.Source,
+                    CurrencyIds = pair.Value.CurrencyIds?.ToArray(),
+                    PreferHQ = pair.Value.PreferHQ,
+                    UserConfigured = pair.Value.UserConfigured,
+                });
             newList.CurrentWorldOnly      = source.CurrentWorldOnly;
             newList.MaximumGilSpend       = source.MaximumGilSpend;
             newList.ReturnToHomeWorldBeforeCrafting = source.ReturnToHomeWorldBeforeCrafting;

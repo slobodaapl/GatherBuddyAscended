@@ -210,7 +210,6 @@ public interface ILiveAcquisitionEnvironment
 
     Task<bool> NavigateToMarketBoardAsync(
         AcquisitionWorldRoute route,
-        TimeSpan timeout,
         CancellationToken cancellationToken);
 
     Task<LiveMarketListingsResponse> RequestLiveListingsAsync(

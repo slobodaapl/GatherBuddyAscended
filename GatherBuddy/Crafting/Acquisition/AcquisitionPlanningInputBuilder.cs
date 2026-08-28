@@ -80,6 +80,40 @@ public static unsafe class AcquisitionPlanningInputBuilder
         return BuildAcquisitionInput(dependencies, settings, currentWorldId, currentTerritoryId);
     }
 
+    public static BuildResult BuildConfiguration(CraftingExecutionPlan plan)
+    {
+        ArgumentNullException.ThrowIfNull(plan);
+
+        var currentWorldId = Dalamud.Objects.LocalPlayer?.CurrentWorld.RowId ?? 0u;
+        var currentTerritoryId = (uint)Dalamud.ClientState.TerritoryType;
+        var dependencies = BuildDependencies(plan, plan.CreateAcquisitionBoundaryPlan(IsCraftPrecraftUsable));
+        VendorShopResolver.InitializeAsync();
+        var vendorOffers = BuildVendorOffers(dependencies, currentTerritoryId);
+        var loadingReason = string.Empty;
+        if (!VendorShopResolver.IsInitialized || VendorShopResolver.IsInitializing)
+        {
+            loadingReason = "Loading vendor shop and unlock data.";
+        }
+        else if (!VendorNpcLocationCache.IsInitialized || VendorNpcLocationCache.IsInitializing)
+        {
+            VendorNpcLocationCache.InitializeAsync(VendorShopResolver.GetAllVendorNpcIds());
+            loadingReason = "Loading vendor route data.";
+        }
+
+        return new BuildResult
+        {
+            Input = new AcquisitionPlanningInput
+            {
+                Dependencies = dependencies,
+                VendorOffers = vendorOffers,
+                CurrentWorldId = currentWorldId,
+                CurrentTerritoryId = currentTerritoryId,
+            },
+            IsLoading = !string.IsNullOrWhiteSpace(loadingReason),
+            LoadingReason = loadingReason,
+        };
+    }
+
     /// <summary>
     /// Builds a live acquisition snapshot for persisted marketplace targets.
     /// These targets have no craft/gather path by design; the planner chooses

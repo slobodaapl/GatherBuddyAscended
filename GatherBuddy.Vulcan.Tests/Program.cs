@@ -2577,7 +2577,7 @@ CraftingProcessor.Dispose();
 
 CraftingProcessor.Setup();
 CraftingProcessor.RegisterSolver(new StandardSolverDefinition());
-var standardRecoveryCraft = craft with { CraftHQ = true };
+var standardRecoveryCraft = craft with { CraftHQ = true, CraftLevel = 91 };
 Require(CraftingProcessor.TryAdoptLiveCraft(
         standardRecoveryCraft,
         reconciledPrecise,

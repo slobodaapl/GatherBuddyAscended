@@ -1,8 +1,10 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using GatherBuddy.Config;
+using GatherBuddy.Crafting.Acquisition;
 using GatherBuddy.Marketboard;
 
 namespace GatherBuddy.Vulcan.Tests;
@@ -274,6 +276,46 @@ public static class MarketplaceAcceptanceTests
         require(dependencyDisposedAfterFetch,
             "marketboard dependencies must be disposed only after shared refresh fetches finish");
 
+        IReadOnlyList<uint>? probedItems = null;
+        using (var availabilityService = new MarketboardService(
+            marketFetch: null,
+            initializePersistentState: false,
+            availabilityFetch: (_, itemIds, _) =>
+            {
+                probedItems = itemIds;
+                return Task.FromResult(new UniversalisService.MarketDataFetchResult(
+                    new[]
+                    {
+                        new MarketItemData
+                        {
+                            ItemId = 21,
+                            Listings = new List<MarketListing>
+                            {
+                                new() { Quantity = 1, PricePerUnit = 100 },
+                            },
+                        },
+                    },
+                    HadApiError: false));
+            }))
+        {
+            var availability = await availabilityService.CheckAvailabilityAsync("Aether", new uint[] { 21, 22 });
+            require(probedItems?.SequenceEqual(new uint[] { 21, 22 }) == true
+                    && availability[21].State == MarketAvailabilityState.Available
+                    && availability[22].State == MarketAvailabilityState.Unavailable,
+                "cheap market probe must batch item IDs and distinguish an active listing from a confirmed empty result");
+        }
+
+        using (var failedAvailabilityService = new MarketboardService(
+            marketFetch: null,
+            initializePersistentState: false,
+            availabilityFetch: (_, _, _) => Task.FromResult(
+                new UniversalisService.MarketDataFetchResult(Array.Empty<MarketItemData>(), HadApiError: true))))
+        {
+            var availability = await failedAvailabilityService.CheckAvailabilityAsync("Aether", new uint[] { 23 });
+            require(availability[23].State == MarketAvailabilityState.Unknown,
+                "market probe API failure must remain unknown instead of falsely marking an item unavailable");
+        }
+
         var config = new Configuration
         {
             Version = 17,
@@ -288,9 +330,19 @@ public static class MarketplaceAcceptanceTests
                 && list.Entries.Count == 1
                 && list.Entries[0].TargetQuantity == 5,
             "marketplace list additions must merge inventory targets");
+        require(manager.SetItemPolicy(list.Id, 42, new AcquisitionItemPurchasePolicy
+                {
+                    Source = AcquisitionSourceSelection.Marketplace,
+                    CurrencyIds = new[] { AcquisitionCurrency.GilId },
+                    UserConfigured = true,
+                })
+                && list.PurchaseItemPolicies[42].Source == AcquisitionSourceSelection.Marketplace,
+            "marketplace lists must persist per-item purchase policies");
         manager.Clear();
-        require(list.Entries.Count == 0 && manager.StatusText.Contains("Cleared", StringComparison.Ordinal),
-            "marketplace list must support clearing all targets");
+        require(list.Entries.Count == 0
+                && list.PurchaseItemPolicies.Count == 0
+                && manager.StatusText.Contains("Cleared", StringComparison.Ordinal),
+            "clearing a marketplace list must remove targets and their purchase policies");
         var managed = manager.CreateManagedList();
         require(manager.AddItem(managed, 42, "Test Item", 1, 1)
                 && !config.MarketplaceBuyLists.Contains(managed),

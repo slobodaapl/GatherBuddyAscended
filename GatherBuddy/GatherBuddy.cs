@@ -147,6 +147,8 @@ public partial class GatherBuddy : IDalamudPlugin
     public static Gui.VulcanWindow? VulcanWindow { get; private set; }
     public static Gui.CraftingMaterialsWindow? CraftingMaterialsWindow { get; private set; }
     public static Gui.CraftingTreeWindow? CraftingTreeWindow { get; private set; }
+    public static Gui.CraftingPurchaseConfigurationWindow? CraftingPurchaseConfigurationWindow { get; private set; }
+    public static Gui.CraftingPurchasePlanWindow? CraftingPurchasePlanWindow { get; private set; }
     public static Gui.VendorBuyListWindow? VendorBuyListWindow { get; private set; }
     public static Gui.MarketplaceBuyListWindow? MarketplaceBuyListWindow { get; private set; }
     public static Gui.CollectablesWindow? CollectablesWindow { get; private set; }
@@ -172,6 +174,8 @@ public partial class GatherBuddy : IDalamudPlugin
     internal Gui.CraftingStatusWindow?               _craftingStatusWindow;
     internal Gui.CraftingMaterialsWindow?            _craftingMaterialsWindow;
     internal Gui.CraftingTreeWindow?                 _craftingTreeWindow;
+    internal Gui.CraftingPurchaseConfigurationWindow? _craftingPurchaseConfigurationWindow;
+    internal Gui.CraftingPurchasePlanWindow?         _craftingPurchasePlanWindow;
     internal Gui.VendorBuyListWindow?                _vendorBuyListWindow;
     internal Gui.MarketplaceBuyListWindow?           _marketplaceBuyListWindow;
     internal Gui.CollectablesWindow?                 _collectablesWindow;
@@ -302,6 +306,10 @@ public partial class GatherBuddy : IDalamudPlugin
             CraftingMaterialsWindow = _craftingMaterialsWindow;
             _craftingTreeWindow = new Gui.CraftingTreeWindow();
             CraftingTreeWindow = _craftingTreeWindow;
+            _craftingPurchaseConfigurationWindow = new Gui.CraftingPurchaseConfigurationWindow();
+            CraftingPurchaseConfigurationWindow = _craftingPurchaseConfigurationWindow;
+            _craftingPurchasePlanWindow = new Gui.CraftingPurchasePlanWindow();
+            CraftingPurchasePlanWindow = _craftingPurchasePlanWindow;
             _vendorBuyListWindow = new Gui.VendorBuyListWindow();
             VendorBuyListWindow = _vendorBuyListWindow;
             _marketplaceBuyListWindow = new Gui.MarketplaceBuyListWindow();
@@ -317,6 +325,8 @@ public partial class GatherBuddy : IDalamudPlugin
             WindowSystem.AddWindow(_craftingStatusWindow);
             WindowSystem.AddWindow(_craftingMaterialsWindow);
             WindowSystem.AddWindow(_craftingTreeWindow);
+            WindowSystem.AddWindow(_craftingPurchaseConfigurationWindow);
+            WindowSystem.AddWindow(_craftingPurchasePlanWindow);
             WindowSystem.AddWindow(_vendorBuyListWindow);
             WindowSystem.AddWindow(_marketplaceBuyListWindow);
             WindowSystem.AddWindow(_collectablesWindow);
@@ -1540,6 +1550,9 @@ public partial class GatherBuddy : IDalamudPlugin
         LiveAcquisitionExecutor = null;
         LiveAcquisitionEnvironment = null;
         _marketplaceBuyListWindow?.Dispose();
+        _craftingPurchaseConfigurationWindow?.Dispose();
+        CraftingPurchaseConfigurationWindow = null;
+        CraftingPurchasePlanWindow = null;
         MarketplaceBuyListManager = null;
         MarketplaceBuyListWindow = null;
         ControllerSupport?.Dispose();

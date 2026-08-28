@@ -34,6 +34,7 @@ public sealed class MarketboardService : IDisposable
     private readonly UniversalisService  _universalis = new();
     private readonly UniversalisCache    _sharedCache = new();
     private readonly Func<uint, string, bool, CancellationToken, Task<MarketItemData?>> _marketFetch;
+    private readonly Func<string, IReadOnlyList<uint>, CancellationToken, Task<UniversalisService.MarketDataFetchResult>> _availabilityFetch;
     private readonly bool            _persistentStateEnabled;
     private readonly System.Action?   _onUniversalisDisposed;
 
@@ -49,10 +50,13 @@ public sealed class MarketboardService : IDisposable
     internal MarketboardService(
         Func<uint, string, bool, CancellationToken, Task<MarketItemData?>>? marketFetch,
         bool initializePersistentState,
-        System.Action? onUniversalisDisposed = null)
+        System.Action? onUniversalisDisposed = null,
+        Func<string, IReadOnlyList<uint>, CancellationToken, Task<UniversalisService.MarketDataFetchResult>>? availabilityFetch = null)
     {
         _marketFetch = marketFetch ?? ((itemId, scope, canBeHq, cancellationToken)
             => FetchMarketItemAsync(itemId, scope, canBeHq, cancellationToken));
+        _availabilityFetch = availabilityFetch ?? ((scope, itemIds, cancellationToken)
+            => _universalis.GetMarketDataWithStatusAsync(scope, itemIds, 1, cancellationToken));
         _persistentStateEnabled = initializePersistentState;
         _onUniversalisDisposed = onUniversalisDisposed;
         if (initializePersistentState)
@@ -96,6 +100,50 @@ public sealed class MarketboardService : IDisposable
         {
             return false;
         }
+    }
+
+    public async Task<IReadOnlyDictionary<uint, MarketAvailability>> CheckAvailabilityAsync(
+        string scope,
+        IReadOnlyList<uint> itemIds,
+        CancellationToken cancellationToken = default)
+    {
+        var result = new Dictionary<uint, MarketAvailability>();
+        var lookup = new List<uint>();
+        foreach (var itemId in itemIds.Distinct())
+        {
+            if (IsKnownUnmarketable(itemId))
+                result[itemId] = new MarketAvailability(itemId, MarketAvailabilityState.Unavailable, "Item is not marketable.");
+            else
+                lookup.Add(itemId);
+        }
+
+        if (lookup.Count == 0)
+            return result;
+
+        var fetched = await _availabilityFetch(scope, lookup, cancellationToken).ConfigureAwait(false);
+        var byItem = fetched.Items.ToDictionary(item => item.ItemId);
+        foreach (var itemId in lookup)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var available = byItem.TryGetValue(itemId, out var item)
+                && item.Listings.Any(listing => listing.Quantity > 0
+                    && listing.PricePerUnit >= 0
+                    && listing.IsMannequin is not true
+                    && listing.IsSellingAsSet is not true);
+            var state = available
+                ? MarketAvailabilityState.Available
+                : fetched.HadApiError
+                    ? MarketAvailabilityState.Unknown
+                    : MarketAvailabilityState.Unavailable;
+            var reason = state switch
+            {
+                MarketAvailabilityState.Available => $"Available on {scope} markets.",
+                MarketAvailabilityState.Unavailable => $"No active listing on {scope} markets.",
+                _ => "Market availability could not be checked.",
+            };
+            result[itemId] = new MarketAvailability(itemId, state, reason);
+        }
+        return result;
     }
 
     public MarketItemData? GetCached(uint itemId, string scope)

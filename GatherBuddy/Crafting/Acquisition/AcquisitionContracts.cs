@@ -119,6 +119,25 @@ public sealed class AcquisitionPlanningSettings
     public bool PreferVendors { get; init; }
     public bool CurrentWorldOnly { get; init; }
     public long? MaximumGilSpend { get; init; }
+    public AcquisitionItemPurchasePolicy? DefaultItemPolicy { get; init; }
+    public IReadOnlyDictionary<uint, AcquisitionItemPurchasePolicy> ItemPolicies { get; init; }
+        = new Dictionary<uint, AcquisitionItemPurchasePolicy>();
+}
+
+public enum AcquisitionSourceSelection
+{
+    Either,
+    Vendor,
+    Marketplace,
+}
+
+public sealed class AcquisitionItemPurchasePolicy
+{
+    public AcquisitionSourceSelection Source { get; init; } = AcquisitionSourceSelection.Either;
+    /// <summary>Null means automatic currency selection; otherwise the complete accepted cost vector.</summary>
+    public IReadOnlyList<uint>? CurrencyIds { get; init; }
+    public bool PreferHQ { get; init; }
+    public bool UserConfigured { get; init; }
 }
 
 public static class AcquisitionCurrency

@@ -36,9 +36,7 @@ public class CraftingListDefinition
     public int RepairPercent { get; set; } = 50;
     public bool RetainerRestock { get; set; } = false;
     public bool AutoPurchaseBlockedDependencies { get; set; } = false;
-    public bool PreferMarketForSpecialCurrency { get; set; } = true;
-    public bool PreferHQ { get; set; } = false;
-    public bool PreferVendors { get; set; } = false;
+    public Dictionary<uint, Acquisition.AcquisitionItemPurchasePolicy> PurchaseItemPolicies { get; set; } = new();
     public bool CurrentWorldOnly { get; set; } = false;
     public long? MaximumGilSpend { get; set; }
     public bool ReturnToHomeWorldBeforeCrafting { get; set; } = false;
@@ -85,11 +83,24 @@ public class CraftingListDefinition
         => new()
         {
             AutoPurchaseBlockedDependencies = AutoPurchaseBlockedDependencies,
-            PreferMarketForSpecialCurrency = PreferMarketForSpecialCurrency,
-            PreferHQ = PreferHQ,
-            PreferVendors = PreferVendors,
             CurrentWorldOnly = CurrentWorldOnly,
             MaximumGilSpend = MaximumGilSpend,
+            DefaultItemPolicy = new Acquisition.AcquisitionItemPurchasePolicy(),
+            ItemPolicies = PurchaseItemPolicies
+                .Where(pair => pair.Value.UserConfigured)
+                .ToDictionary(
+                pair => pair.Key,
+                pair => ClonePurchasePolicy(pair.Value)),
+        };
+
+    private static Acquisition.AcquisitionItemPurchasePolicy ClonePurchasePolicy(
+        Acquisition.AcquisitionItemPurchasePolicy policy)
+        => new()
+        {
+            Source = policy.Source,
+            CurrencyIds = policy.CurrencyIds?.ToArray(),
+            PreferHQ = policy.PreferHQ,
+            UserConfigured = policy.UserConfigured,
         };
 
     public void BuildExpandedList()
@@ -128,9 +139,9 @@ public class CraftingListDefinition
             RepairPercent = RepairPercent,
             RetainerRestock = RetainerRestock,
             AutoPurchaseBlockedDependencies = AutoPurchaseBlockedDependencies,
-            PreferMarketForSpecialCurrency = PreferMarketForSpecialCurrency,
-            PreferHQ = PreferHQ,
-            PreferVendors = PreferVendors,
+            PurchaseItemPolicies = PurchaseItemPolicies.ToDictionary(
+                pair => pair.Key,
+                pair => ClonePurchasePolicy(pair.Value)),
             CurrentWorldOnly = CurrentWorldOnly,
             MaximumGilSpend = MaximumGilSpend,
             ReturnToHomeWorldBeforeCrafting = ReturnToHomeWorldBeforeCrafting,
